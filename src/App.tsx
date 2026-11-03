@@ -58,7 +58,7 @@ export function App() {
 
   const [domainInput, setDomainInput] = useState<string>(() => {
     const params = new URLSearchParams(window.location.search);
-    return params.get('name') ?? loadSnapshots()[0]?.displayDomain ?? 'cloudflare.com';
+    return params.get('name') ?? loadSnapshots()[0]?.displayDomain ?? 'digdeep.butter.eu';
   });
   const [selectedTypes, setSelectedTypes] = useState<string[]>(() => {
     const params = new URLSearchParams(window.location.search);
@@ -325,7 +325,7 @@ export function App() {
                 type="text"
                 value={domainInput}
                 onChange={(e) => setDomainInput(e.target.value)}
-                placeholder="Enter domain name (e.g. cloudflare.com, dnssec-failed.org, www.iana.org, .) — press / to focus"
+                placeholder="Enter domain name (e.g. digdeep.butter.eu, dnssec-failed.org, www.iana.org, .) — press / to focus"
                 className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 pl-10 pr-10 py-2.5 font-mono text-sm text-slate-900 dark:text-slate-100 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20"
               />
               <kbd className="hidden sm:inline-block absolute right-3 top-1/2 -translate-y-1/2 rounded border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-400">
