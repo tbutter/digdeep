@@ -214,4 +214,17 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
     },
     25000
   );
+
+  it(
+    'ignores out-of-bailiwick nameserver IP authority SOAs (e.g. commerzbank.de NS under commerzbank.com)',
+    async () => {
+      const snap = await runDnsvizAnalysis('commerzbank.de', {
+        queryTypes: ['A', 'AAAA'],
+      });
+      expect(snap.zones.map((z) => z.zoneName)).toEqual(['.', 'de.', 'commerzbank.de.']);
+      expect(snap.overallStatus).toBe('insecure');
+      expect(snap.findings.some((f) => f.severity === 'error')).toBe(false);
+    },
+    25000
+  );
 });

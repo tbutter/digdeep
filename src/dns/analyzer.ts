@@ -43,7 +43,7 @@ import type {
   ZoneAnalysis,
 } from './types';
 
-export const SNAPSHOT_ENGINE_VERSION = 2;
+export const SNAPSHOT_ENGINE_VERSION = 3;
 
 export interface AnalyzeOptions extends DohClientOptions {
   queryTypes?: string[];
@@ -452,7 +452,8 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
 
   const validationEpochSec = Math.floor(validatedAt / 1000);
   const enabledAnchors = trustAnchors.filter((ta) => ta.enabled);
-  const cdLogs = queries.filter((q) => q.cd);
+  // Exclude auxiliary out-of-bailiwick nameserver IP lookups (`doBit: false`) from DNSSEC zone/RRset reconstruction
+  const cdLogs = queries.filter((q) => q.cd && !q.purpose.startsWith('Nameserver IP'));
 
   // Reconstruct set of discovered zones from DNSKEY queries + SOA records
   const allZones = new Set<string>(['.']);
@@ -1469,6 +1470,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
 
   // 7. Packet Size / UDP Fragmentation & Extended DNS Error (RFC 8914) Audit Checks
   for (const log of queries) {
+    if (log.purpose.startsWith('Nameserver IP')) continue;
     if (log.packet.wireSize > 1232) {
       findings.push({
         id: `warn-size-${log.id}`,
