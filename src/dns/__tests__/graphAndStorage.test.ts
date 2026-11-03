@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { buildChainGraph } from '../../graph/layout';
+import {
+  buildChainGraph,
+  computeDefaultGraphTransform,
+  computeFitAllGraphTransform,
+} from '../../graph/layout';
 import {
   clearUnpinnedSnapshots,
   deleteSnapshot,
@@ -63,6 +67,24 @@ describe('Graph Layout Engine & LocalStorage History Store', () => {
           expect(overlapX && overlapY).toBe(false);
         }
       }
+
+      // Verify default zoom scales the longest (widest) horizontal box to 90% of viewport width
+      const widestBox = [...graph.zones, ...graph.nodes].reduce((best, item) =>
+        item.width > best.width ? item : best
+      );
+      for (const [vpWidth, vpHeight] of [
+        [1400, 800],
+        [390, 700],
+      ] as const) {
+        const defaultTx = computeDefaultGraphTransform(graph, vpWidth, vpHeight);
+        expect(widestBox.width * defaultTx.scale).toBeCloseTo(vpWidth * 0.9, 5);
+        const renderedLeft = defaultTx.x + widestBox.x * defaultTx.scale;
+        expect(Math.abs(renderedLeft - vpWidth * 0.05)).toBeLessThanOrEqual(1);
+      }
+
+      const fitAllTx = computeFitAllGraphTransform(graph, 1400, 800);
+      expect(graph.width * fitAllTx.scale).toBeLessThanOrEqual(1400);
+      expect(graph.height * fitAllTx.scale).toBeLessThanOrEqual(800);
 
       // Persist in localStorage
       saveSnapshot(snap1);

@@ -697,8 +697,8 @@ export function buildChainGraph(
     });
   }
 
-  let maxRight = 800;
-  let maxBottom = 600;
+  let maxRight = 400;
+  let maxBottom = 300;
   for (const zb of graphZones) {
     maxRight = Math.max(maxRight, zb.x + zb.width + CANVAS_PAD);
     maxBottom = Math.max(maxBottom, zb.y + zb.height + CANVAS_PAD);
@@ -711,4 +711,90 @@ export function buildChainGraph(
     nodes: graphNodes,
     edges,
   };
+}
+
+export const MIN_GRAPH_ZOOM = 0.08;
+export const MAX_GRAPH_ZOOM = 6.0;
+
+/**
+ * Computes the default pan/zoom transform so the longest (widest) horizontal box
+ * takes 90% of `viewportWidth`, centered horizontally with clean top toolbar clearance.
+ */
+export function computeDefaultGraphTransform(
+  graph: ComputedGraph,
+  viewportWidth: number,
+  viewportHeight: number
+): { x: number; y: number; scale: number } {
+  if (viewportWidth <= 0 || viewportHeight <= 0) {
+    return { x: 40, y: 24, scale: 1 };
+  }
+
+  let widestBox: { x: number; width: number } | null = null;
+  for (const z of graph.zones) {
+    if (!widestBox || z.width > widestBox.width) {
+      widestBox = { x: z.x, width: z.width };
+    }
+  }
+  for (const n of graph.nodes) {
+    if (!widestBox || n.width > widestBox.width) {
+      widestBox = { x: n.x, width: n.width };
+    }
+  }
+
+  const targetBoxWidth = widestBox ? widestBox.width : graph.width;
+  const rawScale = (viewportWidth * 0.9) / Math.max(1, targetBoxWidth);
+  const scale = Math.max(MIN_GRAPH_ZOOM, Math.min(MAX_GRAPH_ZOOM, rawScale));
+
+  const boxCenterX = widestBox ? widestBox.x + widestBox.width / 2 : graph.width / 2;
+  const x = Math.round(viewportWidth / 2 - boxCenterX * scale);
+
+  const minTopY =
+    graph.zones.length > 0
+      ? Math.min(...graph.zones.map((z) => z.y))
+      : graph.nodes.length > 0
+        ? Math.min(...graph.nodes.map((n) => n.y))
+        : 0;
+  const maxBottomY =
+    graph.zones.length > 0
+      ? Math.max(...graph.zones.map((z) => z.y + z.height))
+      : graph.nodes.length > 0
+        ? Math.max(...graph.nodes.map((n) => n.y + n.height))
+        : graph.height;
+
+  const topClearance = 56;
+  const bottomClearance = 36;
+  const contentHeightScaled = (maxBottomY - minTopY) * scale;
+  const availableHeight = viewportHeight - topClearance - bottomClearance;
+
+  const y =
+    contentHeightScaled <= availableHeight
+      ? Math.round(topClearance + (availableHeight - contentHeightScaled) / 2 - minTopY * scale)
+      : Math.round(topClearance - minTopY * scale);
+
+  return { x, y, scale };
+}
+
+/**
+ * Computes a bird's-eye transform fitting the entire chain inside the viewport.
+ */
+export function computeFitAllGraphTransform(
+  graph: ComputedGraph,
+  viewportWidth: number,
+  viewportHeight: number
+): { x: number; y: number; scale: number } {
+  if (viewportWidth <= 0 || viewportHeight <= 0) {
+    return { x: 40, y: 24, scale: 1 };
+  }
+  const topClearance = 52;
+  const padX = 40;
+  const padBottom = 32;
+  const availW = Math.max(80, viewportWidth - padX * 2);
+  const availH = Math.max(80, viewportHeight - topClearance - padBottom);
+  const scale = Math.max(
+    MIN_GRAPH_ZOOM,
+    Math.min(MAX_GRAPH_ZOOM, Math.min(availW / graph.width, availH / graph.height))
+  );
+  const x = Math.round((viewportWidth - graph.width * scale) / 2);
+  const y = Math.round(topClearance + (availH - graph.height * scale) / 2);
+  return { x, y, scale };
 }

@@ -4,6 +4,7 @@ import {
   FileImage,
   HelpCircle,
   Maximize2,
+  RotateCcw,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
@@ -13,12 +14,15 @@ import {
   useMemo,
   useRef,
   useState,
-  type MouseEvent as ReactMouseEvent,
-  type WheelEvent as ReactWheelEvent,
+  type PointerEvent as ReactPointerEvent,
 } from 'react';
 import type { AnalysisSnapshot, ValidationStatus } from '../dns/types';
 import {
   buildChainGraph,
+  computeDefaultGraphTransform,
+  computeFitAllGraphTransform,
+  MAX_GRAPH_ZOOM,
+  MIN_GRAPH_ZOOM,
   type GraphEdge,
   type GraphFilterOptions,
   type GraphNode,
@@ -85,36 +89,82 @@ export function ChainGraphView({
   focusedTargetId?: string | null;
 }) {
   const graph = useMemo(() => buildChainGraph(snapshot, filters), [snapshot, filters]);
+  const rootWrapperRef = useRef<HTMLDivElement | null>(null);
+  const graphPaneRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
 
   const [transform, setTransform] = useState({ x: 40, y: 24, scale: 1 });
   const [dragging, setDragging] = useState(false);
   const dragStartRef = useRef({ clientX: 0, clientY: 0, startX: 0, startY: 0, moved: false });
+  const activePointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchStateRef = useRef<{ dist: number; midX: number; midY: number } | null>(null);
 
   const [selection, setSelection] = useState<GraphSelection | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [showLegend, setShowLegend] = useState(false);
+  const hasInitializedZoomRef = useRef(false);
 
-  const fitToViewport = useCallback(() => {
+  const resetToDefaultZoom = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
+    hasInitializedZoomRef.current = true;
+    setTransform(computeDefaultGraphTransform(graph, rect.width, rect.height));
+  }, [graph]);
 
-    const scaleX = (rect.width - 48) / graph.width;
-    const scaleY = (rect.height - 48) / graph.height;
-    const scale = Math.max(0.32, Math.min(1.08, Math.min(scaleX, scaleY)));
-    const x = Math.round((rect.width - graph.width * scale) / 2);
-    const y = Math.max(16, Math.round((rect.height - graph.height * scale) / 2));
-    setTransform({ x, y, scale });
-  }, [graph.width, graph.height]);
+  const fitEntireChain = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    setTransform(computeFitAllGraphTransform(graph, rect.width, rect.height));
+  }, [graph]);
+
+  const zoomAroundPoint = useCallback((factor: number, focalX: number, focalY: number) => {
+    setTransform((prev) => {
+      const nextScale = Math.max(MIN_GRAPH_ZOOM, Math.min(MAX_GRAPH_ZOOM, prev.scale * factor));
+      const ratio = nextScale / prev.scale;
+      return {
+        scale: nextScale,
+        x: focalX - (focalX - prev.x) * ratio,
+        y: focalY - (focalY - prev.y) * ratio,
+      };
+    });
+  }, []);
+
+  const zoomAroundCenter = useCallback(
+    (factor: number) => {
+      const el = containerRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      zoomAroundPoint(factor, rect.width / 2, rect.height / 2);
+    },
+    [zoomAroundPoint]
+  );
 
   useEffect(() => {
+    hasInitializedZoomRef.current = false;
     setSelection(null);
-    const id = requestAnimationFrame(fitToViewport);
-    return () => cancelAnimationFrame(id);
-  }, [snapshot.id, fitToViewport]);
+    const id = requestAnimationFrame(resetToDefaultZoom);
+
+    const el = containerRef.current;
+    let observer: ResizeObserver | null = null;
+    if (el && typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(() => {
+        if (!hasInitializedZoomRef.current) {
+          resetToDefaultZoom();
+        }
+      });
+      observer.observe(el);
+    }
+
+    return () => {
+      cancelAnimationFrame(id);
+      observer?.disconnect();
+    };
+  }, [snapshot.id, resetToDefaultZoom]);
 
   // Focus node/zone when user clicks a finding in Audit panel
   useEffect(() => {
@@ -142,54 +192,178 @@ export function ChainGraphView({
     }
   }, [focusedTargetId, graph.nodes, graph.zones]);
 
-  const handleWheel = (e: ReactWheelEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    const el = containerRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const cursorX = e.clientX - rect.left;
-    const cursorY = e.clientY - rect.top;
+  // Attach non-passive (`{ passive: false }`) native wheel & Safari gesture listeners so
+  // trackpad pinch (`ctrlKey` wheel / WebKit gesture) and mouse wheel NEVER zoom or scroll the full browser page!
+  useEffect(() => {
+    const paneEl = graphPaneRef.current;
+    const rootEl = rootWrapperRef.current;
+    if (!paneEl || !rootEl) return;
 
-    const factor = e.deltaY < 0 ? 1.12 : 0.89;
-    setTransform((prev) => {
-      const nextScale = Math.max(0.22, Math.min(2.4, prev.scale * factor));
-      const ratio = nextScale / prev.scale;
-      return {
-        scale: nextScale,
-        x: cursorX - (cursorX - prev.x) * ratio,
-        y: cursorY - (cursorY - prev.y) * ratio,
-      };
-    });
-  };
+    let lastWheelTime = 0;
 
-  const handleMouseDown = (e: ReactMouseEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
-    setDragging(true);
-    dragStartRef.current = {
-      clientX: e.clientX,
-      clientY: e.clientY,
-      startX: transform.x,
-      startY: transform.y,
-      moved: false,
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      lastWheelTime = performance.now();
+
+      const canvasEl = containerRef.current;
+      if (!canvasEl) return;
+      const rect = canvasEl.getBoundingClientRect();
+      const cursorX = e.clientX - rect.left;
+      const cursorY = e.clientY - rect.top;
+
+      // Normalize wheel delta across pixel (trackpad), line (mouse wheel), and page modes
+      const rawDelta =
+        e.deltaMode === 1 ? e.deltaY * 18 : e.deltaMode === 2 ? e.deltaY * 300 : e.deltaY;
+      const clampedDelta = Math.max(-120, Math.min(120, rawDelta));
+      const sensitivity = e.ctrlKey ? 0.0085 : 0.0022;
+      const factor = Math.exp(-clampedDelta * sensitivity);
+
+      zoomAroundPoint(factor, cursorX, cursorY);
     };
-  };
 
-  const handleMouseMove = (e: ReactMouseEvent<HTMLDivElement>) => {
-    if (!dragging) return;
-    const dx = e.clientX - dragStartRef.current.clientX;
-    const dy = e.clientY - dragStartRef.current.clientY;
-    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+    // Guard against accidental Ctrl+Wheel / trackpad pinch leaking onto full-page browser zoom over inspector drawer
+    const onRootWheelGuard = (e: WheelEvent) => {
+      if (e.ctrlKey) {
+        e.preventDefault();
+      }
+    };
+
+    // Safari macOS/iOS proprietary GestureEvent trackpad/pinch guard
+    let prevGestureScale = 1;
+    const onGestureStart = (e: Event) => {
+      e.preventDefault();
+      prevGestureScale = (e as unknown as { scale?: number }).scale ?? 1;
+    };
+    const onGestureChange = (e: Event) => {
+      e.preventDefault();
+      // Skip if standard ctrl+wheel events are already driving this pinch
+      if (performance.now() - lastWheelTime < 80) return;
+      const ge = e as unknown as { scale?: number; clientX?: number; clientY?: number };
+      const curScale = ge.scale ?? 1;
+      if (prevGestureScale > 0 && curScale > 0) {
+        const factor = curScale / prevGestureScale;
+        prevGestureScale = curScale;
+        const canvasEl = containerRef.current;
+        if (canvasEl) {
+          const rect = canvasEl.getBoundingClientRect();
+          const cx = (ge.clientX ?? rect.left + rect.width / 2) - rect.left;
+          const cy = (ge.clientY ?? rect.top + rect.height / 2) - rect.top;
+          zoomAroundPoint(factor, cx, cy);
+        }
+      }
+    };
+    const onGestureEnd = (e: Event) => {
+      e.preventDefault();
+    };
+
+    paneEl.addEventListener('wheel', onWheel, { passive: false });
+    rootEl.addEventListener('wheel', onRootWheelGuard, { passive: false });
+    paneEl.addEventListener('gesturestart', onGestureStart, { passive: false });
+    paneEl.addEventListener('gesturechange', onGestureChange, { passive: false });
+    paneEl.addEventListener('gestureend', onGestureEnd, { passive: false });
+
+    return () => {
+      paneEl.removeEventListener('wheel', onWheel);
+      rootEl.removeEventListener('wheel', onRootWheelGuard);
+      paneEl.removeEventListener('gesturestart', onGestureStart);
+      paneEl.removeEventListener('gesturechange', onGestureChange);
+      paneEl.removeEventListener('gestureend', onGestureEnd);
+    };
+  }, [zoomAroundPoint]);
+
+  const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (activePointersRef.current.size === 1) {
+      setDragging(true);
+      pinchStateRef.current = null;
+      dragStartRef.current = {
+        clientX: e.clientX,
+        clientY: e.clientY,
+        startX: transform.x,
+        startY: transform.y,
+        moved: false,
+      };
+    } else if (activePointersRef.current.size === 2) {
+      // Transition cleanly into two-finger pinch-to-zoom + pan
       dragStartRef.current.moved = true;
+      const pts = Array.from(activePointersRef.current.values());
+      const dist = Math.max(1, Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y));
+      const midX = (pts[0].x + pts[1].x) / 2;
+      const midY = (pts[0].y + pts[1].y) / 2;
+      pinchStateRef.current = { dist, midX, midY };
     }
-    setTransform((prev) => ({
-      ...prev,
-      x: dragStartRef.current.startX + dx,
-      y: dragStartRef.current.startY + dy,
-    }));
   };
 
-  const handleMouseUp = () => {
-    setDragging(false);
+  const handlePointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!activePointersRef.current.has(e.pointerId)) return;
+    activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (activePointersRef.current.size === 2 && pinchStateRef.current) {
+      const canvasEl = containerRef.current;
+      if (!canvasEl) return;
+      const rect = canvasEl.getBoundingClientRect();
+      const pts = Array.from(activePointersRef.current.values());
+      const newDist = Math.max(1, Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y));
+      const newMidX = (pts[0].x + pts[1].x) / 2;
+      const newMidY = (pts[0].y + pts[1].y) / 2;
+
+      const prev = pinchStateRef.current;
+      const factor = newDist / prev.dist;
+      const panDx = newMidX - prev.midX;
+      const panDy = newMidY - prev.midY;
+      const focalX = newMidX - rect.left;
+      const focalY = newMidY - rect.top;
+
+      pinchStateRef.current = { dist: newDist, midX: newMidX, midY: newMidY };
+
+      setTransform((cur) => {
+        const nextScale = Math.max(MIN_GRAPH_ZOOM, Math.min(MAX_GRAPH_ZOOM, cur.scale * factor));
+        const ratio = nextScale / cur.scale;
+        const pannedX = cur.x + panDx;
+        const pannedY = cur.y + panDy;
+        return {
+          scale: nextScale,
+          x: focalX - (focalX - pannedX) * ratio,
+          y: focalY - (focalY - pannedY) * ratio,
+        };
+      });
+      return;
+    }
+
+    if (activePointersRef.current.size === 1 && dragging) {
+      const dx = e.clientX - dragStartRef.current.clientX;
+      const dy = e.clientY - dragStartRef.current.clientY;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
+        dragStartRef.current.moved = true;
+      }
+      setTransform((prev) => ({
+        ...prev,
+        x: dragStartRef.current.startX + dx,
+        y: dragStartRef.current.startY + dy,
+      }));
+    }
+  };
+
+  const handlePointerEnd = (e: ReactPointerEvent<HTMLDivElement>) => {
+    activePointersRef.current.delete(e.pointerId);
+    if (activePointersRef.current.size < 2) {
+      pinchStateRef.current = null;
+    }
+    if (activePointersRef.current.size === 1) {
+      const remaining = Array.from(activePointersRef.current.values())[0];
+      dragStartRef.current = {
+        clientX: remaining.x,
+        clientY: remaining.y,
+        startX: transform.x,
+        startY: transform.y,
+        moved: true,
+      };
+    } else if (activePointersRef.current.size === 0) {
+      setDragging(false);
+    }
   };
 
   // Connected lineage highlight set when hovering or selecting a node/edge
@@ -283,9 +457,15 @@ export function ChainGraphView({
   const isDark = theme === 'dark';
 
   return (
-    <div className="flex flex-col lg:flex-row h-[calc(100vh-215px)] min-h-[540px] rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#090d16] overflow-hidden relative">
+    <div
+      ref={rootWrapperRef}
+      className="flex flex-col lg:flex-row h-[calc(100vh-215px)] min-h-[540px] rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#090d16] overflow-hidden relative"
+    >
       {/* Main Interactive Canvas */}
-      <div className="flex-1 relative flex flex-col min-h-[380px] overflow-hidden">
+      <div
+        ref={graphPaneRef}
+        className="flex-1 relative flex flex-col min-h-[380px] overflow-hidden overscroll-contain"
+      >
         {/* Floating Graph Controls Toolbar */}
         <div className="absolute top-3 left-3 right-3 z-10 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
           <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-slate-200/90 dark:border-slate-800/90 bg-white/90 dark:bg-slate-900/90 backdrop-blur px-2.5 py-1.5 shadow-sm pointer-events-auto text-xs">
@@ -315,22 +495,18 @@ export function ChainGraphView({
           <div className="flex items-center gap-1.5 rounded-lg border border-slate-200/90 dark:border-slate-800/90 bg-white/90 dark:bg-slate-900/90 backdrop-blur px-2 py-1 shadow-sm pointer-events-auto text-xs">
             <button
               type="button"
-              onClick={() =>
-                setTransform((p) => ({ ...p, scale: Math.min(2.4, p.scale * 1.2) }))
-              }
+              onClick={() => zoomAroundCenter(1.22)}
               className="p-1.5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 cursor-pointer"
               title="Zoom in"
             >
               <ZoomIn className="w-3.5 h-3.5" />
             </button>
-            <span className="font-mono text-[11px] text-slate-500 w-11 text-center">
+            <span className="font-mono text-[11px] text-slate-500 w-12 text-center">
               {Math.round(transform.scale * 100)}%
             </span>
             <button
               type="button"
-              onClick={() =>
-                setTransform((p) => ({ ...p, scale: Math.max(0.22, p.scale / 1.2) }))
-              }
+              onClick={() => zoomAroundCenter(1 / 1.22)}
               className="p-1.5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 cursor-pointer"
               title="Zoom out"
             >
@@ -338,9 +514,17 @@ export function ChainGraphView({
             </button>
             <button
               type="button"
-              onClick={fitToViewport}
+              onClick={resetToDefaultZoom}
               className="p-1.5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 cursor-pointer"
-              title="Fit chain to viewport"
+              title="Reset default zoom (widest box = 90% width)"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={fitEntireChain}
+              className="p-1.5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 cursor-pointer"
+              title="Fit entire chain in viewport"
             >
               <Maximize2 className="w-3.5 h-3.5" />
             </button>
@@ -426,18 +610,21 @@ export function ChainGraphView({
 
         {/* Bottom-left Hint */}
         <div className="absolute bottom-2.5 left-3 z-10 pointer-events-none text-[11px] text-slate-400 dark:text-slate-500 bg-white/75 dark:bg-slate-950/75 px-2.5 py-1 rounded-md backdrop-blur-sm">
-          Scroll to zoom · Drag to pan · Click any zone, DNSKEY, RRset, or RRSIG edge to inspect
+          Scroll or pinch to zoom · Drag to pan · Click any zone, DNSKEY, RRset, or RRSIG edge to inspect
         </div>
 
         {/* Pan/Zoom SVG Surface */}
         <div
           ref={containerRef}
-          onWheel={handleWheel}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={handleMouseUp}
-          className={`flex-1 w-full h-full graph-canvas-bg select-none ${
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerEnd}
+          onPointerCancel={handlePointerEnd}
+          onPointerLeave={(e) => {
+            if (e.pointerType === 'mouse') handlePointerEnd(e);
+          }}
+          style={{ touchAction: 'none', overscrollBehavior: 'contain' }}
+          className={`flex-1 w-full h-full graph-canvas-bg select-none touch-none overscroll-contain ${
             dragging ? 'cursor-grabbing' : 'cursor-grab'
           }`}
         >
