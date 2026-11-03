@@ -296,6 +296,30 @@ export const DOH_SERVER_PRESETS: DohServerPreset[] = [
     provider: 'Quad9 Host',
     description: 'Quad9 hostname DoH endpoint',
   },
+  {
+    url: 'https://unfiltered.joindns4.eu/dns-query',
+    shortLabel: 'unfiltered.joindns4.eu',
+    provider: 'DNS4EU',
+    description: 'DNS4EU Unfiltered European Resolver',
+  },
+  {
+    url: 'https://child-noads.joindns4.eu/dns-query',
+    shortLabel: 'child-noads.joindns4.eu',
+    provider: 'DNS4EU Child + NoAds',
+    description: 'DNS4EU Child Protection & Ad-Blocking Resolver',
+  },
+  {
+    url: 'https://protective.joindns4.eu/dns-query',
+    shortLabel: 'protective.joindns4.eu',
+    provider: 'DNS4EU Protective',
+    description: 'DNS4EU Protective Threat-Blocking Resolver',
+  },
+  {
+    url: 'https://wikimedia-dns.org/dns-query',
+    shortLabel: 'wikimedia-dns.org',
+    provider: 'Wikimedia',
+    description: 'Wikimedia Public DNS Resolver',
+  },
 ];
 
 /**

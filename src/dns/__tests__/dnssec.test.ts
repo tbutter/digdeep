@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { reverifySnapshot, runDnsvizAnalysis } from '../analyzer';
-import { IANA_ROOT_TRUST_ANCHORS, normalizeDohEndpoint, RR_TYPES } from '../constants';
+import {
+  DOH_SERVER_PRESETS,
+  IANA_ROOT_TRUST_ANCHORS,
+  normalizeDohEndpoint,
+  RR_TYPES,
+} from '../constants';
 import { computeDsDigest, computeNsec3Hash } from '../crypto';
 import {
   base64ToBytes,
@@ -175,6 +180,11 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
       expect(normalizeDohEndpoint('https://custom.example.org/doh')).toBe(
         'https://custom.example.org/doh'
       );
+      const presetUrls = DOH_SERVER_PRESETS.map((p) => p.url);
+      expect(presetUrls).toContain('https://unfiltered.joindns4.eu/dns-query');
+      expect(presetUrls).toContain('https://child-noads.joindns4.eu/dns-query');
+      expect(presetUrls).toContain('https://protective.joindns4.eu/dns-query');
+      expect(presetUrls).toContain('https://wikimedia-dns.org/dns-query');
 
       const googleSnap = await runDnsvizAnalysis('cloudflare.com', {
         endpoint: 'https://8.8.8.8/dns-query',
