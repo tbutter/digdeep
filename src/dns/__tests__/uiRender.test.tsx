@@ -147,7 +147,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v1');
+    expect(swCode).toContain('digdeep-shell-v2');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge when navigator.onLine is false
@@ -168,6 +168,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     try {
       const appHtml = renderToStaticMarkup(<App />);
       expect(appHtml).toContain('Offline · Local History');
+      expect(appHtml).not.toContain('Presets:');
     } finally {
       if (prevOnline) {
         Object.defineProperty(globalThis.navigator, 'onLine', prevOnline);

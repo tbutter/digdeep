@@ -26,7 +26,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { StatusBadge } from './components/StatusBadge';
 import { ZonesPanel } from './components/ZonesPanel';
 import { reverifySnapshot, runDnsvizAnalysis } from './dns/analyzer';
-import { formatDohShortLabel, PRESET_DOMAINS, QUERYABLE_RR_TYPES } from './dns/constants';
+import { formatDohShortLabel, QUERYABLE_RR_TYPES } from './dns/constants';
 import type { AnalysisProgress, AnalysisSnapshot } from './dns/types';
 import { usePwaInstall } from './pwa/usePwaInstall';
 import {
@@ -334,11 +334,28 @@ export function App() {
             </button>
           </form>
 
-          {/* RR Type Selector + Preset Scenarios */}
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-            <div className="flex flex-wrap items-center gap-1">
-              <span className="text-[11px] font-medium text-slate-500 mr-1">RR Types:</span>
-              {PRIMARY_TYPES.map((t) => {
+          {/* RR Type Selector */}
+          <div className="flex flex-wrap items-center gap-1 text-xs">
+            <span className="text-[11px] font-medium text-slate-500 mr-1">RR Types:</span>
+            {PRIMARY_TYPES.map((t) => {
+              const active = selectedTypes.includes(t);
+              return (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => toggleQueryType(t)}
+                  className={`px-2 py-0.5 rounded-md font-mono text-[11px] transition-colors cursor-pointer ${
+                    active
+                      ? 'bg-cyan-500 text-slate-950 font-bold'
+                      : 'bg-slate-200/70 dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:bg-slate-300/70 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  {t}
+                </button>
+              );
+            })}
+            {showExtraTypes &&
+              EXTRA_TYPES.map((t) => {
                 const active = selectedTypes.includes(t);
                 return (
                   <button
@@ -355,63 +372,14 @@ export function App() {
                   </button>
                 );
               })}
-              {showExtraTypes &&
-                EXTRA_TYPES.map((t) => {
-                  const active = selectedTypes.includes(t);
-                  return (
-                    <button
-                      key={t}
-                      type="button"
-                      onClick={() => toggleQueryType(t)}
-                      className={`px-2 py-0.5 rounded-md font-mono text-[11px] transition-colors cursor-pointer ${
-                        active
-                          ? 'bg-cyan-500 text-slate-950 font-bold'
-                          : 'bg-slate-200/70 dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:bg-slate-300/70 dark:hover:bg-slate-800'
-                      }`}
-                    >
-                      {t}
-                    </button>
-                  );
-                })}
-              <button
-                type="button"
-                onClick={() => setShowExtraTypes((v) => !v)}
-                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] text-slate-500 hover:text-cyan-500 cursor-pointer"
-              >
-                <SlidersHorizontal className="w-3 h-3" />
-                {showExtraTypes ? 'Less' : 'More'}
-              </button>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="text-[11px] text-slate-500">Presets:</span>
-              {PRESET_DOMAINS.map((preset) => {
-                const dotColor =
-                  preset.badge === 'secure'
-                    ? 'bg-emerald-500'
-                    : preset.badge === 'bogus'
-                      ? 'bg-rose-500'
-                      : preset.badge === 'cname'
-                        ? 'bg-violet-500'
-                        : 'bg-slate-400';
-                return (
-                  <button
-                    key={preset.domain}
-                    type="button"
-                    title={preset.description}
-                    onClick={() => {
-                      setDomainInput(preset.domain);
-                      setSelectedTypes(preset.types);
-                      void executeAnalysis(preset.domain, preset.types);
-                    }}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/80 hover:border-cyan-500 px-2.5 py-0.5 font-mono text-[11px] text-slate-700 dark:text-slate-300 transition-colors cursor-pointer"
-                  >
-                    <span className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />
-                    {preset.label}
-                  </button>
-                );
-              })}
-            </div>
+            <button
+              type="button"
+              onClick={() => setShowExtraTypes((v) => !v)}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] text-slate-500 hover:text-cyan-500 cursor-pointer"
+            >
+              <SlidersHorizontal className="w-3 h-3" />
+              {showExtraTypes ? 'Less' : 'More'}
+            </button>
           </div>
         </div>
       </header>
