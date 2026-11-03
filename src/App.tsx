@@ -2,6 +2,7 @@ import {
   Activity,
   AlertTriangle,
   Clock,
+  Download,
   Globe,
   Moon,
   Network,
@@ -13,6 +14,7 @@ import {
   SlidersHorizontal,
   Sun,
   Terminal,
+  WifiOff,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { AuditPanel } from './components/AuditPanel';
@@ -26,6 +28,7 @@ import { ZonesPanel } from './components/ZonesPanel';
 import { reverifySnapshot, runDnsvizAnalysis } from './dns/analyzer';
 import { formatDohShortLabel, PRESET_DOMAINS, QUERYABLE_RR_TYPES } from './dns/constants';
 import type { AnalysisProgress, AnalysisSnapshot } from './dns/types';
+import { usePwaInstall } from './pwa/usePwaInstall';
 import {
   clearUnpinnedSnapshots,
   deleteSnapshot,
@@ -77,6 +80,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [focusedGraphTarget, setFocusedGraphTarget] = useState<string | null>(null);
+  const { canInstall, isOffline, promptInstall } = usePwaInstall();
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const didBootRef = useRef(false);
@@ -161,11 +165,12 @@ export function App() {
   useEffect(() => {
     if (didBootRef.current) return;
     didBootRef.current = true;
+    if (isOffline && snapshots.length > 0) return;
     const params = new URLSearchParams(window.location.search);
-    if (params.has('name') || snapshots.length === 0) {
+    if (!isOffline && (params.has('name') || snapshots.length === 0)) {
       void executeAnalysis(domainInput, selectedTypes);
     }
-  }, [domainInput, executeAnalysis, selectedTypes, snapshots.length]);
+  }, [domainInput, executeAnalysis, isOffline, selectedTypes, snapshots.length]);
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -231,6 +236,28 @@ export function App() {
           </div>
 
           <div className="flex items-center gap-2">
+            {isOffline && (
+              <span
+                className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs font-medium text-amber-700 dark:text-amber-300"
+                title="Offline mode — browse, inspect, diff, and re-verify saved snapshots locally"
+              >
+                <WifiOff className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Offline · Local History</span>
+              </span>
+            )}
+
+            {canInstall && (
+              <button
+                type="button"
+                onClick={() => void promptInstall()}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 px-3 py-1.5 text-xs font-semibold text-cyan-700 dark:text-cyan-300 transition-colors cursor-pointer"
+                title="Install DigDeep as a standalone Progressive Web App"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Install App</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={() => setActiveTab('history')}
