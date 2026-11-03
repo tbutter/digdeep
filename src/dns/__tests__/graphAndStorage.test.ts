@@ -85,8 +85,8 @@ describe('Graph Layout Engine & LocalStorage History Store', () => {
         for (const box of allBoxes) {
           const topPx = defaultTx.y + box.y * defaultTx.scale;
           const bottomPx = defaultTx.y + (box.y + box.height) * defaultTx.scale;
-          expect(topPx).toBeGreaterThanOrEqual(50);
-          expect(bottomPx).toBeLessThanOrEqual(canvasHeight);
+          expect(topPx).toBeGreaterThanOrEqual(24);
+          expect(bottomPx).toBeLessThanOrEqual(canvasHeight - 20);
         }
       }
 

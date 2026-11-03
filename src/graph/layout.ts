@@ -715,7 +715,9 @@ export function buildChainGraph(
 
 export const MIN_GRAPH_ZOOM = 0.08;
 export const MAX_GRAPH_ZOOM = 6.0;
-export const MIN_GRAPH_CANVAS_HEIGHT = 460;
+export const MIN_GRAPH_CANVAS_HEIGHT = 360;
+
+const CANVAS_VERTICAL_CLEARANCE = 28;
 
 function getGraphContentBounds(graph: ComputedGraph): {
   widestBox: { x: number; width: number } | null;
@@ -757,19 +759,17 @@ export function computeDefaultCanvasHeight(
   const rawScale = (effectiveWidth * 0.9) / Math.max(1, targetBoxWidth);
   const scale = Math.max(MIN_GRAPH_ZOOM, Math.min(MAX_GRAPH_ZOOM, rawScale));
 
-  const topClearance = effectiveWidth < 680 ? 96 : 64;
-  const bottomClearance = 44;
   const contentHeightScaled = Math.max(0, maxBottomY - minTopY) * scale;
 
   return Math.max(
     MIN_GRAPH_CANVAS_HEIGHT,
-    Math.ceil(topClearance + contentHeightScaled + bottomClearance)
+    Math.ceil(CANVAS_VERTICAL_CLEARANCE * 2 + contentHeightScaled)
   );
 }
 
 /**
  * Computes the default pan/zoom transform so the longest (widest) horizontal box
- * takes 90% of `viewportWidth`, centered horizontally with clean top toolbar clearance.
+ * takes 90% of `viewportWidth`, centered horizontally within the dedicated SVG canvas.
  */
 export function computeDefaultGraphTransform(
   graph: ComputedGraph,
@@ -794,15 +794,15 @@ export function computeDefaultGraphTransform(
   const boxCenterX = widestBox ? widestBox.x + widestBox.width / 2 : graph.width / 2;
   const x = Math.round(viewportWidth / 2 - boxCenterX * scale);
 
-  const topClearance = viewportWidth < 680 ? 96 : 64;
-  const bottomClearance = 44;
   const contentHeightScaled = Math.max(0, maxBottomY - minTopY) * scale;
-  const availableHeight = effectiveHeight - topClearance - bottomClearance;
+  const availableHeight = effectiveHeight - CANVAS_VERTICAL_CLEARANCE * 2;
 
   const y =
     contentHeightScaled <= availableHeight
-      ? Math.round(topClearance + (availableHeight - contentHeightScaled) / 2 - minTopY * scale)
-      : Math.round(topClearance - minTopY * scale);
+      ? Math.round(
+          CANVAS_VERTICAL_CLEARANCE + (availableHeight - contentHeightScaled) / 2 - minTopY * scale
+        )
+      : Math.round(CANVAS_VERTICAL_CLEARANCE - minTopY * scale);
 
   return { x, y, scale };
 }
@@ -818,16 +818,15 @@ export function computeFitAllGraphTransform(
   if (viewportWidth <= 0 || viewportHeight <= 0) {
     return { x: 40, y: 24, scale: 1 };
   }
-  const topClearance = 52;
-  const padX = 40;
-  const padBottom = 32;
+  const padX = 24;
+  const padY = 24;
   const availW = Math.max(80, viewportWidth - padX * 2);
-  const availH = Math.max(80, viewportHeight - topClearance - padBottom);
+  const availH = Math.max(80, viewportHeight - padY * 2);
   const scale = Math.max(
     MIN_GRAPH_ZOOM,
     Math.min(MAX_GRAPH_ZOOM, Math.min(availW / graph.width, availH / graph.height))
   );
   const x = Math.round((viewportWidth - graph.width * scale) / 2);
-  const y = Math.round(topClearance + (availH - graph.height * scale) / 2);
+  const y = Math.round(padY + (availH - graph.height * scale) / 2);
   return { x, y, scale };
 }

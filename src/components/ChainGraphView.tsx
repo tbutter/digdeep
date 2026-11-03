@@ -539,15 +539,14 @@ export function ChainGraphView({
       ref={rootWrapperRef}
       className="flex flex-col lg:flex-row lg:items-start gap-3 relative"
     >
-      {/* Main Interactive Canvas sized to fit the full graph height */}
+      {/* Main Interactive Graph Card — note: use `lg:flex-1` (NOT `flex-1` in mobile `flex-col`, which sets `flex-basis: 0%` vertically and collapses height!) */}
       <div
         ref={graphPaneRef}
-        style={{ height: `${canvasHeight}px` }}
-        className="flex-1 w-full relative flex flex-col rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#090d16] overflow-hidden"
+        className="w-full lg:w-auto lg:flex-1 lg:min-w-0 flex flex-col rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#090d16] overflow-hidden"
       >
-        {/* Floating Graph Controls Toolbar */}
-        <div className="absolute top-3 left-3 right-3 z-10 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
-          <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-slate-200/90 dark:border-slate-800/90 bg-white/90 dark:bg-slate-900/90 backdrop-blur px-2.5 py-1.5 shadow-sm pointer-events-auto text-xs">
+        {/* Dedicated Non-Overlapping Graph Controls Header Bar */}
+        <div className="px-2.5 sm:px-3 py-2 border-b border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-900/95 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
             <label className="inline-flex items-center gap-1.5 cursor-pointer select-none text-slate-700 dark:text-slate-300 pr-2 border-r border-slate-200 dark:border-slate-800">
               <input
                 type="checkbox"
@@ -559,7 +558,7 @@ export function ChainGraphView({
               />
               <span>Standby Keys</span>
             </label>
-            <label className="inline-flex items-center gap-1.5 cursor-pointer select-none text-slate-700 dark:text-slate-300 pl-1">
+            <label className="inline-flex items-center gap-1.5 cursor-pointer select-none text-slate-700 dark:text-slate-300">
               <input
                 type="checkbox"
                 checked={filters.showSoaAndNs}
@@ -571,7 +570,7 @@ export function ChainGraphView({
             </label>
           </div>
 
-          <div className="flex items-center gap-1.5 rounded-lg border border-slate-200/90 dark:border-slate-800/90 bg-white/90 dark:bg-slate-900/90 backdrop-blur px-2 py-1 shadow-sm pointer-events-auto text-xs">
+          <div className="flex flex-wrap items-center gap-1 sm:gap-1.5 text-xs">
             <button
               type="button"
               onClick={() => zoomAroundCenter(1.22)}
@@ -580,7 +579,7 @@ export function ChainGraphView({
             >
               <ZoomIn className="w-3.5 h-3.5" />
             </button>
-            <span className="font-mono text-[11px] text-slate-500 w-12 text-center">
+            <span className="font-mono text-[11px] text-slate-500 w-11 text-center">
               {Math.round(transform.scale * 100)}%
             </span>
             <button
@@ -611,88 +610,38 @@ export function ChainGraphView({
             <button
               type="button"
               onClick={() => exportDiagram('svg')}
-              className="inline-flex items-center gap-1 px-2 py-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium cursor-pointer"
+              className="inline-flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium cursor-pointer"
               title="Export vector SVG diagram"
             >
               <Download className="w-3.5 h-3.5" />
-              SVG
+              <span>SVG</span>
             </button>
             <button
               type="button"
               onClick={() => exportDiagram('png')}
-              className="inline-flex items-center gap-1 px-2 py-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium cursor-pointer"
+              className="inline-flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium cursor-pointer"
               title="Export high-DPI PNG image"
             >
               <FileImage className="w-3.5 h-3.5" />
-              PNG
+              <span>PNG</span>
             </button>
             <div className="h-4 w-px bg-slate-200 dark:bg-slate-800 mx-0.5" />
             <button
               type="button"
               onClick={() => setShowLegend((v) => !v)}
-              className={`inline-flex items-center gap-1 px-2 py-1 rounded font-medium cursor-pointer ${
+              className={`inline-flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded font-medium cursor-pointer ${
                 showLegend
                   ? 'bg-cyan-500/15 text-cyan-600 dark:text-cyan-300'
                   : 'hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300'
               }`}
             >
               <HelpCircle className="w-3.5 h-3.5" />
-              Legend
+              <span>Legend</span>
             </button>
           </div>
         </div>
 
-        {/* Interactive Legend Overlay */}
-        {showLegend && (
-          <div className="absolute top-14 right-3 z-20 w-72 rounded-xl border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur p-3.5 shadow-xl text-xs space-y-2.5">
-            <div className="font-semibold text-slate-900 dark:text-slate-100">
-              DNSViz Chain-of-Trust Legend
-            </div>
-            <div className="space-y-1.5">
-              {(
-                [
-                  ['secure', 'Verified cryptographic chain from Trust Anchor'],
-                  ['warning', 'Valid signature with RFC 8624 / expiry warning'],
-                  ['insecure', 'Provably unsigned delegation (NSEC / NSEC3)'],
-                  ['bogus', 'Cryptographic failure, expired sig, or missing SEP'],
-                ] as [ValidationStatus, string][]
-              ).map(([st, desc]) => (
-                <div key={st} className="flex items-start gap-2">
-                  <span
-                    className="w-2.5 h-2.5 rounded-full mt-1 shrink-0"
-                    style={{ backgroundColor: STATUS_META[st].svgStroke }}
-                  />
-                  <div>
-                    <span className="font-mono font-semibold text-[11px]">
-                      {STATUS_META[st].label}:
-                    </span>{' '}
-                    <span className="text-slate-600 dark:text-slate-400">{desc}</span>
-                  </div>
-                </div>
-              ))}
-              <div className="flex items-start gap-2 pt-1 border-t border-slate-200 dark:border-slate-800">
-                <span className="w-2.5 h-2.5 rounded-full mt-1 shrink-0 bg-violet-500" />
-                <div>
-                  <span className="font-mono font-semibold text-[11px]">CNAME ALIAS:</span>{' '}
-                  <span className="text-slate-600 dark:text-slate-400">
-                    Canonical name redirection (intra- or cross-zone)
-                  </span>
-                </div>
-              </div>
-              <div className="text-[11px] text-slate-500 pt-1">
-                Double-ring capsules denote SEP / KSK / Trust Anchor keys. Click any zone, node, or
-                edge to inspect raw crypto &amp; records.
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Bottom-left Hint */}
-        <div className="absolute bottom-2.5 left-3 z-10 pointer-events-none text-[11px] text-slate-400 dark:text-slate-500 bg-white/75 dark:bg-slate-950/75 px-2.5 py-1 rounded-md backdrop-blur-sm">
-          Pinch or Shift + Scroll to zoom · Drag to pan · Click any zone, DNSKEY, RRset, or RRSIG edge to inspect
-        </div>
-
-        {/* Pan/Zoom SVG Surface */}
+        {/* Pan/Zoom SVG Surface with explicit un-collapsible pixel height */}
         <div
           ref={containerRef}
           onPointerDown={handlePointerDown}
@@ -702,17 +651,66 @@ export function ChainGraphView({
           onPointerLeave={(e) => {
             if (e.pointerType === 'mouse') handlePointerEnd(e);
           }}
-          style={{ touchAction: 'pan-y' }}
-          className={`flex-1 w-full h-full graph-canvas-bg select-none touch-pan-y ${
+          style={{
+            height: `${canvasHeight}px`,
+            minHeight: `${canvasHeight}px`,
+            touchAction: 'pan-y',
+          }}
+          className={`w-full shrink-0 relative overflow-hidden graph-canvas-bg select-none touch-pan-y ${
             dragging ? 'cursor-grabbing' : 'cursor-grab'
           }`}
         >
+          {/* Interactive Legend Overlay */}
+          {showLegend && (
+            <div className="absolute top-3 right-3 z-20 max-w-[calc(100%-1.5rem)] w-72 rounded-xl border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur p-3.5 shadow-xl text-xs space-y-2.5">
+              <div className="font-semibold text-slate-900 dark:text-slate-100">
+                DNSViz Chain-of-Trust Legend
+              </div>
+              <div className="space-y-1.5">
+                {(
+                  [
+                    ['secure', 'Verified cryptographic chain from Trust Anchor'],
+                    ['warning', 'Valid signature with RFC 8624 / expiry warning'],
+                    ['insecure', 'Provably unsigned delegation (NSEC / NSEC3)'],
+                    ['bogus', 'Cryptographic failure, expired sig, or missing SEP'],
+                  ] as [ValidationStatus, string][]
+                ).map(([st, desc]) => (
+                  <div key={st} className="flex items-start gap-2">
+                    <span
+                      className="w-2.5 h-2.5 rounded-full mt-1 shrink-0"
+                      style={{ backgroundColor: STATUS_META[st].svgStroke }}
+                    />
+                    <div>
+                      <span className="font-mono font-semibold text-[11px]">
+                        {STATUS_META[st].label}:
+                      </span>{' '}
+                      <span className="text-slate-600 dark:text-slate-400">{desc}</span>
+                    </div>
+                  </div>
+                ))}
+                <div className="flex items-start gap-2 pt-1 border-t border-slate-200 dark:border-slate-800">
+                  <span className="w-2.5 h-2.5 rounded-full mt-1 shrink-0 bg-violet-500" />
+                  <div>
+                    <span className="font-mono font-semibold text-[11px]">CNAME ALIAS:</span>{' '}
+                    <span className="text-slate-600 dark:text-slate-400">
+                      Canonical name redirection (intra- or cross-zone)
+                    </span>
+                  </div>
+                </div>
+                <div className="text-[11px] text-slate-500 pt-1">
+                  Double-ring capsules denote SEP / KSK / Trust Anchor keys. Click any zone, node, or
+                  edge to inspect raw crypto &amp; records.
+                </div>
+              </div>
+            </div>
+          )}
+
           <svg
             ref={svgRef}
             width="100%"
-            height="100%"
+            height={canvasHeight}
             xmlns="http://www.w3.org/2000/svg"
-            style={{ fontFamily: 'Inter, system-ui, sans-serif' }}
+            style={{ display: 'block', fontFamily: 'Inter, system-ui, sans-serif' }}
           >
             <defs>
               {(['secure', 'warning', 'insecure', 'bogus', 'indeterminate'] as ValidationStatus[]).map(
@@ -1010,6 +1008,11 @@ export function ChainGraphView({
               })}
             </g>
           </svg>
+        </div>
+
+        {/* Dedicated Non-Overlapping Hint Footer */}
+        <div className="px-3 py-1.5 border-t border-slate-200/80 dark:border-slate-800/80 bg-white/85 dark:bg-slate-950/85 text-[11px] text-slate-500 dark:text-slate-400">
+          Pinch or Shift + Scroll to zoom · Drag to pan · Tap or click any zone, DNSKEY, RRset, or RRSIG edge to inspect
         </div>
       </div>
 

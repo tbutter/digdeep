@@ -46,6 +46,8 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(graphHtml).toContain('<svg');
       expect(graphHtml).toContain('iana.org.');
       expect(graphHtml).toContain('cloudflare.net.');
+      expect(graphHtml).toContain('lg:flex-1');
+      expect(graphHtml).toMatch(/min-height:\d+px/);
 
       const bogusGraphHtml = renderToStaticMarkup(
         <ChainGraphView
@@ -147,7 +149,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v9');
+    expect(swCode).toContain('digdeep-shell-v10');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge when navigator.onLine is false
