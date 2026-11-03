@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   buildChainGraph,
+  computeDefaultCanvasHeight,
   computeDefaultGraphTransform,
   computeFitAllGraphTransform,
 } from '../../graph/layout';
@@ -68,18 +69,25 @@ describe('Graph Layout Engine & LocalStorage History Store', () => {
         }
       }
 
-      // Verify default zoom scales the longest (widest) horizontal box to 90% of viewport width
-      const widestBox = [...graph.zones, ...graph.nodes].reduce((best, item) =>
+      // Verify default zoom scales widest box to 90% width and standard canvas height fits full graph
+      const allBoxes = [...graph.zones, ...graph.nodes];
+      const widestBox = allBoxes.reduce((best, item) =>
         item.width > best.width ? item : best
       );
-      for (const [vpWidth, vpHeight] of [
-        [1400, 800],
-        [390, 700],
-      ] as const) {
-        const defaultTx = computeDefaultGraphTransform(graph, vpWidth, vpHeight);
+      for (const vpWidth of [1400, 390] as const) {
+        const canvasHeight = computeDefaultCanvasHeight(graph, vpWidth);
+        const defaultTx = computeDefaultGraphTransform(graph, vpWidth, canvasHeight);
         expect(widestBox.width * defaultTx.scale).toBeCloseTo(vpWidth * 0.9, 5);
         const renderedLeft = defaultTx.x + widestBox.x * defaultTx.scale;
         expect(Math.abs(renderedLeft - vpWidth * 0.05)).toBeLessThanOrEqual(1);
+
+        // Every zone & node must fit cleanly inside [0, canvasHeight] at default zoom
+        for (const box of allBoxes) {
+          const topPx = defaultTx.y + box.y * defaultTx.scale;
+          const bottomPx = defaultTx.y + (box.y + box.height) * defaultTx.scale;
+          expect(topPx).toBeGreaterThanOrEqual(50);
+          expect(bottomPx).toBeLessThanOrEqual(canvasHeight);
+        }
       }
 
       const fitAllTx = computeFitAllGraphTransform(graph, 1400, 800);

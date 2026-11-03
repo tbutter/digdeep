@@ -19,6 +19,7 @@ import {
 import type { AnalysisSnapshot, ValidationStatus } from '../dns/types';
 import {
   buildChainGraph,
+  computeDefaultCanvasHeight,
   computeDefaultGraphTransform,
   computeFitAllGraphTransform,
   MAX_GRAPH_ZOOM,
@@ -94,32 +95,56 @@ export function ChainGraphView({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
 
-  const [transform, setTransform] = useState({ x: 40, y: 24, scale: 1 });
+  const getEstimatedWidth = () =>
+    typeof window !== 'undefined' && typeof window.innerWidth === 'number' && window.innerWidth > 0
+      ? Math.min(1552, Math.max(320, window.innerWidth - 48))
+      : 1200;
+
+  const [wrapperWidth, setWrapperWidth] = useState<number>(getEstimatedWidth);
+  const canvasHeight = useMemo(
+    () => computeDefaultCanvasHeight(graph, wrapperWidth),
+    [graph, wrapperWidth]
+  );
+
+  const [transform, setTransform] = useState(() => {
+    const w = getEstimatedWidth();
+    const h = computeDefaultCanvasHeight(graph, w);
+    return computeDefaultGraphTransform(graph, w, h);
+  });
   const [dragging, setDragging] = useState(false);
   const dragStartRef = useRef({ clientX: 0, clientY: 0, startX: 0, startY: 0, moved: false });
-  const activePointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const pinchStateRef = useRef<{ dist: number; midX: number; midY: number } | null>(null);
 
   const [selection, setSelection] = useState<GraphSelection | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [showLegend, setShowLegend] = useState(false);
-  const hasInitializedZoomRef = useRef(false);
+  const hasUserZoomedRef = useRef(false);
 
   const resetToDefaultZoom = useCallback(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return;
-    hasInitializedZoomRef.current = true;
-    setTransform(computeDefaultGraphTransform(graph, rect.width, rect.height));
-  }, [graph]);
+    const paneEl = containerRef.current ?? rootWrapperRef.current;
+    const measuredW = paneEl ? paneEl.getBoundingClientRect().width : 0;
+    const w = measuredW > 0 ? measuredW : wrapperWidth;
+    const h = computeDefaultCanvasHeight(graph, w);
+    hasUserZoomedRef.current = false;
+    if (measuredW > 0 && !selection) {
+      setWrapperWidth(measuredW);
+    }
+    setTransform(computeDefaultGraphTransform(graph, w, h));
+  }, [graph, wrapperWidth, selection]);
 
   const fitEntireChain = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
-    setTransform(computeFitAllGraphTransform(graph, rect.width, rect.height));
+    const visibleViewportHeight =
+      typeof window !== 'undefined' &&
+      typeof window.innerHeight === 'number' &&
+      window.innerHeight > 0
+        ? Math.min(rect.height, Math.max(360, window.innerHeight - 190))
+        : rect.height;
+    hasUserZoomedRef.current = true;
+    setTransform(computeFitAllGraphTransform(graph, rect.width, visibleViewportHeight));
   }, [graph]);
 
   const zoomAroundPoint = useCallback((factor: number, focalX: number, focalY: number) => {
@@ -139,32 +164,56 @@ export function ChainGraphView({
       const el = containerRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
-      zoomAroundPoint(factor, rect.width / 2, rect.height / 2);
+      const hasWinHeight =
+        typeof window !== 'undefined' &&
+        typeof window.innerHeight === 'number' &&
+        window.innerHeight > 0;
+      const visibleTop = hasWinHeight ? Math.max(0, -rect.top) : 0;
+      const visibleBottom = hasWinHeight
+        ? Math.min(rect.height, window.innerHeight - rect.top)
+        : rect.height;
+      const focalY =
+        visibleBottom > visibleTop ? (visibleTop + visibleBottom) / 2 : rect.height / 2;
+      hasUserZoomedRef.current = true;
+      zoomAroundPoint(factor, rect.width / 2, focalY);
     },
     [zoomAroundPoint]
   );
 
+  // Reset to default 90%-width zoom + full-graph canvas height whenever snapshot or filters change
   useEffect(() => {
-    hasInitializedZoomRef.current = false;
+    hasUserZoomedRef.current = false;
     setSelection(null);
-    const id = requestAnimationFrame(resetToDefaultZoom);
+    const id = requestAnimationFrame(() => {
+      const rootEl = rootWrapperRef.current;
+      const w =
+        rootEl && rootEl.getBoundingClientRect().width > 0
+          ? rootEl.getBoundingClientRect().width
+          : getEstimatedWidth();
+      setWrapperWidth(w);
+      const h = computeDefaultCanvasHeight(graph, w);
+      setTransform(computeDefaultGraphTransform(graph, w, h));
+    });
+    return () => cancelAnimationFrame(id);
+  }, [snapshot.id, graph]);
 
-    const el = containerRef.current;
-    let observer: ResizeObserver | null = null;
-    if (el && typeof ResizeObserver !== 'undefined') {
-      observer = new ResizeObserver(() => {
-        if (!hasInitializedZoomRef.current) {
-          resetToDefaultZoom();
-        }
-      });
-      observer.observe(el);
-    }
-
-    return () => {
-      cancelAnimationFrame(id);
-      observer?.disconnect();
-    };
-  }, [snapshot.id, resetToDefaultZoom]);
+  // Keep wrapperWidth (and default zoom if user hasn't manually zoomed/panned) synced to container width
+  useEffect(() => {
+    const rootEl = rootWrapperRef.current;
+    if (!rootEl || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      const nextW = entry ? entry.contentRect.width : rootEl.getBoundingClientRect().width;
+      if (nextW <= 0) return;
+      setWrapperWidth((prev) => (Math.abs(prev - nextW) >= 1 ? nextW : prev));
+      if (!hasUserZoomedRef.current) {
+        const nextH = computeDefaultCanvasHeight(graph, nextW);
+        setTransform(computeDefaultGraphTransform(graph, nextW, nextH));
+      }
+    });
+    observer.observe(rootEl);
+    return () => observer.disconnect();
+  }, [graph]);
 
   // Focus node/zone when user clicks a finding in Audit panel
   useEffect(() => {
@@ -175,12 +224,19 @@ export function ChainGraphView({
       const el = containerRef.current;
       if (el) {
         const rect = el.getBoundingClientRect();
-        const scale = Math.max(transform.scale, 0.85);
-        setTransform({
-          scale,
-          x: rect.width / 2 - (matchedNode.x + matchedNode.width / 2) * scale,
-          y: rect.height / 2 - (matchedNode.y + matchedNode.height / 2) * scale,
-        });
+        const nodeCenterY = transform.y + (matchedNode.y + matchedNode.height / 2) * transform.scale;
+        if (
+          typeof window !== 'undefined' &&
+          typeof window.scrollTo === 'function' &&
+          typeof window.scrollY === 'number' &&
+          typeof window.innerHeight === 'number'
+        ) {
+          const pageTargetY = Math.max(
+            0,
+            window.scrollY + rect.top + nodeCenterY - window.innerHeight / 2
+          );
+          window.scrollTo({ top: pageTargetY, behavior: 'smooth' });
+        }
       }
       return;
     }
@@ -192,44 +248,59 @@ export function ChainGraphView({
     }
   }, [focusedTargetId, graph.nodes, graph.zones]);
 
-  // Attach non-passive (`{ passive: false }`) native wheel & Safari gesture listeners so
-  // trackpad pinch (`ctrlKey` wheel / WebKit gesture) and mouse wheel NEVER zoom or scroll the full browser page!
+  // Plain scroll scrolls the full page; trackpad/touchscreen pinch or Shift+Scroll zooms the graph!
   useEffect(() => {
     const paneEl = graphPaneRef.current;
     const rootEl = rootWrapperRef.current;
-    if (!paneEl || !rootEl) return;
+    const canvasEl = containerRef.current;
+    if (!paneEl || !rootEl || !canvasEl) return;
 
-    let lastWheelTime = 0;
+    let lastWheelZoomTime = 0;
 
     const onWheel = (e: WheelEvent) => {
+      const isPinchOrCtrl = e.ctrlKey || e.metaKey;
+      const isShiftZoom = e.shiftKey;
+
+      // Let normal vertical/horizontal scroll pass straight through to scroll the full page
+      if (!isPinchOrCtrl && !isShiftZoom) {
+        return;
+      }
+
       e.preventDefault();
       e.stopPropagation();
-      lastWheelTime = performance.now();
+      lastWheelZoomTime = performance.now();
 
-      const canvasEl = containerRef.current;
-      if (!canvasEl) return;
       const rect = canvasEl.getBoundingClientRect();
       const cursorX = e.clientX - rect.left;
       const cursorY = e.clientY - rect.top;
 
-      // Normalize wheel delta across pixel (trackpad), line (mouse wheel), and page modes
+      // Many OS/browsers remap Shift + vertical mouse wheel into deltaX (with deltaY === 0)
+      const primaryDelta =
+        isShiftZoom && Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (primaryDelta === 0) return;
+
       const rawDelta =
-        e.deltaMode === 1 ? e.deltaY * 18 : e.deltaMode === 2 ? e.deltaY * 300 : e.deltaY;
-      const clampedDelta = Math.max(-120, Math.min(120, rawDelta));
-      const sensitivity = e.ctrlKey ? 0.0085 : 0.0022;
+        e.deltaMode === 1
+          ? primaryDelta * 28
+          : e.deltaMode === 2
+            ? primaryDelta * 300
+            : primaryDelta;
+      const clampedDelta = Math.max(-140, Math.min(140, rawDelta));
+      const sensitivity = isPinchOrCtrl ? 0.0085 : 0.0025;
       const factor = Math.exp(-clampedDelta * sensitivity);
 
+      hasUserZoomedRef.current = true;
       zoomAroundPoint(factor, cursorX, cursorY);
     };
 
-    // Guard against accidental Ctrl+Wheel / trackpad pinch leaking onto full-page browser zoom over inspector drawer
+    // Guard against accidental trackpad pinch (ctrlKey wheel) over inspector drawer zooming full browser page
     const onRootWheelGuard = (e: WheelEvent) => {
-      if (e.ctrlKey) {
+      if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
       }
     };
 
-    // Safari macOS/iOS proprietary GestureEvent trackpad/pinch guard
+    // Safari macOS/iOS proprietary GestureEvent trackpad/pinch support
     let prevGestureScale = 1;
     const onGestureStart = (e: Event) => {
       e.preventDefault();
@@ -237,24 +308,81 @@ export function ChainGraphView({
     };
     const onGestureChange = (e: Event) => {
       e.preventDefault();
-      // Skip if standard ctrl+wheel events are already driving this pinch
-      if (performance.now() - lastWheelTime < 80) return;
+      if (performance.now() - lastWheelZoomTime < 80) return;
       const ge = e as unknown as { scale?: number; clientX?: number; clientY?: number };
       const curScale = ge.scale ?? 1;
       if (prevGestureScale > 0 && curScale > 0) {
         const factor = curScale / prevGestureScale;
         prevGestureScale = curScale;
-        const canvasEl = containerRef.current;
-        if (canvasEl) {
-          const rect = canvasEl.getBoundingClientRect();
-          const cx = (ge.clientX ?? rect.left + rect.width / 2) - rect.left;
-          const cy = (ge.clientY ?? rect.top + rect.height / 2) - rect.top;
-          zoomAroundPoint(factor, cx, cy);
-        }
+        const rect = canvasEl.getBoundingClientRect();
+        const cx = (ge.clientX ?? rect.left + rect.width / 2) - rect.left;
+        const cy = (ge.clientY ?? rect.top + rect.height / 2) - rect.top;
+        hasUserZoomedRef.current = true;
+        zoomAroundPoint(factor, cx, cy);
       }
     };
     const onGestureEnd = (e: Event) => {
       e.preventDefault();
+    };
+
+    // Touchscreen: 1 finger scrolls the page natively (`touch-action: pan-y`), 2 fingers pinch-zoom + pan
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length >= 2) {
+        e.preventDefault();
+        dragStartRef.current.moved = true;
+        const t0 = e.touches[0];
+        const t1 = e.touches[1];
+        const dist = Math.max(1, Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY));
+        const midX = (t0.clientX + t1.clientX) / 2;
+        const midY = (t0.clientY + t1.clientY) / 2;
+        pinchStateRef.current = { dist, midX, midY };
+      }
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length >= 2) {
+        e.preventDefault();
+        const rect = canvasEl.getBoundingClientRect();
+        const t0 = e.touches[0];
+        const t1 = e.touches[1];
+        const newDist = Math.max(1, Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY));
+        const newMidX = (t0.clientX + t1.clientX) / 2;
+        const newMidY = (t0.clientY + t1.clientY) / 2;
+
+        const prev = pinchStateRef.current;
+        pinchStateRef.current = { dist: newDist, midX: newMidX, midY: newMidY };
+        if (!prev) return;
+
+        const factor = newDist / prev.dist;
+        const panDx = newMidX - prev.midX;
+        const panDy = newMidY - prev.midY;
+        const focalX = newMidX - rect.left;
+        const focalY = newMidY - rect.top;
+
+        hasUserZoomedRef.current = true;
+        setTransform((cur) => {
+          const nextScale = Math.max(MIN_GRAPH_ZOOM, Math.min(MAX_GRAPH_ZOOM, cur.scale * factor));
+          const ratio = nextScale / cur.scale;
+          const pannedX = cur.x + panDx;
+          const pannedY = cur.y + panDy;
+          return {
+            scale: nextScale,
+            x: focalX - (focalX - pannedX) * ratio,
+            y: focalY - (focalY - pannedY) * ratio,
+          };
+        });
+      }
+    };
+
+    const onTouchEnd = (e: TouchEvent) => {
+      if (e.touches.length < 2) {
+        pinchStateRef.current = null;
+      }
+      if (e.touches.length === 0 && dragStartRef.current.moved) {
+        setTimeout(() => {
+          dragStartRef.current.moved = false;
+        }, 50);
+      }
     };
 
     paneEl.addEventListener('wheel', onWheel, { passive: false });
@@ -262,6 +390,10 @@ export function ChainGraphView({
     paneEl.addEventListener('gesturestart', onGestureStart, { passive: false });
     paneEl.addEventListener('gesturechange', onGestureChange, { passive: false });
     paneEl.addEventListener('gestureend', onGestureEnd, { passive: false });
+    canvasEl.addEventListener('touchstart', onTouchStart, { passive: false });
+    canvasEl.addEventListener('touchmove', onTouchMove, { passive: false });
+    canvasEl.addEventListener('touchend', onTouchEnd);
+    canvasEl.addEventListener('touchcancel', onTouchEnd);
 
     return () => {
       paneEl.removeEventListener('wheel', onWheel);
@@ -269,101 +401,47 @@ export function ChainGraphView({
       paneEl.removeEventListener('gesturestart', onGestureStart);
       paneEl.removeEventListener('gesturechange', onGestureChange);
       paneEl.removeEventListener('gestureend', onGestureEnd);
+      canvasEl.removeEventListener('touchstart', onTouchStart);
+      canvasEl.removeEventListener('touchmove', onTouchMove);
+      canvasEl.removeEventListener('touchend', onTouchEnd);
+      canvasEl.removeEventListener('touchcancel', onTouchEnd);
     };
   }, [zoomAroundPoint]);
 
   const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    // Touch scrolling (1 finger) & pinch-zoom (2 fingers) are handled via `touch-action: pan-y` + TouchEvents
+    if (e.pointerType === 'touch') return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
-    if (activePointersRef.current.size === 1) {
-      setDragging(true);
-      pinchStateRef.current = null;
-      dragStartRef.current = {
-        clientX: e.clientX,
-        clientY: e.clientY,
-        startX: transform.x,
-        startY: transform.y,
-        moved: false,
-      };
-    } else if (activePointersRef.current.size === 2) {
-      // Transition cleanly into two-finger pinch-to-zoom + pan
-      dragStartRef.current.moved = true;
-      const pts = Array.from(activePointersRef.current.values());
-      const dist = Math.max(1, Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y));
-      const midX = (pts[0].x + pts[1].x) / 2;
-      const midY = (pts[0].y + pts[1].y) / 2;
-      pinchStateRef.current = { dist, midX, midY };
-    }
+    setDragging(true);
+    dragStartRef.current = {
+      clientX: e.clientX,
+      clientY: e.clientY,
+      startX: transform.x,
+      startY: transform.y,
+      moved: false,
+    };
   };
 
   const handlePointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if (!activePointersRef.current.has(e.pointerId)) return;
-    activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (e.pointerType === 'touch' || !dragging) return;
 
-    if (activePointersRef.current.size === 2 && pinchStateRef.current) {
-      const canvasEl = containerRef.current;
-      if (!canvasEl) return;
-      const rect = canvasEl.getBoundingClientRect();
-      const pts = Array.from(activePointersRef.current.values());
-      const newDist = Math.max(1, Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y));
-      const newMidX = (pts[0].x + pts[1].x) / 2;
-      const newMidY = (pts[0].y + pts[1].y) / 2;
-
-      const prev = pinchStateRef.current;
-      const factor = newDist / prev.dist;
-      const panDx = newMidX - prev.midX;
-      const panDy = newMidY - prev.midY;
-      const focalX = newMidX - rect.left;
-      const focalY = newMidY - rect.top;
-
-      pinchStateRef.current = { dist: newDist, midX: newMidX, midY: newMidY };
-
-      setTransform((cur) => {
-        const nextScale = Math.max(MIN_GRAPH_ZOOM, Math.min(MAX_GRAPH_ZOOM, cur.scale * factor));
-        const ratio = nextScale / cur.scale;
-        const pannedX = cur.x + panDx;
-        const pannedY = cur.y + panDy;
-        return {
-          scale: nextScale,
-          x: focalX - (focalX - pannedX) * ratio,
-          y: focalY - (focalY - pannedY) * ratio,
-        };
-      });
-      return;
+    const dx = e.clientX - dragStartRef.current.clientX;
+    const dy = e.clientY - dragStartRef.current.clientY;
+    if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
+      dragStartRef.current.moved = true;
+      hasUserZoomedRef.current = true;
     }
-
-    if (activePointersRef.current.size === 1 && dragging) {
-      const dx = e.clientX - dragStartRef.current.clientX;
-      const dy = e.clientY - dragStartRef.current.clientY;
-      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
-        dragStartRef.current.moved = true;
-      }
-      setTransform((prev) => ({
-        ...prev,
-        x: dragStartRef.current.startX + dx,
-        y: dragStartRef.current.startY + dy,
-      }));
-    }
+    setTransform((prev) => ({
+      ...prev,
+      x: dragStartRef.current.startX + dx,
+      y: dragStartRef.current.startY + dy,
+    }));
   };
 
   const handlePointerEnd = (e: ReactPointerEvent<HTMLDivElement>) => {
-    activePointersRef.current.delete(e.pointerId);
-    if (activePointersRef.current.size < 2) {
-      pinchStateRef.current = null;
-    }
-    if (activePointersRef.current.size === 1) {
-      const remaining = Array.from(activePointersRef.current.values())[0];
-      dragStartRef.current = {
-        clientX: remaining.x,
-        clientY: remaining.y,
-        startX: transform.x,
-        startY: transform.y,
-        moved: true,
-      };
-    } else if (activePointersRef.current.size === 0) {
-      setDragging(false);
-    }
+    if (e.pointerType === 'touch') return;
+    setDragging(false);
   };
 
   // Connected lineage highlight set when hovering or selecting a node/edge
@@ -459,12 +537,13 @@ export function ChainGraphView({
   return (
     <div
       ref={rootWrapperRef}
-      className="flex flex-col lg:flex-row h-[calc(100vh-215px)] min-h-[540px] rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#090d16] overflow-hidden relative"
+      className="flex flex-col lg:flex-row lg:items-start gap-3 relative"
     >
-      {/* Main Interactive Canvas */}
+      {/* Main Interactive Canvas sized to fit the full graph height */}
       <div
         ref={graphPaneRef}
-        className="flex-1 relative flex flex-col min-h-[380px] overflow-hidden overscroll-contain"
+        style={{ height: `${canvasHeight}px` }}
+        className="flex-1 w-full relative flex flex-col rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#090d16] overflow-hidden"
       >
         {/* Floating Graph Controls Toolbar */}
         <div className="absolute top-3 left-3 right-3 z-10 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
@@ -610,7 +689,7 @@ export function ChainGraphView({
 
         {/* Bottom-left Hint */}
         <div className="absolute bottom-2.5 left-3 z-10 pointer-events-none text-[11px] text-slate-400 dark:text-slate-500 bg-white/75 dark:bg-slate-950/75 px-2.5 py-1 rounded-md backdrop-blur-sm">
-          Scroll or pinch to zoom · Drag to pan · Click any zone, DNSKEY, RRset, or RRSIG edge to inspect
+          Pinch or Shift + Scroll to zoom · Drag to pan · Click any zone, DNSKEY, RRset, or RRSIG edge to inspect
         </div>
 
         {/* Pan/Zoom SVG Surface */}
@@ -623,8 +702,8 @@ export function ChainGraphView({
           onPointerLeave={(e) => {
             if (e.pointerType === 'mouse') handlePointerEnd(e);
           }}
-          style={{ touchAction: 'none', overscrollBehavior: 'contain' }}
-          className={`flex-1 w-full h-full graph-canvas-bg select-none touch-none overscroll-contain ${
+          style={{ touchAction: 'pan-y' }}
+          className={`flex-1 w-full h-full graph-canvas-bg select-none touch-pan-y ${
             dragging ? 'cursor-grabbing' : 'cursor-grab'
           }`}
         >

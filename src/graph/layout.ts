@@ -715,20 +715,13 @@ export function buildChainGraph(
 
 export const MIN_GRAPH_ZOOM = 0.08;
 export const MAX_GRAPH_ZOOM = 6.0;
+export const MIN_GRAPH_CANVAS_HEIGHT = 460;
 
-/**
- * Computes the default pan/zoom transform so the longest (widest) horizontal box
- * takes 90% of `viewportWidth`, centered horizontally with clean top toolbar clearance.
- */
-export function computeDefaultGraphTransform(
-  graph: ComputedGraph,
-  viewportWidth: number,
-  viewportHeight: number
-): { x: number; y: number; scale: number } {
-  if (viewportWidth <= 0 || viewportHeight <= 0) {
-    return { x: 40, y: 24, scale: 1 };
-  }
-
+function getGraphContentBounds(graph: ComputedGraph): {
+  widestBox: { x: number; width: number } | null;
+  minTopY: number;
+  maxBottomY: number;
+} {
   let widestBox: { x: number; width: number } | null = null;
   for (const z of graph.zones) {
     if (!widestBox || z.width > widestBox.width) {
@@ -741,6 +734,59 @@ export function computeDefaultGraphTransform(
     }
   }
 
+  const allBoxes = [...graph.zones, ...graph.nodes];
+  const minTopY = allBoxes.length > 0 ? Math.min(...allBoxes.map((b) => b.y)) : 0;
+  const maxBottomY =
+    allBoxes.length > 0 ? Math.max(...allBoxes.map((b) => b.y + b.height)) : graph.height;
+
+  return { widestBox, minTopY, maxBottomY };
+}
+
+/**
+ * Computes the standard canvas height needed to fit the full chain-of-trust graph
+ * from top to bottom when scaled to default zoom (longest horizontal box = 90% width).
+ */
+export function computeDefaultCanvasHeight(
+  graph: ComputedGraph,
+  viewportWidth: number
+): number {
+  const effectiveWidth = viewportWidth > 0 ? viewportWidth : 1200;
+  const { widestBox, minTopY, maxBottomY } = getGraphContentBounds(graph);
+
+  const targetBoxWidth = widestBox ? widestBox.width : graph.width;
+  const rawScale = (effectiveWidth * 0.9) / Math.max(1, targetBoxWidth);
+  const scale = Math.max(MIN_GRAPH_ZOOM, Math.min(MAX_GRAPH_ZOOM, rawScale));
+
+  const topClearance = effectiveWidth < 680 ? 96 : 64;
+  const bottomClearance = 44;
+  const contentHeightScaled = Math.max(0, maxBottomY - minTopY) * scale;
+
+  return Math.max(
+    MIN_GRAPH_CANVAS_HEIGHT,
+    Math.ceil(topClearance + contentHeightScaled + bottomClearance)
+  );
+}
+
+/**
+ * Computes the default pan/zoom transform so the longest (widest) horizontal box
+ * takes 90% of `viewportWidth`, centered horizontally with clean top toolbar clearance.
+ */
+export function computeDefaultGraphTransform(
+  graph: ComputedGraph,
+  viewportWidth: number,
+  viewportHeight?: number
+): { x: number; y: number; scale: number } {
+  if (viewportWidth <= 0) {
+    return { x: 40, y: 24, scale: 1 };
+  }
+
+  const effectiveHeight =
+    viewportHeight && viewportHeight > 0
+      ? viewportHeight
+      : computeDefaultCanvasHeight(graph, viewportWidth);
+
+  const { widestBox, minTopY, maxBottomY } = getGraphContentBounds(graph);
+
   const targetBoxWidth = widestBox ? widestBox.width : graph.width;
   const rawScale = (viewportWidth * 0.9) / Math.max(1, targetBoxWidth);
   const scale = Math.max(MIN_GRAPH_ZOOM, Math.min(MAX_GRAPH_ZOOM, rawScale));
@@ -748,23 +794,10 @@ export function computeDefaultGraphTransform(
   const boxCenterX = widestBox ? widestBox.x + widestBox.width / 2 : graph.width / 2;
   const x = Math.round(viewportWidth / 2 - boxCenterX * scale);
 
-  const minTopY =
-    graph.zones.length > 0
-      ? Math.min(...graph.zones.map((z) => z.y))
-      : graph.nodes.length > 0
-        ? Math.min(...graph.nodes.map((n) => n.y))
-        : 0;
-  const maxBottomY =
-    graph.zones.length > 0
-      ? Math.max(...graph.zones.map((z) => z.y + z.height))
-      : graph.nodes.length > 0
-        ? Math.max(...graph.nodes.map((n) => n.y + n.height))
-        : graph.height;
-
-  const topClearance = 56;
-  const bottomClearance = 36;
-  const contentHeightScaled = (maxBottomY - minTopY) * scale;
-  const availableHeight = viewportHeight - topClearance - bottomClearance;
+  const topClearance = viewportWidth < 680 ? 96 : 64;
+  const bottomClearance = 44;
+  const contentHeightScaled = Math.max(0, maxBottomY - minTopY) * scale;
+  const availableHeight = effectiveHeight - topClearance - bottomClearance;
 
   const y =
     contentHeightScaled <= availableHeight

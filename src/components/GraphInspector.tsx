@@ -128,7 +128,7 @@ export function GraphInspector({
   if (!selection) return null;
 
   return (
-    <aside className="w-full lg:w-[390px] shrink-0 border-t lg:border-t-0 lg:border-l border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md flex flex-col max-h-[45vh] lg:max-h-none overflow-hidden">
+    <aside className="w-full lg:w-[390px] shrink-0 rounded-xl border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md shadow-lg flex flex-col sticky bottom-3 lg:top-44 lg:bottom-auto z-20 max-h-[46vh] lg:max-h-[calc(100vh-12rem)] overflow-hidden">
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-800">
         <div className="flex items-center gap-2 min-w-0">
           {selection.kind === 'zone' && <Layers className="w-4 h-4 text-cyan-500 shrink-0" />}
