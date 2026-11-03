@@ -314,12 +314,6 @@ export const DOH_SERVER_PRESETS: DohServerPreset[] = [
     provider: 'DNS4EU Protective',
     description: 'DNS4EU Protective Threat-Blocking Resolver',
   },
-  {
-    url: 'https://wikimedia-dns.org/dns-query',
-    shortLabel: 'wikimedia-dns.org',
-    provider: 'Wikimedia',
-    description: 'Wikimedia Public DNS Resolver',
-  },
 ];
 
 /**

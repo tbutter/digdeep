@@ -184,7 +184,7 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
       expect(presetUrls).toContain('https://unfiltered.joindns4.eu/dns-query');
       expect(presetUrls).toContain('https://child-noads.joindns4.eu/dns-query');
       expect(presetUrls).toContain('https://protective.joindns4.eu/dns-query');
-      expect(presetUrls).toContain('https://wikimedia-dns.org/dns-query');
+      expect(presetUrls).not.toContain('https://wikimedia-dns.org/dns-query');
 
       const googleSnap = await runDnsvizAnalysis('cloudflare.com', {
         endpoint: 'https://8.8.8.8/dns-query',
