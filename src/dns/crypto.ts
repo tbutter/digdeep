@@ -12,6 +12,7 @@ import {
   hexToBytes,
   isSubdomainOrEqual,
   normalizeFqdn,
+  splitPresentationLabels,
 } from './encoding';
 import type {
   DnsRecord,
@@ -177,7 +178,7 @@ export function buildSignedRrsetBuffer(
     throw new Error('Cannot build signed buffer for empty RRset');
   }
   const owner = normalizeFqdn(rrset[0].name);
-  const fqdnLabels = owner === '.' ? [] : owner.slice(0, -1).split('.');
+  const fqdnLabels = splitPresentationLabels(owner);
   const actualLabelCount = countDnsLabels(owner, true);
 
   let signedOwner = owner;

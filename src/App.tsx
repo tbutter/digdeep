@@ -25,7 +25,7 @@ import { ResponsesPanel } from './components/ResponsesPanel';
 import { SettingsModal } from './components/SettingsModal';
 import { StatusBadge } from './components/StatusBadge';
 import { ZonesPanel } from './components/ZonesPanel';
-import { reverifySnapshot, runDnsvizAnalysis } from './dns/analyzer';
+import { reverifySnapshot, runDnsvizAnalysis, SNAPSHOT_ENGINE_VERSION } from './dns/analyzer';
 import { formatDohShortLabel, QUERYABLE_RR_TYPES } from './dns/constants';
 import type { AnalysisProgress, AnalysisSnapshot } from './dns/types';
 import { usePwaInstall } from './pwa/usePwaInstall';
@@ -160,6 +160,29 @@ export function App() {
     },
     [settings.dohEndpoint, settings.trustAnchors, activeTab]
   );
+
+  // Auto-upgrade any localStorage snapshots captured with an older validation engine version
+  useEffect(() => {
+    const stale = snapshots.filter((s) => (s.version ?? 1) < SNAPSHOT_ENGINE_VERSION);
+    if (stale.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      let latestList = snapshots;
+      for (const s of stale) {
+        const upgraded = await reverifySnapshot(s);
+        if (cancelled) return;
+        latestList = saveSnapshot(upgraded);
+        setActiveSnapshot((cur) => (cur?.id === upgraded.id ? upgraded : cur));
+      }
+      if (!cancelled) {
+        setSnapshots(latestList);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Auto-run on initial visit if URL specifies ?name= or if localStorage has no snapshots yet
   useEffect(() => {

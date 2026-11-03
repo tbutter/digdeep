@@ -92,6 +92,88 @@ export function compareBytes(a: Uint8Array, b: Uint8Array): number {
 }
 
 /**
+ * Splits a presentation-format DNS name into raw label strings while respecting RFC 1035 `\.` and `\\` escapes.
+ */
+export function splitPresentationLabels(name: string): string[] {
+  const trimmed = name.trim();
+  if (!trimmed || trimmed === '.') return [];
+  const labels: string[] = [];
+  let cur = '';
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+    if (ch === '\\' && i + 1 < trimmed.length) {
+      if (
+        i + 3 < trimmed.length &&
+        trimmed[i + 1] >= '0' &&
+        trimmed[i + 1] <= '9' &&
+        trimmed[i + 2] >= '0' &&
+        trimmed[i + 2] <= '9' &&
+        trimmed[i + 3] >= '0' &&
+        trimmed[i + 3] <= '9'
+      ) {
+        cur += trimmed.slice(i, i + 4);
+        i += 3;
+      } else {
+        cur += trimmed.slice(i, i + 2);
+        i += 1;
+      }
+    } else if (ch === '.') {
+      if (cur.length > 0) {
+        labels.push(cur);
+        cur = '';
+      }
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.length > 0) {
+    labels.push(cur);
+  }
+  return labels;
+}
+
+/**
+ * Decodes an RFC 1035 §5.1 presentation label (including `\DDD` decimal octets and `\X` escapes) into wire bytes.
+ * When `canonicalLower=true` (RFC 4034 §6.2), ASCII uppercase letters (0x41..0x5A) are lowercased.
+ */
+export function unescapePresentationLabel(label: string, canonicalLower = true): Uint8Array {
+  const out: number[] = [];
+  const encoder = new TextEncoder();
+  for (let i = 0; i < label.length; i++) {
+    const ch = label[i];
+    if (ch === '\\' && i + 1 < label.length) {
+      if (
+        i + 3 < label.length &&
+        label[i + 1] >= '0' &&
+        label[i + 1] <= '9' &&
+        label[i + 2] >= '0' &&
+        label[i + 2] <= '9' &&
+        label[i + 3] >= '0' &&
+        label[i + 3] <= '9'
+      ) {
+        let byte = Number.parseInt(label.slice(i + 1, i + 4), 10) & 0xff;
+        if (canonicalLower && byte >= 0x41 && byte <= 0x5a) byte += 32;
+        out.push(byte);
+        i += 3;
+      } else {
+        let byte = label.charCodeAt(i + 1) & 0xff;
+        if (canonicalLower && byte >= 0x41 && byte <= 0x5a) byte += 32;
+        out.push(byte);
+        i += 1;
+      }
+    } else {
+      const encoded = encoder.encode(ch);
+      for (let k = 0; k < encoded.length; k++) {
+        let byte = encoded[k];
+        if (canonicalLower && byte >= 0x41 && byte <= 0x5a) byte += 32;
+        out.push(byte);
+      }
+    }
+  }
+  return new Uint8Array(out);
+}
+
+/**
  * Normalizes a DNS domain name to lowercase FQDN ending with '.' (e.g. '.' or 'cloudflare.com.').
  */
 export function normalizeFqdn(name: string): string {
@@ -105,11 +187,11 @@ export function normalizeFqdn(name: string): string {
     } catch {
       cleaned = cleaned.replace(/^https?:\/\//i, '').split('/')[0];
     }
-  } else if (cleaned.includes('/')) {
+  } else if (cleaned.includes('/') && !cleaned.includes('\\')) {
     cleaned = cleaned.split('/')[0];
   }
-  cleaned = cleaned.toLowerCase().replace(/\.+$/, '');
-  return cleaned ? `${cleaned}.` : '.';
+  const labels = splitPresentationLabels(cleaned.toLowerCase());
+  return labels.length > 0 ? `${labels.join('.')}.` : '.';
 }
 
 export function displayFqdn(fqdn: string): string {
@@ -124,7 +206,7 @@ export function displayFqdn(fqdn: string): string {
 export function countDnsLabels(fqdn: string, ignoreLeadingWildcard = true): number {
   const norm = normalizeFqdn(fqdn);
   if (norm === '.') return 0;
-  const labels = norm.slice(0, -1).split('.');
+  const labels = splitPresentationLabels(norm);
   if (ignoreLeadingWildcard && labels[0] === '*') {
     return labels.length - 1;
   }
@@ -138,7 +220,7 @@ export function countDnsLabels(fqdn: string, ignoreLeadingWildcard = true): numb
 export function getDomainHierarchy(fqdn: string): string[] {
   const norm = normalizeFqdn(fqdn);
   if (norm === '.') return ['.'];
-  const labels = norm.slice(0, -1).split('.');
+  const labels = splitPresentationLabels(norm);
   const chain: string[] = ['.'];
   for (let i = labels.length - 1; i >= 0; i--) {
     chain.push(`${labels.slice(i).join('.')}.`);
@@ -148,27 +230,19 @@ export function getDomainHierarchy(fqdn: string): string[] {
 
 /**
  * RFC 4034 §6.1 Canonical DNS Name Order comparison.
- * Compares labels from right (highest-level) to left (lowest-level) as unsigned lowercase octets.
+ * Compares labels from right (highest-level) to left (lowest-level) as unsigned lowercase wire octets.
  */
 export function compareCanonicalDnsNames(a: string, b: string): number {
-  const na = normalizeFqdn(a);
-  const nb = normalizeFqdn(b);
-  if (na === nb) return 0;
-  const la = na === '.' ? [] : na.slice(0, -1).split('.');
-  const lb = nb === '.' ? [] : nb.slice(0, -1).split('.');
+  const la = splitPresentationLabels(normalizeFqdn(a));
+  const lb = splitPresentationLabels(normalizeFqdn(b));
   let ia = la.length - 1;
   let ib = lb.length - 1;
   while (ia >= 0 && ib >= 0) {
-    const segA = la[ia];
-    const segB = lb[ib];
-    if (segA !== segB) {
-      const minLen = Math.min(segA.length, segB.length);
-      for (let k = 0; k < minLen; k++) {
-        const ca = segA.charCodeAt(k);
-        const cb = segB.charCodeAt(k);
-        if (ca !== cb) return ca - cb;
-      }
-      return segA.length - segB.length;
+    if (la[ia] !== lb[ib]) {
+      const bytesA = unescapePresentationLabel(la[ia], true);
+      const bytesB = unescapePresentationLabel(lb[ib], true);
+      const cmp = compareBytes(bytesA, bytesB);
+      if (cmp !== 0) return cmp;
     }
     ia--;
     ib--;

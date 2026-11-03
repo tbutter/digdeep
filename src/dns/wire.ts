@@ -8,6 +8,8 @@ import {
   formatDnsTimestamp,
   getKeySizeInfo,
   normalizeFqdn,
+  splitPresentationLabels,
+  unescapePresentationLabel,
 } from './encoding';
 import type {
   DnsHeaderFlags,
@@ -20,23 +22,19 @@ import type {
 } from './types';
 
 const textDecoder = new TextDecoder('utf-8', { fatal: false });
-const textEncoder = new TextEncoder();
 
 /**
  * Encodes a domain name into uncompressed DNS wire format.
- * When canonicalLower=true (RFC 4034 §6.2), ASCII uppercase letters are lowercased.
+ * Supports RFC 1035 `\DDD` and `\X` escapes; when canonicalLower=true (RFC 4034 §6.2), ASCII uppercase letters are lowercased.
  */
 export function encodeDnsName(name: string, canonicalLower = true): Uint8Array {
-  const trimmed = name.trim();
-  if (!trimmed || trimmed === '.') {
+  const labels = splitPresentationLabels(name);
+  if (labels.length === 0) {
     return new Uint8Array([0]);
   }
-  const clean = (canonicalLower ? trimmed.toLowerCase() : trimmed).replace(/\.+$/, '');
-  if (!clean) return new Uint8Array([0]);
-  const labels = clean.split('.');
   const parts: Uint8Array[] = [];
   for (const label of labels) {
-    const bytes = textEncoder.encode(label);
+    const bytes = unescapePresentationLabel(label, canonicalLower);
     if (bytes.length === 0 || bytes.length > 63) {
       throw new Error(`Invalid DNS label length in "${name}"`);
     }
@@ -508,10 +506,11 @@ function parseRecordRdata(
   if (rrtype === RR_TYPES.NSEC && rdlength >= 2) {
     const nextDec = decodeDnsName(packetBuf, rdataOffset);
     const nextDomainName = nextDec.name; // preserve case on display, normalize where needed
-    const types = decodeTypeBitmaps(rawRdata.subarray(nextDec.bytesRead));
+    const bitmapSlice = rawRdata.subarray(nextDec.bytesRead);
+    const types = decodeTypeBitmaps(bitmapSlice);
     const typeNames = types.map(rrTypeToString);
     return {
-      canonicalRdata: new Uint8Array(rawRdata),
+      canonicalRdata: concatBytes(nextDec.uncompressedWire, bitmapSlice),
       rdataText: `${nextDomainName} ${typeNames.join(' ')}`,
       parsed: {
         kind: 'NSEC',

@@ -20,10 +20,12 @@ describe('DNS Wireformat & RFC Primitives', () => {
     // RFC 4034 §6.1 canonical ordering example:
     // example < a.example < yljkjljk.a.example < Z.a.example < zABC.a.EXAMPLE < z.example < \001.z.example < *.z.example < \200.z.example
     const names = [
+      '\\200.z.example.',
       'z.example.',
       'yljkjljk.a.example.',
       'example.',
       '*.z.example.',
+      '\\001.z.example.',
       'Z.a.example.',
       'a.example.',
     ];
@@ -34,8 +36,14 @@ describe('DNS Wireformat & RFC Primitives', () => {
       'yljkjljk.a.example.',
       'z.a.example.',
       'z.example.',
+      '\\001.z.example.',
       '*.z.example.',
+      '\\200.z.example.',
     ]);
+
+    const blackLiesWire = encodeDnsName('\\000.0dot1.net.', true);
+    expect(Array.from(blackLiesWire.subarray(0, 2))).toEqual([1, 0]);
+    expect(decodeDnsName(blackLiesWire, 0).name).toBe('\\000.0dot1.net.');
   });
 
   it('encodes and decodes compressed DNS wire names and EDNS0 queries', () => {
@@ -176,6 +184,23 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
       expect(googleSnap.overallStatus === 'secure' || googleSnap.overallStatus === 'warning').toBe(
         true
       );
+    },
+    25000
+  );
+
+  it(
+    'validates 0dot1.net across multiple per-query synthesized Black-Lies NSEC bitmaps without false RRSIG mismatch',
+    async () => {
+      const snap = await runDnsvizAnalysis('0dot1.net', {
+        queryTypes: ['A', 'AAAA', 'MX', 'TXT', 'CAA', 'HTTPS'],
+      });
+      expect(snap.overallStatus).toBe('secure');
+      expect(snap.findings.some((f) => f.severity === 'error')).toBe(false);
+      const leafZone = snap.zones.find((z) => z.zoneName === '0dot1.net.');
+      expect(leafZone?.status).toBe('secure');
+      const nsecRrsets = leafZone?.rrsets.filter((r) => r.type === RR_TYPES.NSEC) ?? [];
+      expect(nsecRrsets.length).toBeGreaterThanOrEqual(2);
+      expect(nsecRrsets.every((r) => r.status === 'secure')).toBe(true);
     },
     25000
   );

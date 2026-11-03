@@ -74,6 +74,7 @@ export class DohSession {
       try {
         const resp = await this.fetchImpl(url, {
           method: 'GET',
+          cache: 'no-store',
           headers: {
             Accept: 'application/dns-message',
           },

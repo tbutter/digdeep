@@ -43,6 +43,8 @@ import type {
   ZoneAnalysis,
 } from './types';
 
+export const SNAPSHOT_ENGINE_VERSION = 2;
+
 export interface AnalyzeOptions extends DohClientOptions {
   queryTypes?: string[];
   trustAnchors?: TrustAnchor[];
@@ -96,6 +98,7 @@ function isCandidateZoneApex(
     (r) =>
       r.name === cand &&
       r.parsed.kind === 'NSEC' &&
+      !r.parsed.nextDomainName.startsWith('\\000.') &&
       r.parsed.typeNames.includes('NS') &&
       !r.parsed.typeNames.includes('SOA')
   );
@@ -409,14 +412,20 @@ function findAuthoritativeZoneForOwner(
   owner: string,
   rrtype: number,
   signerName: string | undefined,
-  allZones: Set<string>
+  allZones: Set<string>,
+  section: 'answer' | 'authority' = 'answer'
 ): string {
   if (signerName && allZones.has(normalizeFqdn(signerName))) {
     return normalizeFqdn(signerName);
   }
   const norm = normalizeFqdn(owner);
   const hier = getDomainHierarchy(norm);
-  if (rrtype === RR_TYPES.DS && norm !== '.') {
+  // DS records and unsigned referral NS records in the authority section belong to the parent zone
+  if (
+    (rrtype === RR_TYPES.DS ||
+      (rrtype === RR_TYPES.NS && !signerName && section === 'authority' && allZones.has(norm))) &&
+    norm !== '.'
+  ) {
     for (let i = hier.length - 2; i >= 0; i--) {
       if (allZones.has(hier[i])) return hier[i];
     }
@@ -496,11 +505,17 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     rawZoneDnskeys.set(z, keys);
   }
 
-  // Collect all relevant RRsets across cdLogs (excluding NS resolver A/AAAA helper lookups unless targetName matches)
+  // Collect all relevant RRsets across cdLogs (preserving atomic per-packet RRset integrity!)
+  // IMPORTANT: Never merge distinct canonical RRset fingerprints across separate DNS responses
+  // into a synthetic RRset — e.g. Cloudflare RFC 4470 "Black Lies" synthesizes a different NSEC
+  // type bitmap per queried QTYPE at the same owner name (`0dot1.net. NSEC`), and each RRSIG
+  // signs ONLY the exact RRset returned in that response packet.
   interface CollectedGroup {
+    id: string;
     zone: string;
     name: string;
     type: number;
+    fingerprint: string;
     section: 'answer' | 'authority';
     records: DnsRecord[];
     rrsigRecords: DnsRecord[];
@@ -508,6 +523,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
   }
 
   const groupMap = new Map<string, CollectedGroup>();
+  const variantCountByBaseKey = new Map<string, number>();
 
   const addSectionRecords = (
     records: DnsRecord[],
@@ -517,7 +533,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     const nonSigs = records.filter((r) => r.type !== RR_TYPES.RRSIG);
     const sigs = records.filter((r) => r.type === RR_TYPES.RRSIG && r.parsed.kind === 'RRSIG');
 
-    // Group non-RRSIG records by (name, type)
+    // Group non-RRSIG records within THIS single packet section by (name, type)
     const byOwnerType = new Map<string, DnsRecord[]>();
     for (const r of nonSigs) {
       const k = `${r.name}|${r.type}`;
@@ -538,28 +554,45 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       );
       const signer =
         matchingSigs[0]?.parsed.kind === 'RRSIG' ? matchingSigs[0].parsed.signerName : undefined;
-      const zone = findAuthoritativeZoneForOwner(sample.name, sample.type, signer, allZones);
-      const groupKey = `${zone}|${sample.name}|${sample.type}`;
+      const zone = findAuthoritativeZoneForOwner(
+        sample.name,
+        sample.type,
+        signer,
+        allZones,
+        section
+      );
+      const fingerprint = recs
+        .map((r) => r.canonicalRdataBase64)
+        .sort()
+        .join(',');
+      const baseKey = `${zone}|${sample.name}|${sample.type}`;
+      const isProofType = sample.type === RR_TYPES.NSEC || sample.type === RR_TYPES.NSEC3;
+      const groupKey = isProofType ? `${baseKey}|${fingerprint}` : baseKey;
 
       const existing = groupMap.get(groupKey);
       if (!existing) {
+        const count = (variantCountByBaseKey.get(baseKey) ?? 0) + 1;
+        variantCountByBaseKey.set(baseKey, count);
+        const typeStr = rrTypeToString(sample.type);
+        const rrsetId =
+          count === 1
+            ? `rrset-${zone}-${sample.name}-${typeStr}`
+            : `rrset-${zone}-${sample.name}-${typeStr}-${count}`;
         groupMap.set(groupKey, {
+          id: rrsetId,
           zone,
           name: sample.name,
           type: sample.type,
+          fingerprint,
           section,
           records: [...recs],
           rrsigRecords: [...matchingSigs],
           isQueryTarget: isTargetQuery && section === 'answer',
         });
-      } else {
+      } else if (existing.fingerprint === fingerprint) {
+        // Exact same canonical RRset across packets: safe to merge any additional RRSIGs
         if (section === 'answer') existing.section = 'answer';
         if (isTargetQuery && section === 'answer') existing.isQueryTarget = true;
-        for (const r of recs) {
-          if (!existing.records.some((ex) => ex.canonicalRdataBase64 === r.canonicalRdataBase64)) {
-            existing.records.push(r);
-          }
-        }
         for (const s of matchingSigs) {
           if (
             !existing.rrsigRecords.some((ex) => ex.canonicalRdataBase64 === s.canonicalRdataBase64)
@@ -567,12 +600,38 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
             existing.rrsigRecords.push(s);
           }
         }
+      } else {
+        // Non-NSEC RRset whose RDATA changed across packets (e.g. SOA serial tick across PoPs):
+        // never mix records from two different RRset versions; prefer signed Answer / Target RRsets atomically.
+        const incomingPriority =
+          (isTargetQuery && section === 'answer' ? 4 : 0) +
+          (section === 'answer' ? 2 : 0) +
+          (matchingSigs.length > 0 ? 1 : 0);
+        const existingPriority =
+          (existing.isQueryTarget ? 4 : 0) +
+          (existing.section === 'answer' ? 2 : 0) +
+          (existing.rrsigRecords.length > 0 ? 1 : 0);
+        if (incomingPriority > existingPriority) {
+          existing.fingerprint = fingerprint;
+          existing.section = section;
+          existing.records = [...recs];
+          existing.rrsigRecords = [...matchingSigs];
+          existing.isQueryTarget = existing.isQueryTarget || (isTargetQuery && section === 'answer');
+        }
       }
     }
   };
 
   for (const log of cdLogs) {
     if (log.purpose.startsWith('Nameserver IP')) continue;
+    // Skip speculative zone-cut / DS discovery probes for non-zone hostnames (unless user explicitly queried that type)
+    if (
+      (log.purpose.startsWith('Zone-cut probe') || log.purpose.startsWith('Delegation probe')) &&
+      !allZones.has(log.qname) &&
+      !(log.qname === targetName && queryTypes.includes(log.qtypeName))
+    ) {
+      continue;
+    }
     const isTarget =
       log.purpose.startsWith('Target RRset') || log.purpose.startsWith('CNAME target');
     addSectionRecords(log.packet.answers, 'answer', isTarget);
@@ -828,9 +887,19 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
         }
       } else {
         // No DS record in signed parent -> check authenticated denial of existence!
-        const parentNsecSigned = parentAnalysis.rrsets
-          .filter((r) => r.type === RR_TYPES.NSEC || r.type === RR_TYPES.NSEC3)
-          .every((r) => r.status === 'secure' || r.status === 'warning');
+        const dsAuthNegCanon = new Set(
+          (dsLog?.packet.authorities ?? [])
+            .filter((r) => r.type === RR_TYPES.NSEC || r.type === RR_TYPES.NSEC3)
+            .map((r) => `${r.name}|${r.canonicalRdataBase64}`)
+        );
+        const matchingParentNegRrsets = parentAnalysis.rrsets.filter(
+          (r) =>
+            (r.type === RR_TYPES.NSEC || r.type === RR_TYPES.NSEC3) &&
+            r.records.some((rec) => dsAuthNegCanon.has(`${rec.name}|${rec.canonicalRdataBase64}`))
+        );
+        const parentNsecSigned =
+          matchingParentNegRrsets.length > 0 &&
+          matchingParentNegRrsets.every((r) => r.status === 'secure' || r.status === 'warning');
 
         if (insecureDelegationProof?.valid && parentNsecSigned) {
           zoneStatus = 'insecure';
@@ -876,7 +945,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
 
     // 4. Verify all RRsets in zoneName
     for (const grp of zoneGroups) {
-      const rrsetId = `rrset-${zoneName}-${grp.name}-${rrTypeToString(grp.type)}`;
+      const rrsetId = grp.id;
       const rrsigs =
         grp.type === RR_TYPES.DNSKEY && grp.name === zoneName
           ? dnskeyRrsigs
@@ -1287,11 +1356,16 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
             nsec3Records: authNsec3,
           });
 
+          const authNegCanonSet = new Set(
+            [...authNsec, ...authNsec3].map((ar) => `${ar.name}|${ar.canonicalRdataBase64}`)
+          );
           const coveringRrsetIds = authZone.rrsets
             .filter(
               (r) =>
                 (r.type === RR_TYPES.NSEC || r.type === RR_TYPES.NSEC3) &&
-                [...authNsec, ...authNsec3].some((ar) => ar.name === r.name)
+                r.records.some((rec) =>
+                  authNegCanonSet.has(`${rec.name}|${rec.canonicalRdataBase64}`)
+                )
             )
             .map((r) => r.id);
 
@@ -1319,7 +1393,9 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
                 severity: 'error',
                 code: 'BOGUS_NEGATIVE_PROOF',
                 title: `Invalid ${negKind} denial-of-existence proof for ${curName} (${qt})`,
-                detail: proof.summary,
+                detail: proof.valid
+                  ? `Covering ${proof.protocol} record(s) for ${curName} failed RRSIG signature verification.`
+                  : proof.summary,
                 rfc: proof.protocol === 'NSEC3' ? 'RFC 5155' : 'RFC 4035 §5.4',
                 zone: authZoneName,
               });
@@ -1347,16 +1423,30 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
               (r) => r.parsed.kind === 'NSEC' && r.parsed.nextDomainName.startsWith('\\000.')
             )
           ) {
-            findings.push({
-              id: `info-compact-doe-${curName}-${qt}`,
-              severity: 'info',
-              code: 'COMPACT_DENIAL_OF_EXISTENCE',
-              title: `Compact Denial of Existence ("Black Lies") for ${curName}`,
-              detail: `${authZoneName} uses online NSEC synthesis (next domain \\000.${curName}), returning NOERROR/NODATA instead of NXDOMAIN to prevent zone enumeration.`,
-              rfc: 'RFC 4470 / Compact DoE',
-              zone: authZoneName,
-              targetId: negId,
-            });
+            const compactFindingId = `info-compact-doe-${curName}`;
+            const existingCompact = findings.find((f) => f.id === compactFindingId);
+            if (!existingCompact) {
+              findings.push({
+                id: compactFindingId,
+                severity: 'info',
+                code: 'COMPACT_DENIAL_OF_EXISTENCE',
+                title: `Compact Denial of Existence ("Black Lies") for ${curName}`,
+                detail: `${authZoneName} uses online NSEC synthesis (next domain \\000.${curName}), returning per-query NOERROR/NODATA NSEC bitmaps [${qt}] instead of NXDOMAIN to prevent zone enumeration.`,
+                rfc: 'RFC 4470 / RFC 9824',
+                zone: authZoneName,
+                targetId: negId,
+              });
+            } else if (
+              !existingCompact.detail.includes(`[${qt}]`) &&
+              !existingCompact.detail.includes(`[${qt},`) &&
+              !existingCompact.detail.includes(`, ${qt}]`) &&
+              !existingCompact.detail.includes(`, ${qt},`)
+            ) {
+              existingCompact.detail = existingCompact.detail.replace(
+                /bitmaps \[([^\]]+)\]/,
+                `bitmaps [$1, ${qt}]`
+              );
+            }
           }
 
           if (lastCnameRrsetId && lastCnameFrom) {
@@ -1504,7 +1594,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
 
   return {
     id,
-    version: 1,
+    version: SNAPSHOT_ENGINE_VERSION,
     targetName,
     displayDomain: displayFqdn(targetName),
     queryTypes,

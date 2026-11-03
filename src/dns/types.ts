@@ -379,7 +379,7 @@ export interface ResolverVerdict {
 
 export interface AnalysisSnapshot {
   id: string;
-  version: 1;
+  version: number;
   targetName: string; // normalized FQDN e.g. "cloudflare.com."
   displayDomain: string; // clean display e.g. "cloudflare.com" or "."
   queryTypes: string[];
