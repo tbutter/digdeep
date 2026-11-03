@@ -1,0 +1,125 @@
+import { DEFAULT_DOH_ENDPOINT, rrTypeToString } from './constants';
+import { bytesToBase64, bytesToBase64Url, normalizeFqdn } from './encoding';
+import type { DohQueryLog } from './types';
+import { buildDnsQuery, parseDnsPacket } from './wire';
+
+export interface DohClientOptions {
+  endpoint?: string;
+  timeoutMs?: number;
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Session-scoped DoH client speaking RFC 8484 (`application/dns-message`) to 1.1.1.1.
+ * Deduplicates identical queries within a single analysis run and logs every request/response.
+ */
+export class DohSession {
+  private readonly endpoint: string;
+  private readonly timeoutMs: number;
+  private readonly fetchImpl: typeof fetch;
+  private readonly inflight = new Map<string, Promise<DohQueryLog>>();
+  private readonly logs: DohQueryLog[] = [];
+  private counter = 0;
+  public onQueryCompleted?: (count: number, lastLog: DohQueryLog) => void;
+
+  constructor(options: DohClientOptions = {}) {
+    this.endpoint = options.endpoint ?? DEFAULT_DOH_ENDPOINT;
+    this.timeoutMs = options.timeoutMs ?? 9000;
+    this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
+  }
+
+  public getLogs(): DohQueryLog[] {
+    return [...this.logs];
+  }
+
+  public async query(
+    qname: string,
+    qtype: number,
+    opts: { cd?: boolean; doBit?: boolean; purpose: string }
+  ): Promise<DohQueryLog> {
+    const normName = normalizeFqdn(qname);
+    const cd = opts.cd ?? true;
+    const doBit = opts.doBit ?? true;
+    const key = `${normName}|${qtype}|cd=${cd ? 1 : 0}|do=${doBit ? 1 : 0}`;
+
+    const existing = this.inflight.get(key);
+    if (existing) {
+      return existing;
+    }
+
+    const promise = this.executeQuery(normName, qtype, cd, doBit, opts.purpose);
+    this.inflight.set(key, promise);
+    return promise;
+  }
+
+  private async executeQuery(
+    normName: string,
+    qtype: number,
+    cd: boolean,
+    doBit: boolean,
+    purpose: string
+  ): Promise<DohQueryLog> {
+    const reqWire = buildDnsQuery(normName, qtype, { cd, doBit, rd: true, udpPayloadSize: 4096 });
+    const dnsParam = bytesToBase64Url(reqWire);
+    const sep = this.endpoint.includes('?') ? '&' : '?';
+    const url = `${this.endpoint}${sep}dns=${dnsParam}`;
+
+    const startedAt = Date.now();
+    const perfStart = performance.now();
+
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+      try {
+        const resp = await this.fetchImpl(url, {
+          method: 'GET',
+          headers: {
+            Accept: 'application/dns-message',
+          },
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+
+        if (!resp.ok) {
+          throw new Error(`1.1.1.1 DoH HTTP ${resp.status} ${resp.statusText}`);
+        }
+
+        const buf = new Uint8Array(await resp.arrayBuffer());
+        const latencyMs = Math.max(1, Math.round(performance.now() - perfStart));
+        const packet = parseDnsPacket(buf);
+
+        const log: DohQueryLog = {
+          id: `q-${++this.counter}-${normName}-${rrTypeToString(qtype)}`,
+          qname: normName,
+          qtype,
+          qtypeName: rrTypeToString(qtype),
+          cd,
+          doBit,
+          endpoint: this.endpoint,
+          startedAt,
+          latencyMs,
+          httpStatus: resp.status,
+          wireBase64: bytesToBase64(buf),
+          requestWireBase64: bytesToBase64(reqWire),
+          packet,
+          purpose,
+        };
+
+        this.logs.push(log);
+        this.onQueryCompleted?.(this.logs.length, log);
+        return log;
+      } catch (err) {
+        clearTimeout(timer);
+        lastError = err;
+        if (attempt === 0) {
+          await new Promise((r) => setTimeout(r, 250));
+        }
+      }
+    }
+
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(`Failed DoH query for ${normName} ${rrTypeToString(qtype)}`);
+  }
+}
