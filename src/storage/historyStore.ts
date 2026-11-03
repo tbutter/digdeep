@@ -13,6 +13,7 @@ const ESTIMATED_LOCALSTORAGE_QUOTA = 5 * 1024 * 1024; // 5 MiB typical browser q
 
 export interface UserSettings {
   dohEndpoint: string;
+  customDohEndpoints: string[];
   trustAnchors: TrustAnchor[];
   showSoaAndNs: boolean;
   showStandbyKeys: boolean;
@@ -21,6 +22,7 @@ export interface UserSettings {
 
 export const DEFAULT_USER_SETTINGS: UserSettings = {
   dohEndpoint: DEFAULT_DOH_ENDPOINT,
+  customDohEndpoints: [],
   trustAnchors: IANA_ROOT_TRUST_ANCHORS,
   showSoaAndNs: false,
   showStandbyKeys: true,
@@ -63,6 +65,9 @@ export function loadUserSettings(): UserSettings {
     }
     return {
       dohEndpoint: parsed.dohEndpoint || DEFAULT_DOH_ENDPOINT,
+      customDohEndpoints: Array.isArray(parsed.customDohEndpoints)
+        ? parsed.customDohEndpoints.filter((u): u is string => typeof u === 'string')
+        : [],
       trustAnchors: mergedAnchors,
       showSoaAndNs: Boolean(parsed.showSoaAndNs),
       showStandbyKeys: parsed.showStandbyKeys ?? true,

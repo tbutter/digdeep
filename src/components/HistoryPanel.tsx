@@ -11,6 +11,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { useMemo, useRef, useState } from 'react';
+import { formatDohShortLabel } from '../dns/constants';
 import type { AnalysisSnapshot } from '../dns/types';
 import { diffSnapshots, getStorageStats } from '../storage/historyStore';
 import { StatusBadge } from './StatusBadge';
@@ -411,8 +412,9 @@ export function HistoryPanel({
                   </div>
                   <p className="text-xs text-slate-500 truncate">{snap.overallSummary}</p>
                   <div className="text-[11px] font-mono text-slate-400">
-                    Captured {new Date(snap.capturedAt).toLocaleString()} · {snap.zones.length}{' '}
-                    zones · {snap.queries.length} DoH queries · {snap.durationMs}ms
+                    Captured {new Date(snap.capturedAt).toLocaleString()} via{' '}
+                    {formatDohShortLabel(snap.dohEndpoint)} · {snap.zones.length} zones ·{' '}
+                    {snap.queries.length} DoH queries · {snap.durationMs}ms
                   </div>
                 </div>
 

@@ -236,6 +236,103 @@ export const IANA_ROOT_TRUST_ANCHORS: TrustAnchor[] = [
 
 export const DEFAULT_DOH_ENDPOINT = 'https://1.1.1.1/dns-query';
 
+export interface DohServerPreset {
+  url: string;
+  shortLabel: string;
+  provider: string;
+  description: string;
+}
+
+/**
+ * Public DoH resolvers verified to support RFC 8484 (`application/dns-message`),
+ * `DO=1` + `CD=1`, and browser CORS (`Access-Control-Allow-Origin: *`).
+ */
+export const DOH_SERVER_PRESETS: DohServerPreset[] = [
+  {
+    url: 'https://1.1.1.1/dns-query',
+    shortLabel: '1.1.1.1',
+    provider: 'Cloudflare',
+    description: 'Cloudflare 1.1.1.1 (Default, RFC 8914 EDE)',
+  },
+  {
+    url: 'https://8.8.8.8/dns-query',
+    shortLabel: '8.8.8.8',
+    provider: 'Google',
+    description: 'Google Public DNS (8.8.8.8)',
+  },
+  {
+    url: 'https://9.9.9.9/dns-query',
+    shortLabel: '9.9.9.9',
+    provider: 'Quad9',
+    description: 'Quad9 Secure Anycast (9.9.9.9)',
+  },
+  {
+    url: 'https://9.9.9.10/dns-query',
+    shortLabel: '9.9.9.10',
+    provider: 'Quad9 Unfiltered',
+    description: 'Quad9 Unsecured / No Threat Blocking (9.9.9.10)',
+  },
+  {
+    url: 'https://doh.dns.sb/dns-query',
+    shortLabel: 'doh.dns.sb',
+    provider: 'DNS.SB',
+    description: 'DNS.SB Privacy Anycast DoH',
+  },
+  {
+    url: 'https://cloudflare-dns.com/dns-query',
+    shortLabel: 'cloudflare-dns.com',
+    provider: 'Cloudflare Host',
+    description: 'Cloudflare hostname DoH endpoint',
+  },
+  {
+    url: 'https://dns.google/dns-query',
+    shortLabel: 'dns.google',
+    provider: 'Google Host',
+    description: 'Google Public DNS hostname endpoint',
+  },
+  {
+    url: 'https://dns.quad9.net/dns-query',
+    shortLabel: 'dns.quad9.net',
+    provider: 'Quad9 Host',
+    description: 'Quad9 hostname DoH endpoint',
+  },
+];
+
+/**
+ * Normalizes user-entered DoH server input (accepts full https:// URLs or bare IP/hostnames
+ * such as "8.8.4.4" or "dns.google", defaulting path to "/dns-query" if omitted).
+ */
+export function normalizeDohEndpoint(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const u = new URL(withScheme);
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+    if (!u.hostname) return null;
+    if (u.pathname === '/' && !trimmed.endsWith('/')) {
+      u.pathname = '/dns-query';
+    } else if (u.pathname === '/') {
+      u.pathname = '/dns-query';
+    }
+    u.hash = '';
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+export function formatDohShortLabel(endpointUrl: string): string {
+  const preset = DOH_SERVER_PRESETS.find((p) => p.url === endpointUrl);
+  if (preset) return preset.shortLabel;
+  try {
+    const u = new URL(endpointUrl);
+    return u.host;
+  } catch {
+    return endpointUrl;
+  }
+}
+
 export interface PresetDomain {
   domain: string;
   types: string[];

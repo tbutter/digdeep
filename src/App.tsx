@@ -17,13 +17,14 @@ import {
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { AuditPanel } from './components/AuditPanel';
 import { ChainGraphView } from './components/ChainGraphView';
+import { DohChooser } from './components/DohChooser';
 import { HistoryPanel } from './components/HistoryPanel';
 import { ResponsesPanel } from './components/ResponsesPanel';
 import { SettingsModal } from './components/SettingsModal';
 import { StatusBadge } from './components/StatusBadge';
 import { ZonesPanel } from './components/ZonesPanel';
 import { reverifySnapshot, runDnsvizAnalysis } from './dns/analyzer';
-import { PRESET_DOMAINS, QUERYABLE_RR_TYPES } from './dns/constants';
+import { formatDohShortLabel, PRESET_DOMAINS, QUERYABLE_RR_TYPES } from './dns/constants';
 import type { AnalysisProgress, AnalysisSnapshot } from './dns/types';
 import {
   clearUnpinnedSnapshots,
@@ -118,7 +119,7 @@ export function App() {
       setError(null);
       setProgress({
         phase: 'zone-cuts',
-        message: `Starting 1.1.1.1 DoH trace for ${cleanDomain}…`,
+        message: `Starting ${formatDohShortLabel(settings.dohEndpoint)} DoH trace for ${cleanDomain}…`,
         completedQueries: 0,
       });
 
@@ -146,7 +147,7 @@ export function App() {
         setError(
           err instanceof Error
             ? err.message
-            : 'Failed to query 1.1.1.1 DoH. Check network connectivity.'
+            : `Failed to query ${formatDohShortLabel(settings.dohEndpoint)} DoH. Check network connectivity.`
         );
       } finally {
         setLoading(false);
@@ -220,7 +221,7 @@ export function App() {
               <div className="flex items-center gap-2">
                 <span className="font-bold text-base tracking-tight">DigDeep</span>
                 <span className="rounded-md bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 px-1.5 py-0.5 font-mono text-[10px] font-semibold">
-                  1.1.1.1 DoH
+                  {formatDohShortLabel(settings.dohEndpoint)} DoH
                 </span>
               </div>
               <p className="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">
@@ -281,6 +282,11 @@ export function App() {
                 /
               </kbd>
             </div>
+
+            <DohChooser
+              settings={settings}
+              onSaveSettings={(next) => void handleUpdateSettings(next)}
+            />
 
             <button
               type="submit"
@@ -428,7 +434,8 @@ export function App() {
                     </span>
                     {activeSnapshot.resolverVerdict && (
                       <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5 font-mono text-[11px] text-slate-600 dark:text-slate-300">
-                        1.1.1.1: {activeSnapshot.resolverVerdict.rcodeName} · AD=
+                        {formatDohShortLabel(activeSnapshot.dohEndpoint)}:{' '}
+                        {activeSnapshot.resolverVerdict.rcodeName} · AD=
                         {activeSnapshot.resolverVerdict.adBit ? '1' : '0'}
                       </span>
                     )}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { reverifySnapshot, runDnsvizAnalysis } from '../analyzer';
-import { IANA_ROOT_TRUST_ANCHORS, RR_TYPES } from '../constants';
+import { IANA_ROOT_TRUST_ANCHORS, normalizeDohEndpoint, RR_TYPES } from '../constants';
 import { computeDsDigest, computeNsec3Hash } from '../crypto';
 import {
   base64ToBytes,
@@ -155,6 +155,27 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
       expect(nlSnap.overallStatus === 'secure' || nlSnap.overallStatus === 'warning').toBe(true);
       const nlZone = nlSnap.zones.find((z) => z.zoneName === 'nlnetlabs.nl.');
       expect(nlZone?.negativeNodes[0].kind).toBe('NXDOMAIN');
+    },
+    25000
+  );
+
+  it(
+    'normalizes manual DoH inputs and validates DNSSEC via Google 8.8.8.8 DoH',
+    async () => {
+      expect(normalizeDohEndpoint('8.8.4.4')).toBe('https://8.8.4.4/dns-query');
+      expect(normalizeDohEndpoint('dns.quad9.net')).toBe('https://dns.quad9.net/dns-query');
+      expect(normalizeDohEndpoint('https://custom.example.org/doh')).toBe(
+        'https://custom.example.org/doh'
+      );
+
+      const googleSnap = await runDnsvizAnalysis('cloudflare.com', {
+        endpoint: 'https://8.8.8.8/dns-query',
+        queryTypes: ['A'],
+      });
+      expect(googleSnap.dohEndpoint).toBe('https://8.8.8.8/dns-query');
+      expect(googleSnap.overallStatus === 'secure' || googleSnap.overallStatus === 'warning').toBe(
+        true
+      );
     },
     25000
   );

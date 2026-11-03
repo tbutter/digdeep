@@ -1,6 +1,6 @@
 import { Binary, Check, Copy, Terminal } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { rcodeToString } from '../dns/constants';
+import { formatDohShortLabel, rcodeToString } from '../dns/constants';
 import { formatPacketAsDig, formatWireHexDump } from '../dns/digFormat';
 import type { AnalysisSnapshot, DohQueryLog } from '../dns/types';
 
@@ -37,7 +37,7 @@ export function ResponsesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
       <div className="lg:col-span-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 overflow-hidden flex flex-col max-h-[70vh]">
         <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
           <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-            1.1.1.1 DoH Wire Queries ({snapshot.queries.length})
+            {formatDohShortLabel(snapshot.dohEndpoint)} DoH Wire Queries ({snapshot.queries.length})
           </div>
           <div className="font-mono text-[11px] text-slate-400">application/dns-message</div>
         </div>

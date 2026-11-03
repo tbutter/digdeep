@@ -1,6 +1,11 @@
 import { Clock, KeyRound, Plus, RotateCcw, Server, Trash2, X } from 'lucide-react';
-import { useState } from 'react';
-import { DEFAULT_DOH_ENDPOINT, type TrustAnchor } from '../dns/constants';
+import { useState, type FormEvent } from 'react';
+import {
+  DEFAULT_DOH_ENDPOINT,
+  DOH_SERVER_PRESETS,
+  normalizeDohEndpoint,
+  type TrustAnchor,
+} from '../dns/constants';
 import { normalizeFqdn } from '../dns/encoding';
 import type { AnalysisSnapshot } from '../dns/types';
 import type { UserSettings } from '../storage/historyStore';
@@ -30,8 +35,31 @@ export function SettingsModal({
   const [customIsoTime, setCustomIsoTime] = useState(() =>
     new Date(activeSnapshot?.validatedAt ?? Date.now()).toISOString().slice(0, 16)
   );
+  const [manualDoh, setManualDoh] = useState('');
+  const [manualDohErr, setManualDohErr] = useState<string | null>(null);
 
   if (!open) return null;
+
+  const handleAddDoh = (e: FormEvent) => {
+    e.preventDefault();
+    const normalized = normalizeDohEndpoint(manualDoh);
+    if (!normalized) {
+      setManualDohErr('Enter a valid HTTPS DoH URL or hostname/IP (e.g. https://8.8.4.4/dns-query)');
+      return;
+    }
+    const isBuiltin = DOH_SERVER_PRESETS.some((p) => p.url === normalized);
+    const nextCustom =
+      !isBuiltin && !settings.customDohEndpoints.includes(normalized)
+        ? [normalized, ...settings.customDohEndpoints]
+        : settings.customDohEndpoints;
+    onSaveSettings({
+      ...settings,
+      dohEndpoint: normalized,
+      customDohEndpoints: nextCustom,
+    });
+    setManualDoh('');
+    setManualDohErr(null);
+  };
 
   const handleAddAnchor = () => {
     const tag = Number.parseInt(customKeyTag, 10);
@@ -78,31 +106,90 @@ export function SettingsModal({
 
         <div className="p-5 overflow-y-auto space-y-6 text-xs">
           {/* 1. DoH Endpoint */}
-          <section className="space-y-2">
+          <section className="space-y-2.5">
             <div className="flex items-center gap-1.5 font-semibold uppercase tracking-wider text-slate-500">
               <Server className="w-3.5 h-3.5 text-cyan-500" />
-              Cloudflare 1.1.1.1 DoH Endpoint (RFC 8484 Wireformat)
+              DNS-over-HTTPS (DoH) Resolver (RFC 8484 Wireformat)
             </div>
-            <div className="flex flex-wrap gap-2">
-              {[
-                ['https://1.1.1.1/dns-query', '1.1.1.1 Direct (Default)'],
-                ['https://1.0.0.1/dns-query', '1.0.0.1 Secondary'],
-                ['https://cloudflare-dns.com/dns-query', 'cloudflare-dns.com Hostname'],
-              ].map(([url, label]) => (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {DOH_SERVER_PRESETS.map((preset) => (
                 <button
-                  key={url}
+                  key={preset.url}
                   type="button"
-                  onClick={() => onSaveSettings({ ...settings, dohEndpoint: url })}
-                  className={`px-3 py-1.5 rounded-lg border font-mono text-xs cursor-pointer ${
+                  onClick={() => onSaveSettings({ ...settings, dohEndpoint: preset.url })}
+                  className={`text-left px-3 py-2 rounded-lg border cursor-pointer transition-colors ${
+                    settings.dohEndpoint === preset.url
+                      ? 'border-cyan-500 bg-cyan-500/15 text-cyan-700 dark:text-cyan-300'
+                      : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:border-slate-300 dark:hover:border-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between font-mono font-semibold text-xs">
+                    <span>{preset.shortLabel}</span>
+                    <span className="font-sans text-[10px] font-normal opacity-80">
+                      {preset.provider}
+                    </span>
+                  </div>
+                  <div className="text-[10px] opacity-75 truncate mt-0.5">{preset.url}</div>
+                </button>
+              ))}
+              {settings.customDohEndpoints.map((url) => (
+                <div
+                  key={url}
+                  className={`px-3 py-2 rounded-lg border flex items-center justify-between gap-2 ${
                     settings.dohEndpoint === url
-                      ? 'border-cyan-500 bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 font-semibold'
+                      ? 'border-cyan-500 bg-cyan-500/15 text-cyan-700 dark:text-cyan-300'
                       : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300'
                   }`}
                 >
-                  {label}
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => onSaveSettings({ ...settings, dohEndpoint: url })}
+                    className="flex-1 text-left min-w-0 cursor-pointer"
+                  >
+                    <div className="font-mono font-semibold text-xs truncate">{url}</div>
+                    <div className="text-[10px] opacity-75">Custom DoH Endpoint</div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const nextCustom = settings.customDohEndpoints.filter((u) => u !== url);
+                      onSaveSettings({
+                        ...settings,
+                        dohEndpoint:
+                          settings.dohEndpoint === url ? DEFAULT_DOH_ENDPOINT : settings.dohEndpoint,
+                        customDohEndpoints: nextCustom,
+                      });
+                    }}
+                    className="p-1 text-slate-400 hover:text-rose-500 cursor-pointer"
+                    title="Remove custom DoH endpoint"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               ))}
             </div>
+
+            <form onSubmit={handleAddDoh} className="flex flex-col sm:flex-row gap-2 pt-1">
+              <input
+                type="text"
+                value={manualDoh}
+                onChange={(e) => {
+                  setManualDoh(e.target.value);
+                  if (manualDohErr) setManualDohErr(null);
+                }}
+                placeholder="Enter custom DoH URL or IP (e.g. https://8.8.4.4/dns-query)"
+                className="flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-1.5 font-mono text-xs"
+              />
+              <button
+                type="submit"
+                className="inline-flex items-center justify-center gap-1 rounded-lg bg-cyan-500 px-3.5 py-1.5 font-semibold text-slate-950 cursor-pointer shrink-0"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Use Custom Server
+              </button>
+            </form>
+            {manualDohErr && <div className="text-rose-500 text-[11px]">{manualDohErr}</div>}
+
             {settings.dohEndpoint !== DEFAULT_DOH_ENDPOINT && (
               <button
                 type="button"
@@ -111,7 +198,7 @@ export function SettingsModal({
                 }
                 className="inline-flex items-center gap-1 text-cyan-600 dark:text-cyan-400 hover:underline cursor-pointer"
               >
-                <RotateCcw className="w-3 h-3" /> Reset to https://1.1.1.1/dns-query
+                <RotateCcw className="w-3 h-3" /> Reset to default (1.1.1.1)
               </button>
             )}
           </section>

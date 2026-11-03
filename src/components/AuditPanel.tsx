@@ -8,6 +8,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { useState } from 'react';
+import { formatDohShortLabel } from '../dns/constants';
 import type { AnalysisSnapshot, AuditFinding } from '../dns/types';
 import { StatusBadge } from './StatusBadge';
 
@@ -54,7 +55,7 @@ export function AuditPanel({
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
               <Server className="w-4 h-4" />
-              1.1.1.1 Resolver Verdict (CD=0)
+              {formatDohShortLabel(snapshot.dohEndpoint)} Resolver Verdict (CD=0)
             </div>
             {snapshot.resolverVerdict && (
               <span
@@ -75,10 +76,10 @@ export function AuditPanel({
             <>
               <p className="text-sm text-slate-700 dark:text-slate-200 leading-relaxed">
                 {snapshot.resolverVerdict.rcode === 2
-                  ? '1.1.1.1 returned SERVFAIL when DNSSEC checking was enabled (CD=0), confirming upstream validation failure.'
+                  ? `${formatDohShortLabel(snapshot.dohEndpoint)} returned SERVFAIL when DNSSEC checking was enabled (CD=0), confirming upstream validation failure.`
                   : snapshot.resolverVerdict.adBit
-                    ? '1.1.1.1 set the Authenticated Data (AD=1) bit, confirming recursive validation.'
-                    : '1.1.1.1 returned AD=0 (unsigned answer or insecure delegation).'}
+                    ? `${formatDohShortLabel(snapshot.dohEndpoint)} set the Authenticated Data (AD=1) bit, confirming recursive validation.`
+                    : `${formatDohShortLabel(snapshot.dohEndpoint)} returned AD=0 (unsigned answer or insecure delegation).`}
               </p>
               {snapshot.resolverVerdict.ede.length > 0 && (
                 <div className="text-xs font-mono text-rose-600 dark:text-rose-400">

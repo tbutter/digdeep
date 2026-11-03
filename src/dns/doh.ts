@@ -82,7 +82,7 @@ export class DohSession {
         clearTimeout(timer);
 
         if (!resp.ok) {
-          throw new Error(`1.1.1.1 DoH HTTP ${resp.status} ${resp.statusText}`);
+          throw new Error(`DoH HTTP ${resp.status} ${resp.statusText} from ${this.endpoint}`);
         }
 
         const buf = new Uint8Array(await resp.arrayBuffer());
@@ -118,8 +118,14 @@ export class DohSession {
       }
     }
 
+    if (lastError instanceof TypeError) {
+      throw new Error(
+        `Could not connect to ${this.endpoint} from the browser. Verify the URL and ensure the DoH server allows browser CORS (Access-Control-Allow-Origin) for RFC 8484 queries.`
+      );
+    }
+
     throw lastError instanceof Error
       ? lastError
-      : new Error(`Failed DoH query for ${normName} ${rrTypeToString(qtype)}`);
+      : new Error(`Failed DoH query for ${normName} ${rrTypeToString(qtype)} via ${this.endpoint}`);
   }
 }
