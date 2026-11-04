@@ -227,4 +227,29 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
     },
     25000
   );
+
+  it(
+    'validates short-lived online-signed Route 53 RRSIGs (slack.com) as secure and emits RRSIG_EXPIRING_SOON when TTL exceeds remaining validity',
+    async () => {
+      const snap = await runDnsvizAnalysis('slack.com', {
+        queryTypes: ['A', 'AAAA'],
+      });
+      expect(snap.overallStatus).toBe('secure');
+      expect(snap.findings.some((f) => f.code === 'RRSIG_EXPIRING_SOON')).toBe(false);
+
+      // Find the earliest RRSIG expiration in slack.com. and time-travel to 20s before expiration (< TTL)
+      const slackZone = snap.zones.find((z) => z.zoneName === 'slack.com.');
+      const aRrset = slackZone?.rrsets.find((r) => r.type === RR_TYPES.A);
+      const aExpSec = aRrset?.rrsigs[0]?.rrsig.expiration;
+      expect(aExpSec).toBeDefined();
+      if (aExpSec) {
+        const nearExpirySnap = await reverifySnapshot(snap, {
+          validationTimeMs: (aExpSec - 20) * 1000,
+        });
+        expect(nearExpirySnap.overallStatus).toBe('warning');
+        expect(nearExpirySnap.findings.some((f) => f.code === 'RRSIG_EXPIRING_SOON')).toBe(true);
+      }
+    },
+    25000
+  );
 });

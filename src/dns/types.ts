@@ -209,6 +209,7 @@ export interface RrsigVerification {
   wildcardClosestEncloser?: string;
   ttlMismatch: boolean;
   algorithmWarning?: string;
+  expirationWarning?: string;
   status: ValidationStatus;
   reason: string;
 }

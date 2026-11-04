@@ -149,7 +149,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v10');
+    expect(swCode).toContain('digdeep-shell-v11');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge when navigator.onLine is false

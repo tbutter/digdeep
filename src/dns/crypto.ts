@@ -456,7 +456,24 @@ export async function verifyRrsigForRrset(
             : 'Signature inception timestamp is in the future',
         };
       }
-      const expiringSoon = remainingSeconds < 86400; // < 24h
+      // Align RRSIG expiration warnings with RFC 4035 §5.3.1 / §5.3.3 and DNSViz:
+      // - Warn if cached TTL can outlive the signature (remainingSeconds < minTtl, TTL_BEYOND_EXPIRATION)
+      // - Warn if within 5-minute clock-skew window (remainingSeconds <= 300)
+      // - Warn on multi-day offline signatures (> 48h total validity window) with < 24h left,
+      //   without false-alarming on short-lived online signers (e.g. AWS Route 53 2h window, Cloudflare 25-48h window).
+      const minTtl = Math.min(rrsig.originalTtl, rrsigRecord.ttl, ...rrset.map((r) => r.ttl));
+      const validityWindowSec = (rrsig.expiration - rrsig.inception) >>> 0;
+      const ttlBeyondExpiration = remainingSeconds < minTtl;
+      const withinClockSkew = remainingSeconds <= 300;
+      const offlineExpiringSoon = validityWindowSec > 172800 && remainingSeconds < 86400;
+      const expiringSoon = ttlBeyondExpiration || withinClockSkew || offlineExpiringSoon;
+      const expirationWarning = ttlBeyondExpiration
+        ? `RRSIG expires in ${Math.max(0, Math.round(remainingSeconds / 60))}m, before RRset/RRSIG TTL (${minTtl}s) expires in caches`
+        : withinClockSkew
+          ? `RRSIG expires in ${Math.max(0, remainingSeconds)}s (within 5-minute RFC 4035 clock-skew window)`
+          : offlineExpiringSoon
+            ? `Long-lived RRSIG (${Math.round(validityWindowSec / 86400)}d validity window) has less than 24h remaining (${Math.max(1, Math.round(remainingSeconds / 3600))}h left)`
+            : undefined;
       const hasWarning = Boolean(algorithmWarning || expiringSoon || ttlMismatch);
       return {
         id,
@@ -473,9 +490,14 @@ export async function verifyRrsigForRrset(
         wildcardClosestEncloser,
         ttlMismatch,
         algorithmWarning,
+        expirationWarning,
         status: hasWarning ? 'warning' : 'secure',
         reason: expiringSoon
-          ? `Cryptographically verified with DNSKEY #${rrsig.keyTag} (expires in ${Math.max(1, Math.round(remainingSeconds / 3600))}h)`
+          ? `Cryptographically verified with DNSKEY #${rrsig.keyTag} (expires in ${
+              remainingSeconds < 3600
+                ? `${Math.max(1, Math.round(remainingSeconds / 60))}m`
+                : `${Math.max(1, Math.round(remainingSeconds / 3600))}h`
+            })`
           : `Cryptographically verified with DNSKEY #${rrsig.keyTag}`,
       };
     }

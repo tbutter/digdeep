@@ -43,7 +43,7 @@ import type {
   ZoneAnalysis,
 } from './types';
 
-export const SNAPSHOT_ENGINE_VERSION = 3;
+export const SNAPSHOT_ENGINE_VERSION = 4;
 
 export interface AnalyzeOptions extends DohClientOptions {
   queryTypes?: string[];
@@ -973,6 +973,30 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
             title: `Deprecated cryptographic algorithm on ${grp.name} ${rrTypeToString(grp.type)}`,
             detail: rv.algorithmWarning,
             rfc: 'RFC 8624 §3.1',
+            zone: zoneName,
+            targetId: rrsetId,
+          });
+        }
+        if (rv.expirationWarning) {
+          findings.push({
+            id: `warn-exp-${rrsetId}-${rv.signerKeyTag}`,
+            severity: 'warning',
+            code: 'RRSIG_EXPIRING_SOON',
+            title: `RRSIG approaching expiration on ${grp.name} ${rrTypeToString(grp.type)}`,
+            detail: rv.expirationWarning,
+            rfc: 'RFC 4035 §5.3.1 / §5.3.3',
+            zone: zoneName,
+            targetId: rrsetId,
+          });
+        }
+        if (rv.ttlMismatch) {
+          findings.push({
+            id: `warn-ttl-${rrsetId}-${rv.signerKeyTag}`,
+            severity: 'warning',
+            code: 'ORIGINAL_TTL_EXCEEDED',
+            title: `RRset TTL exceeds RRSIG original TTL on ${grp.name} ${rrTypeToString(grp.type)}`,
+            detail: `One or more records in ${grp.name} ${rrTypeToString(grp.type)} carry a TTL larger than RRSIG(#${rv.signerKeyTag}) original_ttl (${rv.rrsig.originalTtl}s).`,
+            rfc: 'RFC 4035 §2.2',
             zone: zoneName,
             targetId: rrsetId,
           });
