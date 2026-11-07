@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { useMemo, useRef, useState } from 'react';
 import { formatDohShortLabel } from '../dns/constants';
-import type { AnalysisSnapshot } from '../dns/types';
+import type { AnalysisMode, AnalysisSnapshot } from '../dns/types';
 import { diffSnapshots, getStorageStats } from '../storage/historyStore';
 import { StatusBadge } from './StatusBadge';
 
@@ -35,7 +35,7 @@ export function HistoryPanel({
   snapshots: AnalysisSnapshot[];
   activeSnapshotId?: string;
   onSelectSnapshot: (snap: AnalysisSnapshot) => void;
-  onReprobe: (domain: string, types: string[]) => void;
+  onReprobe: (domain: string, types: string[], mode?: AnalysisMode) => void;
   onTogglePin: (id: string, pinned: boolean) => void;
   onDelete: (id: string) => void;
   onClearUnpinned: () => void;
@@ -63,6 +63,7 @@ export function HistoryPanel({
       if (!q) return true;
       return (
         s.displayDomain.toLowerCase().includes(q) ||
+        (s.mode ?? 'dnssec').toLowerCase().includes(q) ||
         s.queryTypes.join(',').toLowerCase().includes(q) ||
         (s.note ?? '').toLowerCase().includes(q)
       );
@@ -394,6 +395,11 @@ export function HistoryPanel({
                       {snap.displayDomain}
                     </button>
                     <StatusBadge status={snap.overallStatus} size="xs" />
+                    {snap.mode === 'mail' && (
+                      <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 px-1.5 py-0.5 font-mono text-[10px] font-semibold">
+                        MAIL · DANE · SPF
+                      </span>
+                    )}
                     <div className="flex gap-1">
                       {snap.queryTypes.map((qt) => (
                         <span
@@ -428,9 +434,9 @@ export function HistoryPanel({
                   </button>
                   <button
                     type="button"
-                    onClick={() => onReprobe(snap.displayDomain, snap.queryTypes)}
+                    onClick={() => onReprobe(snap.displayDomain, snap.queryTypes, snap.mode)}
                     className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 cursor-pointer"
-                    title="Re-probe live via 1.1.1.1 DoH"
+                    title="Re-probe live via DoH"
                   >
                     <RefreshCw className="w-3.5 h-3.5" />
                   </button>

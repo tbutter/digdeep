@@ -2,6 +2,8 @@ import type { TrustAnchor } from './constants';
 
 export type ValidationStatus = 'secure' | 'insecure' | 'bogus' | 'warning' | 'indeterminate';
 
+export type AnalysisMode = 'dnssec' | 'mail';
+
 export interface DnsHeaderFlags {
   qr: boolean;
   opcode: number;
@@ -134,6 +136,22 @@ export interface CaaRdata {
   value: string;
 }
 
+export interface TxtRdata {
+  kind: 'TXT';
+  /** Individual <character-string> chunks inside this single TXT/SPF resource record */
+  strings: string[];
+  /** RFC 7208 §3.3 concatenated string without spaces (`strings.join('')`) */
+  joinedText: string;
+}
+
+export interface TlsaRdata {
+  kind: 'TLSA';
+  usage: number;
+  selector: number;
+  matchingType: number;
+  certAssociationHex: string;
+}
+
 export interface GenericRdata {
   kind: 'GENERIC';
   target?: string;
@@ -150,6 +168,8 @@ export type ParsedRdata =
   | MxRdata
   | SrvRdata
   | CaaRdata
+  | TxtRdata
+  | TlsaRdata
   | GenericRdata;
 
 export interface DnsRecord {
@@ -378,9 +398,145 @@ export interface ResolverVerdict {
   latencyMs: number;
 }
 
+export type DaneHostStatus =
+  | 'dane-valid'
+  | 'dane-warning'
+  | 'dane-unsigned-ignored'
+  | 'dane-bogus'
+  | 'no-tlsa-secure'
+  | 'no-tlsa-unsigned';
+
+export interface TlsaRecordDetail {
+  ownerName: string;
+  ttl: number;
+  usage: number;
+  usageMnemonic: string;
+  usageDescription: string;
+  selector: number;
+  selectorMnemonic: string;
+  matchingType: number;
+  matchingTypeMnemonic: string;
+  certAssociationHex: string;
+  smtpRecommended: boolean;
+  rdataValid: boolean;
+  issues: string[];
+}
+
+export interface MxAddressEntry {
+  ip: string;
+  family: 4 | 6;
+  isPublic: boolean;
+  note?: string;
+}
+
+export interface MxHostAnalysis {
+  preference: number;
+  exchange: string;
+  displayExchange: string;
+  isNullMx: boolean;
+  isIpLiteral: boolean;
+  cnameChain: string[];
+  addresses: MxAddressEntry[];
+  ipv4Status: ValidationStatus;
+  ipv6Status: ValidationStatus;
+  addressRrsetIds: string[];
+  dane: {
+    qname: string;
+    resolvedOwner: string;
+    cnameChain: string[];
+    status: DaneHostStatus;
+    dnssecStatus: ValidationStatus;
+    rrsetId?: string;
+    negativeNodeId?: string;
+    records: TlsaRecordDetail[];
+    rolloverReady: boolean;
+    summary: string;
+  };
+}
+
+export type SpfQualifier = '+' | '-' | '~' | '?';
+
+export interface SpfTerm {
+  raw: string;
+  kind: 'version' | 'mechanism' | 'modifier' | 'unknown';
+  qualifier?: SpfQualifier;
+  mechanism?: 'all' | 'include' | 'a' | 'mx' | 'ptr' | 'ip4' | 'ip6' | 'exists';
+  modifier?: string;
+  value?: string;
+  cidr4?: number;
+  cidr6?: number;
+  countsTowardLookupLimit: boolean;
+  syntaxValid: boolean;
+  error?: string;
+  warning?: string;
+  resolvedIps?: string[];
+  isVoidLookup?: boolean;
+  unreachableAfterAll?: boolean;
+  childNode?: SpfDomainNode;
+}
+
+export interface SpfDomainNode {
+  domain: string;
+  displayDomain: string;
+  via: 'root' | 'include' | 'redirect';
+  depth: number;
+  spfRecords: string[];
+  legacySpfType99Records?: string[];
+  dnssecStatus?: ValidationStatus;
+  adBit?: boolean;
+  rcodeName?: string;
+  terms: SpfTerm[];
+  error?: string;
+  loopDetected?: boolean;
+}
+
+export type SpfPolicyVerdict =
+  | 'strict-fail'
+  | 'soft-fail'
+  | 'neutral'
+  | 'pass-all'
+  | 'no-default'
+  | 'permerror'
+  | 'temperror'
+  | 'none';
+
+export interface MailAnalysisResult {
+  mxStatus: 'valid' | 'null-mx' | 'implicit-a' | 'warning' | 'broken' | 'none';
+  mxDnssecStatus: ValidationStatus;
+  mxRrsetId?: string;
+  mxAtCname?: string;
+  mxHosts: MxHostAnalysis[];
+  implicitFallbackAddresses?: MxAddressEntry[];
+  daneStatus:
+    | 'all-valid'
+    | 'partial'
+    | 'unsigned-ignored'
+    | 'bogus'
+    | 'not-deployed'
+    | 'not-applicable';
+  daneSummary: string;
+  spf: {
+    present: boolean;
+    verdict: SpfPolicyVerdict;
+    dnsLookupCount: number;
+    dnsLookupLimit: number;
+    voidLookupCount: number;
+    voidLookupLimit: number;
+    dnssecStatus: ValidationStatus;
+    txtRrsetId?: string;
+    rawRecord?: string;
+    allSpfRecords: string[];
+    legacySpfRecords: string[];
+    effectiveAllQualifier?: SpfQualifier;
+    rootNode: SpfDomainNode;
+    summary: string;
+  };
+}
+
 export interface AnalysisSnapshot {
   id: string;
   version: number;
+  mode?: AnalysisMode;
   targetName: string; // normalized FQDN e.g. "cloudflare.com."
   displayDomain: string; // clean display e.g. "cloudflare.com" or "."
   queryTypes: string[];
@@ -396,12 +552,21 @@ export interface AnalysisSnapshot {
   findings: AuditFinding[];
   queries: DohQueryLog[];
   trustAnchorsUsed: TrustAnchor[];
+  mailAnalysis?: MailAnalysisResult;
   pinned?: boolean;
   note?: string;
 }
 
 export interface AnalysisProgress {
-  phase: 'zone-cuts' | 'targets' | 'security-records' | 'nameservers' | 'validating';
+  phase:
+    | 'zone-cuts'
+    | 'targets'
+    | 'security-records'
+    | 'nameservers'
+    | 'validating'
+    | 'mail-mx'
+    | 'mail-dane'
+    | 'mail-spf';
   message: string;
   completedQueries: number;
 }

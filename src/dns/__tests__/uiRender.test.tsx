@@ -4,6 +4,7 @@ import { App } from '../../App';
 import { AuditPanel } from '../../components/AuditPanel';
 import { ChainGraphView, prepareExportSvgElement } from '../../components/ChainGraphView';
 import { HistoryPanel } from '../../components/HistoryPanel';
+import { MailAnalysisView } from '../../components/MailAnalysisView';
 import { ResponsesPanel } from '../../components/ResponsesPanel';
 import { SettingsModal } from '../../components/SettingsModal';
 import { ZonesPanel } from '../../components/ZonesPanel';
@@ -15,6 +16,7 @@ import {
   parseDeepLinkParams,
 } from '../../urlState';
 import { runDnsvizAnalysis } from '../analyzer';
+import { runMailAnalysis } from '../mailAnalyzer';
 
 // Minimal localStorage shim for HistoryPanel stats
 const mem = new Map<string, string>();
@@ -155,7 +157,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v11');
+    expect(swCode).toContain('digdeep-shell-v12');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge when navigator.onLine is false
@@ -270,6 +272,29 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       tab: 'graph',
     });
     expect(addressBarDefault).toBe('?name=cloudflare.com&types=A,AAAA');
+
+    // Mail mode deep links omit types and default to 'mail' tab cleanly
+    const mailBarDefault = buildDeepLinkSearch({
+      name: 'ietf.org',
+      mode: 'mail',
+      types: ['MX', 'TXT'],
+      dohEndpoint: 'https://1.1.1.1/dns-query',
+      tab: 'mail',
+    });
+    expect(mailBarDefault).toBe('?name=ietf.org&mode=mail');
+
+    const mailShare = buildShareUrl('https://digdeep.fyi/', {
+      name: 'ietf.org',
+      mode: 'mail',
+      types: ['MX', 'TXT'],
+      dohEndpoint: 'https://1.1.1.1/dns-query',
+      tab: 'history',
+    });
+    expect(mailShare).toBe('https://digdeep.fyi/?name=ietf.org&mode=mail&doh=1.1.1.1');
+
+    const parsedMail = parseDeepLinkParams('?name=ietf.org&mode=mail&tab=graph');
+    expect(parsedMail.mode).toBe('mail');
+    expect(parsedMail.tab).toBe('graph');
 
     // Parse preset DoH shortLabel
     const parsedPreset = parseDeepLinkParams(
@@ -401,4 +426,37 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     ) as string;
     expect(openSearchXml).toContain('https://digdeep.fyi/?name={searchTerms}');
   });
+
+  it(
+    'renders MailAnalysisView and multi-branch ChainGraphView on live ietf.org Mail + DANE + SPF snapshot',
+    async () => {
+      const mailSnap = await runMailAnalysis('ietf.org');
+      expect(mailSnap.mode).toBe('mail');
+      expect(mailSnap.mailAnalysis).toBeDefined();
+
+      const mailHtml = renderToStaticMarkup(
+        <MailAnalysisView
+          snapshot={mailSnap}
+          onJumpToGraphTarget={() => {}}
+          onOpenChainGraph={() => {}}
+        />
+      );
+      expect(mailHtml).toContain('SMTP DANE (RFC 7672)');
+      expect(mailHtml).toContain('SPF Policy (RFC 7208)');
+      expect(mailHtml).toContain('_25._tcp.');
+      expect(mailHtml).toContain('v=spf1');
+
+      const graphHtml = renderToStaticMarkup(
+        <ChainGraphView
+          snapshot={mailSnap}
+          theme="dark"
+          filters={{ showSoaAndNs: false, showStandbyKeys: true }}
+          onChangeFilters={() => {}}
+        />
+      );
+      expect(graphHtml).toContain('<svg');
+      expect(graphHtml).toContain('TLSA');
+    },
+    25000
+  );
 });

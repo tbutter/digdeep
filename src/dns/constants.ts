@@ -163,6 +163,81 @@ export function formatDigestType(dt: number): string {
 }
 
 /**
+ * RFC 6698 / RFC 7671 / RFC 7672 DANE TLSA Parameter Metadata
+ */
+export const TLSA_USAGES: Record<
+  number,
+  { mnemonic: string; name: string; smtpRecommended: boolean; description: string }
+> = {
+  0: {
+    mnemonic: 'PKIX-TA',
+    name: 'CA Constraint',
+    smtpRecommended: false,
+    description: 'PKIX CA constraint — requires public WebPKI validation (discouraged for SMTP by RFC 7672 §3.1.3)',
+  },
+  1: {
+    mnemonic: 'PKIX-EE',
+    name: 'Service Certificate Constraint',
+    smtpRecommended: false,
+    description: 'PKIX end-entity constraint — requires public WebPKI validation (discouraged for SMTP by RFC 7672 §3.1.3)',
+  },
+  2: {
+    mnemonic: 'DANE-TA',
+    name: 'Trust Anchor Assertion',
+    smtpRecommended: true,
+    description: 'Domain-designated CA / issuer trust anchor (recommended for SMTP by RFC 7672 §3.1.2)',
+  },
+  3: {
+    mnemonic: 'DANE-EE',
+    name: 'Domain-Issued Certificate',
+    smtpRecommended: true,
+    description: 'Direct leaf key / certificate pin without PKIX chain reliance (recommended for SMTP by RFC 7672 §3.1.1)',
+  },
+};
+
+export const TLSA_SELECTORS: Record<number, { mnemonic: string; name: string }> = {
+  0: { mnemonic: 'Cert', name: 'Full X.509 Certificate' },
+  1: { mnemonic: 'SPKI', name: 'SubjectPublicKeyInfo (Public Key)' },
+};
+
+export const TLSA_MATCHING_TYPES: Record<
+  number,
+  { mnemonic: string; name: string; expectedHexLength?: number }
+> = {
+  0: { mnemonic: 'Full', name: 'Exact DER Match (Un-hashed)' },
+  1: { mnemonic: 'SHA-256', name: 'SHA-256 Digest (32 bytes)', expectedHexLength: 64 },
+  2: { mnemonic: 'SHA-512', name: 'SHA-512 Digest (64 bytes)', expectedHexLength: 128 },
+};
+
+/**
+ * Extensible Analysis Mode Registry
+ */
+export interface AnalysisModeDescriptor {
+  id: 'dnssec' | 'mail';
+  label: string;
+  shortLabel: string;
+  actionLabel: string;
+  description: string;
+}
+
+export const ANALYSIS_MODES: readonly AnalysisModeDescriptor[] = [
+  {
+    id: 'dnssec',
+    label: 'DNSSEC Chain',
+    shortLabel: 'DNSSEC',
+    actionLabel: 'Analyze DNSSEC',
+    description: 'Cryptographic chain-of-trust graph (DS, DNSKEY, RRSIG, NSEC/NSEC3)',
+  },
+  {
+    id: 'mail',
+    label: 'Mail · MX, DANE & SPF',
+    shortLabel: 'Mail (MX · DANE · SPF)',
+    actionLabel: 'Analyze Mail DNS',
+    description: 'MX mail routing, SMTP DANE (_25._tcp TLSA + DNSSEC), and recursive SPF audit',
+  },
+] as const;
+
+/**
  * RFC 8914 Extended DNS Error Codes (EDNS0 Option 15)
  */
 export const EDE_CODES: Record<number, { name: string; description: string }> = {

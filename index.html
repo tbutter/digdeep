@@ -11,14 +11,14 @@
     <meta name="apple-mobile-web-app-title" content="DigDeep" />
     <meta name="application-name" content="DigDeep" />
 
-    <title>DigDeep — Client-Side DNSSEC Visualizer &amp; DoH Wire Inspector</title>
+    <title>DigDeep — Client-Side DNSSEC, MX, DANE &amp; SPF Analyzer &amp; DoH Wire Inspector</title>
     <meta
       name="description"
-      content="Interactive client-side DNSSEC chain-of-trust visualizer and DNS-over-HTTPS (DoH) wire packet inspector. Cryptographically verify DS, DNSKEY, RRSIG, NSEC/NSEC3, and RFC 8914 Extended DNS Errors directly in your browser."
+      content="Interactive client-side DNSSEC chain-of-trust visualizer, MX &amp; SMTP DANE (TLSA) validator, SPF 10-lookup auditor, and DNS-over-HTTPS (DoH) wire packet inspector directly in your browser."
     />
     <meta
       name="keywords"
-      content="DNSSEC visualizer, DNSViz alternative, DNSSEC debugger, DNS over HTTPS, DoH inspector, RRSIG verification, DS DNSKEY checker, NSEC3, Black Lies, RFC 8914 EDE, dig online"
+      content="DNSSEC visualizer, DNSViz alternative, SMTP DANE checker, TLSA validator, SPF checker, SPF 10 lookup limit, MX analyzer, DNS over HTTPS, DoH inspector, RRSIG verification, dig online"
     />
     <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1" />
     <link rel="canonical" href="https://digdeep.fyi/" />
@@ -104,7 +104,8 @@
           "Multi-resolver RFC 8484 DoH wireformat inspection (Cloudflare 1.1.1.1, Google 8.8.8.8, Quad9 9.9.9.9, DNS4EU)",
           "RSASHA1, RSASHA256, RSASHA512, ECDSAP256SHA256, ECDSAP384SHA384, and ED25519 signature verification",
           "NSEC, NSEC3 Opt-Out, wildcard synthesis, and Compact Denial of Existence (Black Lies) proofs",
-          "RFC 8914 Extended DNS Error (EDE) diagnostics, time-travel RRSIG clock override, and snapshot diffing"
+          "RFC 8914 Extended DNS Error (EDE) diagnostics, time-travel RRSIG clock override, and snapshot diffing",
+          "MX mail routing, RFC 7671/7672 SMTP DANE (_25._tcp TLSA) cryptographic verification, and RFC 7208 recursive SPF 10-lookup auditing"
         ],
         "potentialAction": {
           "@type": "SearchAction",
@@ -151,6 +152,7 @@
         <nav aria-label="Example DNSSEC Traces" class="text-xs text-cyan-400 space-x-4">
           <a href="https://digdeep.fyi/?name=www.iana.org&amp;types=A,AAAA">www.iana.org (Cross-zone CNAME)</a>
           <a href="https://digdeep.fyi/?name=dnssec-failed.org&amp;types=A,AAAA">dnssec-failed.org (Bogus SEP)</a>
+          <a href="https://digdeep.fyi/?name=ietf.org&amp;mode=mail">ietf.org (MX + SMTP DANE + SPF)</a>
           <a href="https://digdeep.fyi/?name=cloudflare.com&amp;types=A,AAAA">cloudflare.com (ECDSA)</a>
           <a href="https://digdeep.fyi/?name=.&amp;types=DNSKEY,SOA">Root Zone (.)</a>
         </nav>

@@ -6,6 +6,7 @@ import {
   Download,
   Globe,
   Link2,
+  Mail,
   Moon,
   Network,
   Play,
@@ -23,13 +24,15 @@ import { AuditPanel } from './components/AuditPanel';
 import { ChainGraphView } from './components/ChainGraphView';
 import { DohChooser } from './components/DohChooser';
 import { HistoryPanel } from './components/HistoryPanel';
+import { MailAnalysisView } from './components/MailAnalysisView';
 import { ResponsesPanel } from './components/ResponsesPanel';
 import { SettingsModal } from './components/SettingsModal';
 import { STATUS_META, StatusBadge } from './components/StatusBadge';
 import { ZonesPanel } from './components/ZonesPanel';
 import { reverifySnapshot, runDnsvizAnalysis, SNAPSHOT_ENGINE_VERSION } from './dns/analyzer';
-import { formatDohShortLabel, QUERYABLE_RR_TYPES } from './dns/constants';
-import type { AnalysisProgress, AnalysisSnapshot } from './dns/types';
+import { ANALYSIS_MODES, formatDohShortLabel, QUERYABLE_RR_TYPES } from './dns/constants';
+import { runMailAnalysis } from './dns/mailAnalyzer';
+import type { AnalysisMode, AnalysisProgress, AnalysisSnapshot } from './dns/types';
 import { usePwaInstall } from './pwa/usePwaInstall';
 import {
   clearUnpinnedSnapshots,
@@ -54,15 +57,18 @@ import {
 const PRIMARY_TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SOA', 'CAA', 'HTTPS', 'DNSKEY'];
 const EXTRA_TYPES = QUERYABLE_RR_TYPES.filter((t) => !PRIMARY_TYPES.includes(t));
 
-const DEFAULT_PAGE_TITLE = 'DigDeep — Client-Side DNSSEC Visualizer & DoH Wire Inspector';
+const DEFAULT_PAGE_TITLE =
+  'DigDeep — Client-Side DNSSEC, MX, DANE & SPF Analyzer & DoH Wire Inspector';
 
 const FOOTER_EXAMPLE_TRACES: ReadonlyArray<{
   domain: string;
+  mode?: AnalysisMode;
   types: string[];
   label: string;
 }> = [
   { domain: 'www.iana.org', types: ['A', 'AAAA'], label: 'www.iana.org (Cross-zone CNAME)' },
   { domain: 'dnssec-failed.org', types: ['A', 'AAAA'], label: 'dnssec-failed.org (Bogus SEP)' },
+  { domain: 'ietf.org', mode: 'mail', types: ['MX', 'TXT'], label: 'ietf.org (MX + DANE + SPF)' },
   { domain: 'cloudflare.com', types: ['A', 'AAAA'], label: 'cloudflare.com (ECDSA)' },
   { domain: '.', types: ['DNSKEY', 'SOA'], label: '. (Root Zone)' },
 ];
@@ -83,24 +89,30 @@ export function App() {
       showStandbyKeys: deepLink.showStandbyKeys ?? savedSettings.showStandbyKeys,
     };
 
+    const initialMode: AnalysisMode =
+      deepLink.mode ?? savedSnapshots[0]?.mode ?? 'dnssec';
     const initialDomain = deepLink.name ?? savedSnapshots[0]?.displayDomain ?? 'digdeep.butter.eu';
     const initialTypes = deepLink.types ?? savedSnapshots[0]?.queryTypes ?? ['A', 'AAAA'];
 
     const latestSnap = savedSnapshots[0] ?? null;
     const matchesLatestSnap =
       latestSnap !== null &&
+      (latestSnap.mode ?? 'dnssec') === initialMode &&
       (!deepLink.name ||
         latestSnap.displayDomain.toLowerCase() === deepLink.name.toLowerCase().replace(/\.$/, '') ||
         (deepLink.name === '.' && latestSnap.displayDomain === '.'));
+
+    const defaultTab: ActiveTab = initialMode === 'mail' ? 'mail' : 'graph';
 
     return {
       settings: effectiveSettings,
       snapshots: savedSnapshots,
       activeSnapshot: matchesLatestSnap ? latestSnap : null,
+      analysisMode: initialMode,
       domainInput: initialDomain,
       selectedTypes: initialTypes,
       hasExtraType: initialTypes.some((t) => (EXTRA_TYPES as readonly string[]).includes(t)),
-      activeTab: deepLink.tab ?? ('graph' as ActiveTab),
+      activeTab: deepLink.tab ?? defaultTab,
       focusedTarget: deepLink.focus,
       deepLink,
     };
@@ -112,6 +124,7 @@ export function App() {
     initialBootState.activeSnapshot
   );
 
+  const [analysisMode, setAnalysisMode] = useState<AnalysisMode>(initialBootState.analysisMode);
   const [domainInput, setDomainInput] = useState<string>(initialBootState.domainInput);
   const [selectedTypes, setSelectedTypes] = useState<string[]>(initialBootState.selectedTypes);
   const [showExtraTypes, setShowExtraTypes] = useState<boolean>(initialBootState.hasExtraType);
@@ -150,7 +163,9 @@ export function App() {
     if (typeof document === 'undefined') return;
     if (activeSnapshot) {
       const verdict = STATUS_META[activeSnapshot.overallStatus].label;
-      document.title = `${activeSnapshot.displayDomain} (${verdict}) — DigDeep DNSSEC Visualizer`;
+      const modeLabel =
+        activeSnapshot.mode === 'mail' ? 'Mail · DANE · SPF' : 'DNSSEC Visualizer';
+      document.title = `${activeSnapshot.displayDomain} (${verdict}) — DigDeep ${modeLabel}`;
     } else {
       document.title = DEFAULT_PAGE_TITLE;
     }
@@ -185,12 +200,14 @@ export function App() {
       targetDomain: string,
       typesToQuery: string[],
       options?: {
+        modeOverride?: AnalysisMode;
         dohEndpointOverride?: string;
         preserveFocus?: boolean;
         pushHistory?: boolean;
       }
     ) => {
       const cleanDomain = targetDomain.trim() || '.';
+      const modeToRun: AnalysisMode = options?.modeOverride ?? analysisMode;
       const cleanTypes = typesToQuery.length > 0 ? typesToQuery : ['A'];
       const endpointToUse = options?.dohEndpointOverride ?? settings.dohEndpoint;
 
@@ -201,25 +218,41 @@ export function App() {
       setLoading(true);
       setError(null);
       setProgress({
-        phase: 'zone-cuts',
-        message: `Starting ${formatDohShortLabel(endpointToUse)} DoH trace for ${cleanDomain}…`,
+        phase: modeToRun === 'mail' ? 'mail-mx' : 'zone-cuts',
+        message:
+          modeToRun === 'mail'
+            ? `Starting ${formatDohShortLabel(endpointToUse)} Mail, DANE & SPF analysis for ${cleanDomain}…`
+            : `Starting ${formatDohShortLabel(endpointToUse)} DoH trace for ${cleanDomain}…`,
         completedQueries: 0,
       });
 
       try {
-        const snap = await runDnsvizAnalysis(cleanDomain, {
-          endpoint: endpointToUse,
-          queryTypes: cleanTypes,
-          trustAnchors: settings.trustAnchors,
-          onProgress: (p) => setProgress(p),
-        });
+        const snap =
+          modeToRun === 'mail'
+            ? await runMailAnalysis(cleanDomain, {
+                endpoint: endpointToUse,
+                trustAnchors: settings.trustAnchors,
+                onProgress: (p) => setProgress(p),
+              })
+            : await runDnsvizAnalysis(cleanDomain, {
+                endpoint: endpointToUse,
+                queryTypes: cleanTypes,
+                trustAnchors: settings.trustAnchors,
+                onProgress: (p) => setProgress(p),
+              });
 
         const updatedList = saveSnapshot(snap);
         setSnapshots(updatedList);
         setActiveSnapshot(snap);
 
-        const nextTab: ActiveTab = activeTab === 'history' ? 'graph' : activeTab;
-        if (activeTab === 'history') {
+        let nextTab: ActiveTab = activeTab;
+        if (modeToRun === 'mail') {
+          if (activeTab === 'history' || (activeSnapshot?.mode ?? 'dnssec') !== 'mail') {
+            nextTab = 'mail';
+            setActiveTab('mail');
+          }
+        } else if (activeTab === 'history' || activeTab === 'mail') {
+          nextTab = 'graph';
           setActiveTab('graph');
         }
 
@@ -228,6 +261,7 @@ export function App() {
           url.hash = '';
           url.search = buildDeepLinkSearch({
             name: snap.displayDomain,
+            mode: snap.mode,
             types: snap.queryTypes,
             dohEndpoint: snap.dohEndpoint,
             tab: nextTab,
@@ -253,6 +287,8 @@ export function App() {
       }
     },
     [
+      analysisMode,
+      activeSnapshot?.mode,
       settings.dohEndpoint,
       settings.trustAnchors,
       settings.showSoaAndNs,
@@ -270,6 +306,7 @@ export function App() {
     const url = new URL(window.location.href);
     const nextSearch = buildDeepLinkSearch({
       name: activeSnapshot.displayDomain,
+      mode: activeSnapshot.mode,
       types: activeSnapshot.queryTypes,
       dohEndpoint: activeSnapshot.dohEndpoint,
       tab: activeTab,
@@ -294,8 +331,10 @@ export function App() {
   useEffect(() => {
     const onPopState = () => {
       const parsed = parseDeepLinkParams(window.location.search, settings.customDohEndpoints);
+      const nextMode: AnalysisMode = parsed.mode ?? 'dnssec';
+      setAnalysisMode(nextMode);
       if (parsed.tab) setActiveTab(parsed.tab);
-      else setActiveTab('graph');
+      else setActiveTab(nextMode === 'mail' ? 'mail' : 'graph');
 
       setFocusedGraphTarget(parsed.focus);
 
@@ -309,10 +348,12 @@ export function App() {
       }
 
       if (!parsed.name) return;
-      const targetTypes = parsed.types ?? ['A', 'AAAA'];
+      const targetTypes = parsed.types ?? (nextMode === 'mail' ? ['MX', 'TXT'] : ['A', 'AAAA']);
       const targetDoh = parsed.dohEndpoint ?? settings.dohEndpoint;
       setDomainInput(parsed.name);
-      setSelectedTypes(targetTypes);
+      if (nextMode === 'dnssec') {
+        setSelectedTypes(targetTypes);
+      }
 
       if (parsed.isUntrustedCustomDoh && parsed.dohEndpoint) {
         setUntrustedDohPending(parsed.dohEndpoint);
@@ -321,14 +362,16 @@ export function App() {
 
       const cached = snapshots.find(
         (s) =>
+          (s.mode ?? 'dnssec') === nextMode &&
           s.displayDomain.toLowerCase() === parsed.name!.toLowerCase().replace(/\.$/, '') &&
-          s.queryTypes.join(',') === targetTypes.join(',') &&
+          (nextMode === 'mail' || s.queryTypes.join(',') === targetTypes.join(',')) &&
           s.dohEndpoint === targetDoh
       );
       if (cached) {
         setActiveSnapshot(cached);
       } else if (!isOffline) {
         void executeAnalysis(parsed.name, targetTypes, {
+          modeOverride: nextMode,
           dohEndpointOverride: targetDoh,
           preserveFocus: Boolean(parsed.focus),
           pushHistory: false,
@@ -373,11 +416,13 @@ export function App() {
     if (
       !isOffline &&
       (deepLink.name !== null ||
+        deepLink.mode !== null ||
         deepLink.types !== null ||
         deepLink.dohEndpoint !== null ||
         snapshots.length === 0)
     ) {
       void executeAnalysis(domainInput, selectedTypes, {
+        modeOverride: initialBootState.analysisMode,
         preserveFocus: Boolean(deepLink.focus),
         pushHistory: false,
       });
@@ -397,10 +442,35 @@ export function App() {
     void executeAnalysis(domainInput, selectedTypes, { pushHistory: true });
   };
 
+  const handleSwitchMode = (nextMode: AnalysisMode) => {
+    if (nextMode === analysisMode) return;
+    setAnalysisMode(nextMode);
+    const matchingSaved = snapshots.find(
+      (s) =>
+        (s.mode ?? 'dnssec') === nextMode &&
+        s.displayDomain.toLowerCase() === domainInput.trim().toLowerCase().replace(/\.$/, '') &&
+        s.dohEndpoint === settings.dohEndpoint
+    );
+    if (isOffline) {
+      if (matchingSaved) {
+        setActiveSnapshot(matchingSaved);
+        setActiveTab(nextMode === 'mail' ? 'mail' : 'graph');
+      }
+      return;
+    }
+    if (!loading && !untrustedDohPending && domainInput.trim().length > 0) {
+      void executeAnalysis(domainInput, selectedTypes, {
+        modeOverride: nextMode,
+        pushHistory: true,
+      });
+    }
+  };
+
   const handleCopyShareLink = async () => {
     if (!activeSnapshot || typeof window === 'undefined') return;
     const shareUrl = buildShareUrl(window.location.href, {
       name: activeSnapshot.displayDomain,
+      mode: activeSnapshot.mode,
       types: activeSnapshot.queryTypes,
       dohEndpoint: activeSnapshot.dohEndpoint,
       tab: activeTab,
@@ -484,7 +554,7 @@ export function App() {
                 </span>
               </div>
               <p className="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">
-                Client-Side DNSSEC Chain-of-Trust Visualizer &amp; Wire Inspector
+                Client-Side DNSSEC, MX, DANE &amp; SPF Analyzer &amp; DoH Wire Inspector
               </p>
             </div>
           </div>
@@ -582,58 +652,110 @@ export function App() {
               ) : (
                 <>
                   <Play className="w-4 h-4 fill-current" />
-                  <span>Analyze DNSSEC</span>
+                  <span>
+                    {ANALYSIS_MODES.find((m) => m.id === analysisMode)?.actionLabel ??
+                      'Analyze DNSSEC'}
+                  </span>
                 </>
               )}
             </button>
           </form>
 
-          {/* RR Type Selector */}
-          <div className="flex flex-wrap items-center gap-1 text-xs">
-            <span className="text-[11px] font-medium text-slate-500 mr-1">RR Types:</span>
-            {PRIMARY_TYPES.map((t) => {
-              const active = selectedTypes.includes(t);
-              return (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => toggleQueryType(t)}
-                  className={`px-2 py-0.5 rounded-md font-mono text-[11px] transition-colors cursor-pointer ${
-                    active
-                      ? 'bg-cyan-500 text-slate-950 font-bold'
-                      : 'bg-slate-200/70 dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:bg-slate-300/70 dark:hover:bg-slate-800'
-                  }`}
-                >
-                  {t}
-                </button>
-              );
-            })}
-            {showExtraTypes &&
-              EXTRA_TYPES.map((t) => {
-                const active = selectedTypes.includes(t);
+          {/* Analysis Mode Selector + Contextual Controls */}
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2 text-xs">
+            <div
+              role="tablist"
+              aria-label="DNS Analysis Mode"
+              className="inline-flex items-center gap-1 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-100/90 dark:bg-slate-900/90 p-1 self-start"
+            >
+              {ANALYSIS_MODES.map((m) => {
+                const active = analysisMode === m.id;
+                const ModeIcon = m.id === 'mail' ? Mail : Network;
                 return (
                   <button
-                    key={t}
+                    key={m.id}
                     type="button"
-                    onClick={() => toggleQueryType(t)}
-                    className={`px-2 py-0.5 rounded-md font-mono text-[11px] transition-colors cursor-pointer ${
+                    role="tab"
+                    aria-selected={active}
+                    onClick={() => handleSwitchMode(m.id)}
+                    title={m.description}
+                    className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer ${
                       active
-                        ? 'bg-cyan-500 text-slate-950 font-bold'
-                        : 'bg-slate-200/70 dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:bg-slate-300/70 dark:hover:bg-slate-800'
+                        ? 'bg-white dark:bg-slate-800 text-cyan-700 dark:text-cyan-300 font-semibold shadow-sm border border-slate-200/80 dark:border-slate-700'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
                     }`}
                   >
-                    {t}
+                    <ModeIcon className="w-3.5 h-3.5" />
+                    <span>{m.label}</span>
                   </button>
                 );
               })}
-            <button
-              type="button"
-              onClick={() => setShowExtraTypes((v) => !v)}
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] text-slate-500 hover:text-cyan-500 cursor-pointer"
-            >
-              <SlidersHorizontal className="w-3 h-3" />
-              {showExtraTypes ? 'Less' : 'More'}
-            </button>
+            </div>
+
+            {analysisMode === 'dnssec' ? (
+              <div className="flex flex-wrap items-center gap-1">
+                <span className="text-[11px] font-medium text-slate-500 mr-1">RR Types:</span>
+                {PRIMARY_TYPES.map((t) => {
+                  const active = selectedTypes.includes(t);
+                  return (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => toggleQueryType(t)}
+                      className={`px-2 py-0.5 rounded-md font-mono text-[11px] transition-colors cursor-pointer ${
+                        active
+                          ? 'bg-cyan-500 text-slate-950 font-bold'
+                          : 'bg-slate-200/70 dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:bg-slate-300/70 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      {t}
+                    </button>
+                  );
+                })}
+                {showExtraTypes &&
+                  EXTRA_TYPES.map((t) => {
+                    const active = selectedTypes.includes(t);
+                    return (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => toggleQueryType(t)}
+                        className={`px-2 py-0.5 rounded-md font-mono text-[11px] transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-cyan-500 text-slate-950 font-bold'
+                            : 'bg-slate-200/70 dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:bg-slate-300/70 dark:hover:bg-slate-800'
+                        }`}
+                      >
+                        {t}
+                      </button>
+                    );
+                  })}
+                <button
+                  type="button"
+                  onClick={() => setShowExtraTypes((v) => !v)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] text-slate-500 hover:text-cyan-500 cursor-pointer"
+                >
+                  <SlidersHorizontal className="w-3 h-3" />
+                  {showExtraTypes ? 'Less' : 'More'}
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                <span className="font-medium">Checks:</span>
+                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                  MX + A/AAAA
+                </span>
+                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                  _25._tcp DANE TLSA
+                </span>
+                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                  SPF v=spf1 (10-Lookup Audit)
+                </span>
+                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                  WebCrypto DNSSEC
+                </span>
+              </div>
+            )}
           </div>
         </div>
       </header>
@@ -702,9 +824,15 @@ export function App() {
                     <span className="font-mono font-bold text-base text-slate-900 dark:text-slate-100">
                       {activeSnapshot.displayDomain}
                     </span>
-                    <span className="font-mono text-xs text-slate-500">
-                      [{activeSnapshot.queryTypes.join(', ')}]
-                    </span>
+                    {activeSnapshot.mode === 'mail' ? (
+                      <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 px-2 py-0.5 font-mono text-[11px] font-semibold">
+                        MAIL · MX · DANE · SPF
+                      </span>
+                    ) : (
+                      <span className="font-mono text-xs text-slate-500">
+                        [{activeSnapshot.queryTypes.join(', ')}]
+                      </span>
+                    )}
                     {activeSnapshot.resolverVerdict && (
                       <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5 font-mono text-[11px] text-slate-600 dark:text-slate-300">
                         {formatDohShortLabel(activeSnapshot.dohEndpoint)}:{' '}
@@ -757,7 +885,9 @@ export function App() {
                     type="button"
                     disabled={loading}
                     onClick={() =>
-                      void executeAnalysis(activeSnapshot.displayDomain, activeSnapshot.queryTypes)
+                      void executeAnalysis(activeSnapshot.displayDomain, activeSnapshot.queryTypes, {
+                        modeOverride: activeSnapshot.mode ?? 'dnssec',
+                      })
                     }
                     className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-cyan-500 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 cursor-pointer"
                     title={`Run a fresh live ${formatDohShortLabel(settings.dohEndpoint)} DoH trace and save a new snapshot`}
@@ -773,32 +903,35 @@ export function App() {
             <div className="flex items-center gap-1.5 overflow-x-auto border-b border-slate-200 dark:border-slate-800 pb-2">
               {(
                 [
-                  { id: 'graph', label: 'DNSSEC Chain Graph', icon: Network },
+                  ...(activeSnapshot.mode === 'mail'
+                    ? [{ id: 'mail' as const, label: 'Mail, DANE & SPF', icon: Mail }]
+                    : []),
+                  { id: 'graph' as const, label: 'DNSSEC Chain Graph', icon: Network },
                   {
-                    id: 'audit',
+                    id: 'audit' as const,
                     label: 'Audit & RFC Checks',
                     icon: issueCount > 0 ? AlertTriangle : ShieldCheck,
                     badge: issueCount,
                   },
                   {
-                    id: 'responses',
+                    id: 'responses' as const,
                     label: 'DoH Wire Responses',
                     icon: Terminal,
                     badge: activeSnapshot.queries.length,
                   },
                   {
-                    id: 'zones',
+                    id: 'zones' as const,
                     label: 'Zones & Nameservers',
                     icon: Globe,
                     badge: activeSnapshot.zones.length,
                   },
                   {
-                    id: 'history',
+                    id: 'history' as const,
                     label: 'Local History & Diff',
                     icon: Clock,
                     badge: snapshots.length,
                   },
-                ] as const
+                ]
               ).map((tab) => {
                 const Icon = tab.icon;
                 const active = activeTab === tab.id;
@@ -832,7 +965,19 @@ export function App() {
             </div>
 
             {/* Active View Content */}
-            {activeTab === 'graph' && (
+            {activeTab === 'mail' && activeSnapshot.mode === 'mail' && (
+              <MailAnalysisView
+                snapshot={activeSnapshot}
+                onJumpToGraphTarget={(targetId) => {
+                  setFocusedGraphTarget(targetId);
+                  setActiveTab('graph');
+                }}
+                onOpenChainGraph={() => setActiveTab('graph')}
+              />
+            )}
+
+            {(activeTab === 'graph' ||
+              (activeTab === 'mail' && activeSnapshot.mode !== 'mail')) && (
               <ChainGraphView
                 snapshot={activeSnapshot}
                 theme={theme}
@@ -871,16 +1016,24 @@ export function App() {
                 snapshots={snapshots}
                 activeSnapshotId={activeSnapshot.id}
                 onSelectSnapshot={(snap) => {
+                  const snapMode: AnalysisMode = snap.mode ?? 'dnssec';
                   setFocusedGraphTarget(null);
                   setActiveSnapshot(snap);
+                  setAnalysisMode(snapMode);
                   setDomainInput(snap.displayDomain);
-                  setSelectedTypes(snap.queryTypes);
-                  setActiveTab('graph');
+                  if (snapMode === 'dnssec') {
+                    setSelectedTypes(snap.queryTypes);
+                  }
+                  setActiveTab(snapMode === 'mail' ? 'mail' : 'graph');
                 }}
-                onReprobe={(dom, types) => {
+                onReprobe={(dom, types, mode) => {
+                  const nextMode: AnalysisMode = mode ?? 'dnssec';
+                  setAnalysisMode(nextMode);
                   setDomainInput(dom);
-                  setSelectedTypes(types);
-                  void executeAnalysis(dom, types, { pushHistory: true });
+                  if (nextMode === 'dnssec') {
+                    setSelectedTypes(types);
+                  }
+                  void executeAnalysis(dom, types, { modeOverride: nextMode, pushHistory: true });
                 }}
                 onTogglePin={(id, pinned) => {
                   const next = updateSnapshotMeta(id, { pinned });
@@ -917,14 +1070,20 @@ export function App() {
           <HistoryPanel
             snapshots={snapshots}
             onSelectSnapshot={(snap) => {
+              const snapMode: AnalysisMode = snap.mode ?? 'dnssec';
               setFocusedGraphTarget(null);
+              setAnalysisMode(snapMode);
               setActiveSnapshot(snap);
-              setActiveTab('graph');
+              setActiveTab(snapMode === 'mail' ? 'mail' : 'graph');
             }}
-            onReprobe={(dom, types) => {
+            onReprobe={(dom, types, mode) => {
+              const nextMode: AnalysisMode = mode ?? 'dnssec';
+              setAnalysisMode(nextMode);
               setDomainInput(dom);
-              setSelectedTypes(types);
-              void executeAnalysis(dom, types, { pushHistory: true });
+              if (nextMode === 'dnssec') {
+                setSelectedTypes(types);
+              }
+              void executeAnalysis(dom, types, { modeOverride: nextMode, pushHistory: true });
             }}
             onTogglePin={(id, pinned) => setSnapshots(updateSnapshotMeta(id, { pinned }))}
             onDelete={(id) => setSnapshots(deleteSnapshot(id))}
@@ -942,23 +1101,33 @@ export function App() {
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
           <div>
             <span className="font-semibold text-slate-700 dark:text-slate-300">DigDeep</span> ·
-            100% client-side RFC 4035 / 5155 DNSSEC &amp; RFC 8484 DoH visualizer verified in-browser
-            via WebCrypto.
+            100% client-side DNSSEC, MX, SMTP DANE &amp; SPF analyzer verified in-browser via
+            WebCrypto &amp; RFC 8484 DoH.
           </div>
           <nav aria-label="Example DNSSEC traces" className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <span className="text-slate-400 dark:text-slate-500">Examples:</span>
             {FOOTER_EXAMPLE_TRACES.map((ex) => {
-              const href = `?name=${encodeURIComponent(ex.domain)}&types=${ex.types.join(',')}`;
+              const exMode: AnalysisMode = ex.mode ?? 'dnssec';
+              const href =
+                exMode === 'mail'
+                  ? `?name=${encodeURIComponent(ex.domain)}&mode=mail`
+                  : `?name=${encodeURIComponent(ex.domain)}&types=${ex.types.join(',')}`;
               return (
                 <a
-                  key={ex.domain}
+                  key={`${ex.domain}-${exMode}`}
                   href={href}
                   onClick={(e) => {
                     if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
                     e.preventDefault();
+                    setAnalysisMode(exMode);
                     setDomainInput(ex.domain);
-                    setSelectedTypes(ex.types);
-                    void executeAnalysis(ex.domain, ex.types, { pushHistory: true });
+                    if (exMode === 'dnssec') {
+                      setSelectedTypes(ex.types);
+                    }
+                    void executeAnalysis(ex.domain, ex.types, {
+                      modeOverride: exMode,
+                      pushHistory: true,
+                    });
                   }}
                   className="font-mono text-cyan-600 dark:text-cyan-400 hover:underline"
                 >

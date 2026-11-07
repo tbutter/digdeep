@@ -255,17 +255,22 @@ function formatIpv6(bytes: Uint8Array): string {
   return `${left}::${right}`;
 }
 
-function parseCharacterStrings(rdata: Uint8Array): string {
-  const parts: string[] = [];
+function decodeCharacterStringChunks(rdata: Uint8Array): string[] {
+  const chunks: string[] = [];
   let pos = 0;
   while (pos < rdata.length) {
     const len = rdata[pos];
     const strBytes = rdata.subarray(pos + 1, Math.min(rdata.length, pos + 1 + len));
-    const escaped = textDecoder.decode(strBytes).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    parts.push(`"${escaped}"`);
+    chunks.push(textDecoder.decode(strBytes));
     pos += 1 + len;
   }
-  return parts.join(' ');
+  return chunks;
+}
+
+function parseCharacterStrings(rdata: Uint8Array): string {
+  return decodeCharacterStringChunks(rdata)
+    .map((s) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`)
+    .join(' ');
 }
 
 /**
@@ -405,7 +410,19 @@ function parseRecordRdata(
   }
 
   // 9. TXT (16) & SPF (99) & HINFO (13)
-  if (rrtype === RR_TYPES.TXT || rrtype === RR_TYPES.SPF || rrtype === RR_TYPES.HINFO) {
+  if (rrtype === RR_TYPES.TXT || rrtype === RR_TYPES.SPF) {
+    const strings = decodeCharacterStringChunks(rawRdata);
+    return {
+      canonicalRdata: new Uint8Array(rawRdata),
+      rdataText: parseCharacterStrings(rawRdata),
+      parsed: {
+        kind: 'TXT',
+        strings,
+        joinedText: strings.join(''),
+      },
+    };
+  }
+  if (rrtype === RR_TYPES.HINFO) {
     return {
       canonicalRdata: new Uint8Array(rawRdata),
       rdataText: parseCharacterStrings(rawRdata),
@@ -588,7 +605,7 @@ function parseRecordRdata(
   }
 
   // 17. TLSA (52) & SSHFP (44)
-  if (rrtype === RR_TYPES.TLSA && rdlength >= 4) {
+  if (rrtype === RR_TYPES.TLSA && rdlength >= 3) {
     const usage = rawRdata[0];
     const selector = rawRdata[1];
     const matchingType = rawRdata[2];
@@ -596,7 +613,13 @@ function parseRecordRdata(
     return {
       canonicalRdata: new Uint8Array(rawRdata),
       rdataText: `${usage} ${selector} ${matchingType} ${certData}`,
-      parsed: { kind: 'GENERIC' },
+      parsed: {
+        kind: 'TLSA',
+        usage,
+        selector,
+        matchingType,
+        certAssociationHex: certData,
+      },
     };
   }
   if (rrtype === RR_TYPES.SSHFP && rdlength >= 3) {

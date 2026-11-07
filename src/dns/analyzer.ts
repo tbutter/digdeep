@@ -24,7 +24,9 @@ import {
   isSubdomainOrEqual,
   normalizeFqdn,
 } from './encoding';
+import { evaluateMailFromSnapshotData } from './mailAnalyzer';
 import type {
+  AnalysisMode,
   AnalysisProgress,
   AnalysisSnapshot,
   AnalyzedDnskey,
@@ -52,7 +54,7 @@ export interface AnalyzeOptions extends DohClientOptions {
   onProgress?: (progress: AnalysisProgress) => void;
 }
 
-function findLog(
+export function findLog(
   logs: DohQueryLog[],
   qname: string,
   qtype: number,
@@ -123,7 +125,7 @@ function isCandidateZoneApex(
 /**
  * Discovers all zone cuts along `fqdn` using parallel SOA + DS queries.
  */
-async function discoverZoneCutsForName(
+export async function discoverZoneCutsForName(
   session: DohSession,
   fqdn: string,
   discoveredZones: Set<string>,
@@ -370,6 +372,7 @@ export async function reverifySnapshot(
 ): Promise<AnalysisSnapshot> {
   const updated = await evaluateSnapshotFromLogs({
     id: snapshot.id,
+    mode: snapshot.mode,
     targetName: snapshot.targetName,
     queryTypes: snapshot.queryTypes,
     dohEndpoint: snapshot.dohEndpoint,
@@ -388,6 +391,7 @@ export async function reverifySnapshot(
 
 interface EvaluateInput {
   id: string;
+  mode?: AnalysisMode;
   targetName: string;
   queryTypes: string[];
   dohEndpoint: string;
@@ -440,6 +444,7 @@ function findAuthoritativeZoneForOwner(
 export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<AnalysisSnapshot> {
   const {
     id,
+    mode = 'dnssec',
     targetName,
     queryTypes,
     dohEndpoint,
@@ -452,8 +457,10 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
 
   const validationEpochSec = Math.floor(validatedAt / 1000);
   const enabledAnchors = trustAnchors.filter((ta) => ta.enabled);
-  // Exclude auxiliary out-of-bailiwick nameserver IP lookups (`doBit: false`) from DNSSEC zone/RRset reconstruction
-  const cdLogs = queries.filter((q) => q.cd && !q.purpose.startsWith('Nameserver IP'));
+  // Exclude auxiliary out-of-bailiwick nameserver IP and recursive SPF helper lookups from DNSSEC zone reconstruction
+  const cdLogs = queries.filter(
+    (q) => q.cd && !q.purpose.startsWith('Nameserver IP') && !q.purpose.startsWith('SPF lookup')
+  );
 
   // Reconstruct set of discovered zones from DNSKEY queries + SOA records
   const allZones = new Set<string>(['.']);
@@ -634,7 +641,9 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       continue;
     }
     const isTarget =
-      log.purpose.startsWith('Target RRset') || log.purpose.startsWith('CNAME target');
+      log.purpose.startsWith('Target RRset') ||
+      log.purpose.startsWith('CNAME target') ||
+      log.purpose.startsWith('Mail target');
     addSectionRecords(log.packet.answers, 'answer', isTarget);
     addSectionRecords(log.packet.authorities, 'authority', false);
   }
@@ -1287,13 +1296,25 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
 
   // 6. Build CNAME Edges & Target Negative Response Nodes (NXDOMAIN / NODATA)
   const cnameEdges: CnameEdge[] = [];
-  for (const qt of queryTypes) {
+  const targetProbes: Array<{ owner: string; qt: string }> = queryTypes.map((qt) => ({
+    owner: targetName,
+    qt,
+  }));
+  for (const log of cdLogs) {
+    if (log.purpose.startsWith('Mail target')) {
+      if (!targetProbes.some((p) => p.owner === log.qname && p.qt === log.qtypeName)) {
+        targetProbes.push({ owner: log.qname, qt: log.qtypeName });
+      }
+    }
+  }
+
+  for (const { owner: probeOwner, qt } of targetProbes) {
     const qtypeNum = stringToRrType(qt);
-    const initialLog = findLog(cdLogs, targetName, qtypeNum, true);
+    const initialLog = findLog(cdLogs, probeOwner, qtypeNum, true);
     if (!initialLog) continue;
 
-    // Follow CNAME hops starting at targetName
-    let curName = targetName;
+    // Follow CNAME hops starting at probeOwner
+    let curName = probeOwner;
     const seenCnames = new Set<string>([curName]);
     let lastCnameRrsetId: string | undefined;
     let lastCnameFrom: string | undefined;
@@ -1525,7 +1546,9 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
   }
 
   // 8. Extract 1.1.1.1 CD=0 Resolver Verdict
-  const valQuery = queries.find((q) => !q.cd);
+  const valQuery =
+    queries.find((q) => !q.cd && q.purpose.includes('validating check')) ??
+    queries.find((q) => !q.cd && !q.purpose.startsWith('SPF lookup'));
   const resolverVerdict: ResolverVerdict | undefined = valQuery
     ? {
         qname: valQuery.qname,
@@ -1545,18 +1568,26 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
 
   const targetLeafZones = zones.filter((z) => {
     const isTargetAnc = isSubdomainOrEqual(targetName, z.zoneName);
-    const isCnameTargetAnc = cnameEdges.some((ce) => isSubdomainOrEqual(ce.toName, z.zoneName));
+    const isCnameTargetAnc =
+      mode !== 'mail' && cnameEdges.some((ce) => isSubdomainOrEqual(ce.toName, z.zoneName));
     return isTargetAnc || isCnameTargetAnc;
   });
 
   // Check target RRset / negativeNode statuses specifically
   const targetElementStatuses: ValidationStatus[] = [];
   for (const z of zones) {
+    if (mode === 'mail' && !isSubdomainOrEqual(targetName, z.zoneName)) {
+      continue;
+    }
     for (const r of z.rrsets) {
-      if (r.isQueryTarget) targetElementStatuses.push(r.status);
+      if (r.isQueryTarget && (mode !== 'mail' || r.name === targetName)) {
+        targetElementStatuses.push(r.status);
+      }
     }
     for (const n of z.negativeNodes) {
-      targetElementStatuses.push(n.status);
+      if (mode !== 'mail' || n.qname === targetName) {
+        targetElementStatuses.push(n.status);
+      }
     }
   }
 
@@ -1604,6 +1635,21 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     overallSummary = `Validation state is indeterminate for ${displayFqdn(targetName)}.`;
   }
 
+  let mailAnalysis: AnalysisSnapshot['mailAnalysis'];
+  if (mode === 'mail') {
+    const mailResult = evaluateMailFromSnapshotData({
+      targetName,
+      queries,
+      zones,
+      cnameEdges,
+      targetDomainStatus: overallStatus,
+    });
+    mailAnalysis = mailResult.mailAnalysis;
+    findings.push(...mailResult.mailFindings);
+    overallStatus = mailResult.overallStatus;
+    overallSummary = mailResult.overallSummary;
+  }
+
   // Deduplicate findings & sort errors -> warnings -> info
   const severityOrder: Record<AuditFinding['severity'], number> = {
     error: 0,
@@ -1621,6 +1667,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
   return {
     id,
     version: SNAPSHOT_ENGINE_VERSION,
+    ...(mode !== 'dnssec' ? { mode } : {}),
     targetName,
     displayDomain: displayFqdn(targetName),
     queryTypes,
@@ -1636,5 +1683,6 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     findings: sortedFindings,
     queries,
     trustAnchorsUsed: trustAnchors,
+    ...(mailAnalysis ? { mailAnalysis } : {}),
   };
 }

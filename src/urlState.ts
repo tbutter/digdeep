@@ -3,13 +3,16 @@ import {
   DOH_SERVER_PRESETS,
   normalizeDohEndpoint,
 } from './dns/constants';
+import type { AnalysisMode } from './dns/types';
 
-export type ActiveTab = 'graph' | 'audit' | 'responses' | 'zones' | 'history';
+export type ActiveTab = 'mail' | 'graph' | 'audit' | 'responses' | 'zones' | 'history';
 
-const VALID_TABS: readonly ActiveTab[] = ['graph', 'audit', 'responses', 'zones', 'history'];
+const VALID_TABS: readonly ActiveTab[] = ['mail', 'graph', 'audit', 'responses', 'zones', 'history'];
+const VALID_MODES: readonly AnalysisMode[] = ['dnssec', 'mail'];
 
 export interface DeepLinkState {
   name: string;
+  mode?: AnalysisMode;
   types: string[];
   dohEndpoint: string;
   tab: ActiveTab;
@@ -21,6 +24,7 @@ export interface DeepLinkState {
 export interface ParsedDeepLink {
   hasDeepLink: boolean;
   name: string | null;
+  mode: AnalysisMode | null;
   types: string[] | null;
   dohEndpoint: string | null;
   isUntrustedCustomDoh: boolean;
@@ -126,6 +130,12 @@ export function parseDeepLinkParams(
   const rawName = params.get('name');
   const name = rawName !== null && rawName.trim().length > 0 ? rawName.trim() : null;
 
+  const rawMode = params.get('mode')?.trim().toLowerCase() ?? null;
+  let mode: AnalysisMode | null =
+    rawMode && (VALID_MODES as readonly string[]).includes(rawMode)
+      ? (rawMode as AnalysisMode)
+      : null;
+
   const rawTypes = params.get('types');
   let types: string[] | null = null;
   if (rawTypes) {
@@ -153,6 +163,10 @@ export function parseDeepLinkParams(
       ? (rawTab as ActiveTab)
       : null;
 
+  if (mode === null && tab === 'mail') {
+    mode = 'mail';
+  }
+
   const rawFocus = params.get('focus');
   const focus = rawFocus && rawFocus.trim().length > 0 ? rawFocus.trim() : null;
 
@@ -169,6 +183,7 @@ export function parseDeepLinkParams(
 
   const hasDeepLink =
     name !== null ||
+    mode !== null ||
     types !== null ||
     dohEndpoint !== null ||
     tab !== null ||
@@ -179,6 +194,7 @@ export function parseDeepLinkParams(
   return {
     hasDeepLink,
     name,
+    mode,
     types,
     dohEndpoint,
     isUntrustedCustomDoh,
@@ -195,20 +211,26 @@ export function buildDeepLinkSearch(
 ): string {
   const params = new URLSearchParams();
   const cleanName = state.name.trim() || '.';
+  const mode: AnalysisMode = state.mode ?? 'dnssec';
   const cleanTypes = state.types.length > 0 ? state.types : ['A'];
 
   params.set('name', cleanName);
-  params.set('types', cleanTypes.join(','));
+  if (mode === 'mail') {
+    params.set('mode', 'mail');
+  } else {
+    params.set('types', cleanTypes.join(','));
+  }
 
   if (options?.includeDefaultDoh || state.dohEndpoint !== DEFAULT_DOH_ENDPOINT) {
     params.set('doh', formatDohParam(state.dohEndpoint));
   }
 
-  // History is stored in browser localStorage, so shared links open on the Chain Graph instead
+  const defaultTab: ActiveTab = mode === 'mail' ? 'mail' : 'graph';
+  // History is stored in browser localStorage, so shared links open on the primary tab instead
   const effectiveTab: ActiveTab =
-    options?.forShare && state.tab === 'history' ? 'graph' : state.tab;
+    options?.forShare && state.tab === 'history' ? defaultTab : state.tab;
 
-  if (effectiveTab !== 'graph') {
+  if (effectiveTab !== defaultTab) {
     params.set('tab', effectiveTab);
   }
 
