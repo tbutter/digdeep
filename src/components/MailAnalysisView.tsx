@@ -354,7 +354,7 @@ function MxHostCard({
             )}
           </div>
 
-          {/* Resolved IPv4 / IPv6 Addresses */}
+          {/* Resolved IPv4 / IPv6 Addresses & Reverse DNS (PTR / FCrDNS) */}
           <div className="flex flex-wrap items-center gap-1.5 pt-1">
             {host.addresses.length === 0 ? (
               <span className="text-xs font-mono text-rose-600 dark:text-rose-400">
@@ -364,7 +364,7 @@ function MxHostCard({
               host.addresses.map((addr) => (
                 <span
                   key={addr.ip}
-                  className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 font-mono text-xs border ${
+                  className={`inline-flex flex-wrap items-center gap-1.5 rounded-md px-2 py-0.5 font-mono text-xs border ${
                     addr.isPublic
                       ? addr.family === 6
                         ? 'bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border-indigo-500/25'
@@ -377,6 +377,42 @@ function MxHostCard({
                   </span>
                   <span>{addr.ip}</span>
                   {addr.note && <span className="text-[10px]">({addr.note})</span>}
+                  {addr.ptrTargets && addr.ptrTargets.length > 0 && (
+                    <span
+                      className="text-[10px] text-slate-500 dark:text-slate-400"
+                      title={addr.ptrQname ? `PTR ${displayFqdn(addr.ptrQname)}` : undefined}
+                    >
+                      PTR→{addr.ptrTargets.map(displayFqdn).join(',')}
+                    </span>
+                  )}
+                  {addr.fcrdnsStatus === 'valid' && (
+                    <span
+                      className="rounded bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 px-1 py-0.2 text-[9px] font-bold"
+                      title="Forward-Confirmed Reverse DNS (PTR target resolves back to this IP)"
+                    >
+                      FCrDNS ✓
+                    </span>
+                  )}
+                  {addr.fcrdnsStatus === 'no-ptr' && (
+                    <span
+                      className="rounded bg-amber-500/25 text-amber-800 dark:text-amber-200 px-1 py-0.2 text-[9px] font-bold"
+                      title={
+                        addr.ptrQname
+                          ? `No PTR record at ${displayFqdn(addr.ptrQname)}`
+                          : 'No reverse DNS PTR record'
+                      }
+                    >
+                      NO PTR
+                    </span>
+                  )}
+                  {addr.fcrdnsStatus === 'ptr-mismatch' && (
+                    <span
+                      className="rounded bg-amber-500/25 text-amber-800 dark:text-amber-200 px-1 py-0.2 text-[9px] font-bold"
+                      title="Reverse PTR hostname does not resolve forward back to this IP"
+                    >
+                      FCrDNS MISMATCH
+                    </span>
+                  )}
                 </span>
               ))
             )}
@@ -813,14 +849,28 @@ export function MailAnalysisView({
                   ? 'No MX RRset; MTAs fall back to apex A/AAAA per RFC 5321 §5.1.'
                   : 'Domain cannot receive inbound SMTP mail.'}
           </p>
+          {mail.fcrdnsSummary.checkedIpCount > 0 && mail.fcrdnsSummary.status !== 'unchecked' && (
+            <div className="pt-1 border-t border-slate-100 dark:border-slate-800/80 flex items-center justify-between text-[11px]">
+              <span className="text-slate-500 dark:text-slate-400 font-medium">MX FCrDNS (PTR):</span>
+              <span
+                className={`font-mono font-semibold ${
+                  mail.fcrdnsSummary.status === 'all-valid'
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : 'text-amber-600 dark:text-amber-400'
+                }`}
+              >
+                {mail.fcrdnsSummary.validCount}/{mail.fcrdnsSummary.checkedIpCount} Verified
+              </span>
+            </div>
+          )}
         </div>
 
-        {/* 2. SMTP DANE Card */}
+        {/* 2. SMTP DANE & MTA-STS Card */}
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-2">
           <div className="flex items-center justify-between gap-2">
             <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-cyan-600 dark:text-cyan-400">
               <Lock className="w-3.5 h-3.5" />
-              SMTP DANE (RFC 7672)
+              SMTP DANE (RFC 7672) &amp; MTA-STS
             </span>
             {mail.daneStatus === 'all-valid' ? (
               <CheckCircle2 className="w-4 h-4 text-emerald-500" />
@@ -828,26 +878,44 @@ export function MailAnalysisView({
               <ShieldAlert className="w-4 h-4 text-rose-500" />
             ) : mail.daneStatus === 'partial' || mail.daneStatus === 'unsigned-ignored' ? (
               <AlertTriangle className="w-4 h-4 text-amber-500" />
+            ) : mail.mtaSts.status === 'enforce' || mail.mtaSts.status === 'dns-only' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-500" />
             ) : (
               <ShieldOff className="w-4 h-4 text-slate-400" />
             )}
           </div>
           <div className="font-bold text-sm text-slate-900 dark:text-slate-100">
             {mail.daneStatus === 'all-valid'
-              ? `Active & Verified (${daneProtectedCount}/${nonNullMxCount} MX)`
+              ? `DANE Active & Verified (${daneProtectedCount}/${nonNullMxCount} MX)`
               : mail.daneStatus === 'partial'
-                ? `Partial / Advisory (${daneProtectedCount}/${nonNullMxCount} MX)`
+                ? `DANE Partial (${daneProtectedCount}/${nonNullMxCount} MX)`
                 : mail.daneStatus === 'unsigned-ignored'
                   ? 'Unsigned TLSA (Ignored!)'
                   : mail.daneStatus === 'bogus'
-                    ? 'BOGUS — Delivery Blocked'
-                    : mail.daneStatus === 'not-applicable'
-                      ? 'Not Applicable'
-                      : 'Not Deployed (No TLSA)'}
+                    ? 'DANE BOGUS — Delivery Blocked'
+                    : mail.mtaSts.present
+                      ? `MTA-STS (${mail.mtaSts.policy?.mode ?? 'DNS Published'})`
+                      : mail.daneStatus === 'not-applicable'
+                        ? 'Not Applicable'
+                        : 'No DANE or MTA-STS'}
           </div>
           <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
             {mail.daneSummary}
           </p>
+          {(mail.mtaSts.present || mail.tlsRpt.present) && (
+            <div className="pt-1 border-t border-slate-100 dark:border-slate-800/80 flex flex-wrap items-center gap-2 text-[11px]">
+              {mail.mtaSts.present && (
+                <span className="rounded bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 px-1.5 py-0.5 font-mono font-semibold">
+                  MTA-STS: {mail.mtaSts.policy?.mode ?? 'STSv1'}
+                </span>
+              )}
+              {mail.tlsRpt.present && (
+                <span className="rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 px-1.5 py-0.5 font-mono font-semibold">
+                  TLS-RPT: {mail.tlsRpt.rua.length} URI{mail.tlsRpt.rua.length === 1 ? '' : 's'}
+                </span>
+              )}
+            </div>
+          )}
         </div>
 
         {/* 3. SPF Policy & Lookup Budget Card */}
@@ -1390,6 +1458,304 @@ export function MailAnalysisView({
           )}
         </div>
       </section>
+
+      {/* Section 5: MTA-STS (RFC 8461), SMTP TLS Reporting (RFC 8460) & BIMI */}
+      {mail.mtaSts && mail.tlsRpt && mail.bimi && (
+        <section className="space-y-3">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              <Lock className="w-4 h-4 text-cyan-500" />
+              <span>
+                SMTP Transport Policy, TLS Reporting &amp; Brand Identity (MTA-STS · TLS-RPT · BIMI)
+              </span>
+            </h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Validates RFC 8461 <code className="font-mono">_mta-sts</code> policies, RFC 8460{' '}
+              <code className="font-mono">_smtp._tls</code> failure reporting, and{' '}
+              <code className="font-mono">default._bimi</code> brand indicators with DMARC
+              enforcement prerequisites.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3.5">
+            {/* 1. MTA-STS Card */}
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-xs font-bold text-slate-900 dark:text-slate-100">
+                    {displayFqdn(mail.mtaSts.qname)}
+                  </span>
+                  {mail.mtaSts.present && (
+                    <StatusBadge status={mail.mtaSts.dnssecStatus} size="xs" />
+                  )}
+                </div>
+                <span
+                  className={`rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold ${
+                    mail.mtaSts.status === 'enforce'
+                      ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30'
+                      : mail.mtaSts.status === 'dns-only' || mail.mtaSts.status === 'testing'
+                        ? 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30'
+                        : mail.mtaSts.status === 'invalid'
+                          ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/35'
+                          : 'bg-slate-500/15 text-slate-600 dark:text-slate-400 border border-slate-500/30'
+                  }`}
+                >
+                  {mail.mtaSts.status === 'enforce'
+                    ? 'MTA-STS ENFORCE'
+                    : mail.mtaSts.status === 'testing'
+                      ? 'MTA-STS TESTING'
+                      : mail.mtaSts.status === 'dns-only'
+                        ? 'DNS STSv1 VALID'
+                        : mail.mtaSts.status === 'none-mode'
+                          ? 'MODE: NONE'
+                          : mail.mtaSts.status === 'invalid'
+                            ? 'INVALID'
+                            : 'NOT DEPLOYED'}
+                </span>
+              </div>
+
+              <p className="text-xs text-slate-600 dark:text-slate-300">{mail.mtaSts.summary}</p>
+
+              {mail.mtaSts.rawRecord && (
+                <div className="rounded-lg bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 px-2.5 py-1.5 font-mono text-[11px] text-slate-700 dark:text-slate-300 break-all">
+                  {mail.mtaSts.rawRecord}
+                </div>
+              )}
+
+              {mail.mtaSts.policy && (
+                <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-2.5 space-y-1.5 text-xs">
+                  <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
+                    {mail.mtaSts.policy.mode && (
+                      <span className="rounded bg-slate-200/80 dark:bg-slate-800 px-1.5 py-0.5 font-semibold">
+                        mode: {mail.mtaSts.policy.mode}
+                      </span>
+                    )}
+                    {mail.mtaSts.policy.maxAge !== undefined && (
+                      <span className="rounded bg-slate-200/80 dark:bg-slate-800 px-1.5 py-0.5">
+                        max_age: {mail.mtaSts.policy.maxAge}s
+                      </span>
+                    )}
+                  </div>
+                  {mail.mtaSts.policy.mxPatterns.length > 0 && (
+                    <div className="space-y-1">
+                      <div className="text-[10px] font-semibold uppercase text-slate-500">
+                        Policy mx: Patterns
+                      </div>
+                      <div className="flex flex-wrap gap-1 font-mono text-[11px]">
+                        {mail.mtaSts.policy.mxPatterns.map((pat) => (
+                          <span
+                            key={pat}
+                            className="rounded bg-cyan-500/15 text-cyan-800 dark:text-cyan-200 px-1.5 py-0.5"
+                          >
+                            {pat}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {mail.mtaSts.present && (
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-[11px]">
+                  <a
+                    href={mail.mtaSts.policyUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 font-mono text-cyan-600 dark:text-cyan-400 hover:underline"
+                  >
+                    <span>/.well-known/mta-sts.txt</span>
+                    <ArrowUpRight className="w-3 h-3" />
+                  </a>
+                  {mail.mtaSts.txtRrsetId && (
+                    <button
+                      type="button"
+                      onClick={() => onJumpToGraphTarget(mail.mtaSts.txtRrsetId!)}
+                      className="inline-flex items-center gap-1 font-medium text-slate-600 dark:text-slate-300 hover:text-cyan-500 cursor-pointer"
+                    >
+                      <span>Graph</span>
+                      <ArrowUpRight className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* 2. SMTP TLS-RPT Card */}
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-xs font-bold text-slate-900 dark:text-slate-100">
+                    {displayFqdn(mail.tlsRpt.qname)}
+                  </span>
+                  {mail.tlsRpt.present && (
+                    <StatusBadge status={mail.tlsRpt.dnssecStatus} size="xs" />
+                  )}
+                </div>
+                <span
+                  className={`rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold ${
+                    mail.tlsRpt.status === 'valid'
+                      ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30'
+                      : mail.tlsRpt.status === 'warning'
+                        ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30'
+                        : mail.tlsRpt.status === 'invalid'
+                          ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/35'
+                          : 'bg-slate-500/15 text-slate-600 dark:text-slate-400 border border-slate-500/30'
+                  }`}
+                >
+                  {mail.tlsRpt.status === 'valid'
+                    ? 'TLS-RPT ACTIVE'
+                    : mail.tlsRpt.status === 'warning'
+                      ? 'TLS-RPT WARN'
+                      : mail.tlsRpt.status === 'invalid'
+                        ? 'INVALID'
+                        : 'NOT DEPLOYED'}
+                </span>
+              </div>
+
+              <p className="text-xs text-slate-600 dark:text-slate-300">{mail.tlsRpt.summary}</p>
+
+              {mail.tlsRpt.rawRecord && (
+                <div className="rounded-lg bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 px-2.5 py-1.5 font-mono text-[11px] text-slate-700 dark:text-slate-300 break-all">
+                  {mail.tlsRpt.rawRecord}
+                </div>
+              )}
+
+              {mail.tlsRpt.rua.length > 0 && (
+                <div className="space-y-1">
+                  <div className="text-[10px] font-semibold uppercase text-slate-500">
+                    Reporting URIs (rua=)
+                  </div>
+                  <div className="flex flex-wrap gap-1 font-mono text-[11px]">
+                    {mail.tlsRpt.rua.map((u, idx) => (
+                      <span
+                        key={`${u.raw}-${idx}`}
+                        className={`rounded px-1.5 py-0.5 break-all ${
+                          u.syntaxValid
+                            ? 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200'
+                            : 'bg-rose-500/15 text-rose-700 dark:text-rose-300'
+                        }`}
+                      >
+                        {u.uri}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {mail.tlsRpt.txtRrsetId && (
+                <div className="flex justify-end pt-1 text-[11px]">
+                  <button
+                    type="button"
+                    onClick={() => onJumpToGraphTarget(mail.tlsRpt.txtRrsetId!)}
+                    className="inline-flex items-center gap-1 font-medium text-slate-600 dark:text-slate-300 hover:text-cyan-500 cursor-pointer"
+                  >
+                    <span>Locate in Graph</span>
+                    <ArrowUpRight className="w-3 h-3" />
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* 3. BIMI Card */}
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-xs font-bold text-slate-900 dark:text-slate-100">
+                    {displayFqdn(mail.bimi.qname)}
+                  </span>
+                  {mail.bimi.present && <StatusBadge status={mail.bimi.dnssecStatus} size="xs" />}
+                </div>
+                <span
+                  className={`rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold ${
+                    mail.bimi.status === 'valid'
+                      ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30'
+                      : mail.bimi.status === 'warning' || mail.bimi.status === 'declined'
+                        ? 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30'
+                        : mail.bimi.status === 'dmarc-ineligible'
+                          ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30'
+                          : mail.bimi.status === 'invalid'
+                            ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/35'
+                            : 'bg-slate-500/15 text-slate-600 dark:text-slate-400 border border-slate-500/30'
+                  }`}
+                >
+                  {mail.bimi.status === 'valid'
+                    ? 'BIMI + VMC VERIFIED'
+                    : mail.bimi.status === 'warning'
+                      ? 'BIMI LOGO (NO VMC)'
+                      : mail.bimi.status === 'declined'
+                        ? 'BIMI DECLINED (l=;)'
+                        : mail.bimi.status === 'dmarc-ineligible'
+                          ? 'DMARC INELIGIBLE'
+                          : mail.bimi.status === 'invalid'
+                            ? 'INVALID'
+                            : 'NOT DEPLOYED'}
+                </span>
+              </div>
+
+              <p className="text-xs text-slate-600 dark:text-slate-300">{mail.bimi.summary}</p>
+
+              <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
+                DMARC Prerequisite:{' '}
+                <span
+                  className={
+                    mail.bimi.dmarcEligible
+                      ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
+                      : 'text-amber-600 dark:text-amber-400 font-semibold'
+                  }
+                >
+                  {mail.bimi.dmarcEligibilityReason}
+                </span>
+              </div>
+
+              {mail.bimi.rawRecord && (
+                <div className="rounded-lg bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 px-2.5 py-1.5 font-mono text-[11px] text-slate-700 dark:text-slate-300 break-all">
+                  {mail.bimi.rawRecord}
+                </div>
+              )}
+
+              {(mail.bimi.logoUrl || mail.bimi.authorityUrl || mail.bimi.txtRrsetId) && (
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-[11px]">
+                  <div className="flex flex-wrap items-center gap-2 font-mono">
+                    {mail.bimi.logoUrl && (
+                      <a
+                        href={mail.bimi.logoUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-cyan-600 dark:text-cyan-400 hover:underline"
+                      >
+                        <span>SVG Logo (l=)</span>
+                        <ArrowUpRight className="w-3 h-3" />
+                      </a>
+                    )}
+                    {mail.bimi.authorityUrl && (
+                      <a
+                        href={mail.bimi.authorityUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-cyan-600 dark:text-cyan-400 hover:underline"
+                      >
+                        <span>VMC/CMC (a=)</span>
+                        <ArrowUpRight className="w-3 h-3" />
+                      </a>
+                    )}
+                  </div>
+                  {mail.bimi.txtRrsetId && (
+                    <button
+                      type="button"
+                      onClick={() => onJumpToGraphTarget(mail.bimi.txtRrsetId!)}
+                      className="inline-flex items-center gap-1 font-medium text-slate-600 dark:text-slate-300 hover:text-cyan-500 cursor-pointer"
+                    >
+                      <span>Graph</span>
+                      <ArrowUpRight className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
     </div>
   );
 }

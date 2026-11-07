@@ -7,7 +7,10 @@ import {
   decodeDkimPublicKey,
   estimateOrganizationalDomain,
   evaluateMailFromSnapshotData,
+  ipToReverseArpa,
+  matchesMtaStsMxPattern,
   parseDkimSelectorInput,
+  parseMtaStsPolicyFile,
   parseSpfTerms,
   runMailAnalysis,
 } from '../mailAnalyzer';
@@ -660,6 +663,313 @@ describe('RFC 7505, RFC 7672 (SMTP DANE), and RFC 7208 (SPF) Audit Scenarios', (
     expect(dkimSels.find((s) => s.selector === 'revoked')?.status).toBe('revoked');
     expect(dkimSels.find((s) => s.selector === 'missingcustom')?.status).toBe('missing');
   });
+
+  it('converts IPv4/IPv6 addresses to reverse .arpa names and validates MTA-STS (RFC 8461), TLS-RPT (RFC 8460), BIMI, and MX FCrDNS (PTR)', () => {
+    // 1. Reverse .arpa conversion (IPv4, compressed IPv6, IPv4-mapped IPv6, invalid)
+    expect(ipToReverseArpa('192.0.2.25')).toBe('25.2.0.192.in-addr.arpa.');
+    expect(ipToReverseArpa('2001:db8::1')).toBe(
+      '1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa.'
+    );
+    expect(ipToReverseArpa('::ffff:192.0.2.1')).toBe(
+      '1.0.2.0.0.0.0.c.f.f.f.f.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa.'
+    );
+    expect(ipToReverseArpa('999.0.0.1')).toBeNull();
+
+    // 2. RFC 8461 §4.1 MX pattern matching (exact vs single-label leftmost wildcard)
+    expect(matchesMtaStsMxPattern('mx1.example.com.', 'mx1.example.com')).toBe(true);
+    expect(matchesMtaStsMxPattern('mx1.example.com.', '*.example.com')).toBe(true);
+    expect(matchesMtaStsMxPattern('sub.mx1.example.com.', '*.example.com')).toBe(false);
+    expect(matchesMtaStsMxPattern('example.com.', '*.example.com')).toBe(false);
+
+    // 3. RFC 8461 §3.2 policy file parser & MX cross-check
+    const parsedPolicy = parseMtaStsPolicyFile(
+      'version: STSv1\r\nmode: enforce\r\nmx: *.mail.example.com\r\nmx: backup.example.net\r\nmax_age: 604800\r\n',
+      ['mx1.mail.example.com.', 'unlisted.example.org.']
+    );
+    expect(parsedPolicy.valid).toBe(true);
+    expect(parsedPolicy.mode).toBe('enforce');
+    expect(parsedPolicy.maxAge).toBe(604800);
+    expect(parsedPolicy.matchedMxHosts).toEqual(['mx1.mail.example.com.']);
+    expect(parsedPolicy.unmatchedMxHosts).toEqual(['unlisted.example.org.']);
+
+    // 4. Synthetic end-to-end evaluation of MX FCrDNS (valid + mismatch + missing PTR), MTA-STS, TLS-RPT, and BIMI
+    const queries: DohQueryLog[] = [
+      makeLog(
+        'transport.example.',
+        RR_TYPES.MX,
+        'MX',
+        buildSyntheticResponsePacket({
+          qname: 'transport.example.',
+          qtype: RR_TYPES.MX,
+          answers: [
+            {
+              name: 'transport.example.',
+              type: RR_TYPES.MX,
+              rdata: encodeMxRdata(10, 'mx1.transport.example.'),
+            },
+            {
+              name: 'transport.example.',
+              type: RR_TYPES.MX,
+              rdata: encodeMxRdata(20, 'mx2.transport.example.'),
+            },
+          ],
+        })
+      ),
+      // mx1 has two public IPs: 93.184.216.10 (valid FCrDNS) and 93.184.216.11 (PTR mismatch)
+      makeLog(
+        'mx1.transport.example.',
+        RR_TYPES.A,
+        'A',
+        buildSyntheticResponsePacket({
+          qname: 'mx1.transport.example.',
+          qtype: RR_TYPES.A,
+          answers: [
+            {
+              name: 'mx1.transport.example.',
+              type: RR_TYPES.A,
+              rdata: new Uint8Array([93, 184, 216, 10]),
+            },
+            {
+              name: 'mx1.transport.example.',
+              type: RR_TYPES.A,
+              rdata: new Uint8Array([93, 184, 216, 11]),
+            },
+          ],
+        })
+      ),
+      // mx2 has one public IP: 93.184.216.20 (missing PTR -> NXDOMAIN)
+      makeLog(
+        'mx2.transport.example.',
+        RR_TYPES.A,
+        'A',
+        buildSyntheticResponsePacket({
+          qname: 'mx2.transport.example.',
+          qtype: RR_TYPES.A,
+          answers: [
+            {
+              name: 'mx2.transport.example.',
+              type: RR_TYPES.A,
+              rdata: new Uint8Array([93, 184, 216, 20]),
+            },
+          ],
+        })
+      ),
+      // PTR for 93.184.216.10 -> mx1.transport.example. (which already resolves to 93.184.216.10 -> valid FCrDNS!)
+      makeLog(
+        '10.216.184.93.in-addr.arpa.',
+        RR_TYPES.PTR,
+        'PTR',
+        buildSyntheticResponsePacket({
+          qname: '10.216.184.93.in-addr.arpa.',
+          qtype: RR_TYPES.PTR,
+          answers: [
+            {
+              name: '10.216.184.93.in-addr.arpa.',
+              type: RR_TYPES.PTR,
+              rdata: encodeDnsName('mx1.transport.example.'),
+            },
+          ],
+        }),
+        false
+      ),
+      // PTR for 93.184.216.11 -> wrong-host.transport.example. whose A record is 93.184.216.99 (FCrDNS mismatch!)
+      makeLog(
+        '11.216.184.93.in-addr.arpa.',
+        RR_TYPES.PTR,
+        'PTR',
+        buildSyntheticResponsePacket({
+          qname: '11.216.184.93.in-addr.arpa.',
+          qtype: RR_TYPES.PTR,
+          answers: [
+            {
+              name: '11.216.184.93.in-addr.arpa.',
+              type: RR_TYPES.PTR,
+              rdata: encodeDnsName('wrong-host.transport.example.'),
+            },
+          ],
+        }),
+        false
+      ),
+      makeLog(
+        'wrong-host.transport.example.',
+        RR_TYPES.A,
+        'A',
+        buildSyntheticResponsePacket({
+          qname: 'wrong-host.transport.example.',
+          qtype: RR_TYPES.A,
+          answers: [
+            {
+              name: 'wrong-host.transport.example.',
+              type: RR_TYPES.A,
+              rdata: new Uint8Array([93, 184, 216, 99]),
+            },
+          ],
+        }),
+        false
+      ),
+      // PTR for 93.184.216.20 -> NXDOMAIN (no PTR)
+      makeLog(
+        '20.216.184.93.in-addr.arpa.',
+        RR_TYPES.PTR,
+        'PTR',
+        buildSyntheticResponsePacket({
+          qname: '20.216.184.93.in-addr.arpa.',
+          qtype: RR_TYPES.PTR,
+          rcode: 3,
+        }),
+        false
+      ),
+      // SPF
+      makeLog(
+        'transport.example.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: 'transport.example.',
+          qtype: RR_TYPES.TXT,
+          answers: [
+            {
+              name: 'transport.example.',
+              type: RR_TYPES.TXT,
+              rdata: encodeTxtRdata(['v=spf1 mx -all']),
+            },
+          ],
+        })
+      ),
+      // DMARC with p=quarantine; pct=50 (violates BIMI prerequisite which requires pct=100 for quarantine!)
+      makeLog(
+        '_dmarc.transport.example.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: '_dmarc.transport.example.',
+          qtype: RR_TYPES.TXT,
+          answers: [
+            {
+              name: '_dmarc.transport.example.',
+              type: RR_TYPES.TXT,
+              rdata: encodeTxtRdata(['v=DMARC1; p=quarantine; pct=50;']),
+            },
+          ],
+        })
+      ),
+      // MTA-STS (_mta-sts.transport.example.)
+      makeLog(
+        '_mta-sts.transport.example.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: '_mta-sts.transport.example.',
+          qtype: RR_TYPES.TXT,
+          answers: [
+            {
+              name: '_mta-sts.transport.example.',
+              type: RR_TYPES.TXT,
+              rdata: encodeTxtRdata(['v=STSv1; id=2026110701;']),
+            },
+          ],
+        })
+      ),
+      // TLS-RPT (_smtp._tls.transport.example.) with mailto:, https:, and invalid ftp: URI
+      makeLog(
+        '_smtp._tls.transport.example.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: '_smtp._tls.transport.example.',
+          qtype: RR_TYPES.TXT,
+          answers: [
+            {
+              name: '_smtp._tls.transport.example.',
+              type: RR_TYPES.TXT,
+              rdata: encodeTxtRdata([
+                'v=TLSRPTv1; rua=mailto:tlsrpt@transport.example,https://rpt.transport.example/v1/tlsrpt,ftp://bad.transport.example',
+              ]),
+            },
+          ],
+        })
+      ),
+      // BIMI (default._bimi.transport.example.)
+      makeLog(
+        'default._bimi.transport.example.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: 'default._bimi.transport.example.',
+          qtype: RR_TYPES.TXT,
+          answers: [
+            {
+              name: 'default._bimi.transport.example.',
+              type: RR_TYPES.TXT,
+              rdata: encodeTxtRdata([
+                'v=BIMI1; l=https://transport.example/brand.svg; a=https://transport.example/vmc.pem;',
+              ]),
+            },
+          ],
+        })
+      ),
+    ];
+
+    const res = evaluateMailFromSnapshotData({
+      targetName: 'transport.example.',
+      queries,
+      zones: [],
+      cnameEdges: [],
+      targetDomainStatus: 'secure',
+      mtaStsPolicyFetch: {
+        url: 'https://mta-sts.transport.example/.well-known/mta-sts.txt',
+        fetchedAt: Date.now(),
+        ok: true,
+        httpStatus: 200,
+        rawBody: 'version: STSv1\nmode: enforce\nmx: mx1.transport.example\nmax_age: 604800\n',
+      },
+    });
+
+    const mail = res.mailAnalysis;
+    // FCrDNS checks
+    expect(mail.fcrdnsSummary.checkedIpCount).toBe(3);
+    expect(mail.fcrdnsSummary.validCount).toBe(1);
+    expect(mail.fcrdnsSummary.mismatchCount).toBe(1);
+    expect(mail.fcrdnsSummary.noPtrCount).toBe(1);
+    expect(mail.fcrdnsSummary.status).toBe('partial');
+    expect(mail.mxHosts[0].addresses[0].fcrdnsStatus).toBe('valid');
+    expect(mail.mxHosts[0].addresses[0].fcrdnsMatchedNames).toEqual(['mx1.transport.example.']);
+    expect(mail.mxHosts[0].addresses[1].fcrdnsStatus).toBe('ptr-mismatch');
+    expect(mail.mxHosts[1].addresses[0].fcrdnsStatus).toBe('no-ptr');
+
+    // MTA-STS checks (mx2.transport.example is not covered by policy!)
+    expect(mail.mtaSts.present).toBe(true);
+    expect(mail.mtaSts.policyId).toBe('2026110701');
+    expect(mail.mtaSts.policy?.mode).toBe('enforce');
+    expect(mail.mtaSts.policy?.matchedMxHosts).toEqual(['mx1.transport.example.']);
+    expect(mail.mtaSts.policy?.unmatchedMxHosts).toEqual(['mx2.transport.example.']);
+    expect(mail.mtaSts.status).toBe('invalid');
+
+    // TLS-RPT checks
+    expect(mail.tlsRpt.present).toBe(true);
+    expect(mail.tlsRpt.rua).toHaveLength(3);
+    expect(mail.tlsRpt.rua[0].scheme).toBe('mailto');
+    expect(mail.tlsRpt.rua[0].syntaxValid).toBe(true);
+    expect(mail.tlsRpt.rua[1].scheme).toBe('https');
+    expect(mail.tlsRpt.rua[1].syntaxValid).toBe(true);
+    expect(mail.tlsRpt.rua[2].scheme).toBe('ftp');
+    expect(mail.tlsRpt.rua[2].syntaxValid).toBe(false);
+    expect(mail.tlsRpt.status).toBe('warning');
+
+    // BIMI checks (DMARC p=quarantine; pct=50 fails BIMI prerequisite!)
+    expect(mail.bimi.present).toBe(true);
+    expect(mail.bimi.logoUrl).toBe('https://transport.example/brand.svg');
+    expect(mail.bimi.authorityUrl).toBe('https://transport.example/vmc.pem');
+    expect(mail.bimi.dmarcEligible).toBe(false);
+    expect(mail.bimi.status).toBe('dmarc-ineligible');
+
+    const codes = res.mailFindings.map((f) => f.code);
+    expect(codes).toContain('MX_PTR_MISSING');
+    expect(codes).toContain('MX_FCRDNS_MISMATCH');
+    expect(codes).toContain('MTA_STS_MX_MISMATCH');
+    expect(codes).toContain('TLSRPT_URI_WARNING');
+    expect(codes).toContain('BIMI_DMARC_PREREQUISITE_NOT_MET');
+  });
 });
 
 describe('Live DoH Mail + SMTP DANE + SPF + DKIM + DMARC End-to-End Verification', () => {
@@ -706,6 +1016,14 @@ describe('Live DoH Mail + SMTP DANE + SPF + DKIM + DMARC End-to-End Verification
       expect(ietf1Sel?.source).toBe('custom');
       expect(ietf1Sel?.dnssecStatus).toBe('secure');
       expect(ietf1Sel?.keyBits).toBeGreaterThanOrEqual(1024);
+
+      // MX FCrDNS (PTR), MTA-STS, TLS-RPT, and BIMI fields are populated
+      expect(mail.fcrdnsSummary.checkedIpCount).toBeGreaterThanOrEqual(1);
+      expect(mail.fcrdnsSummary.status).not.toBe('unchecked');
+      expect(mail.mxHosts[0].addresses[0].ptrQname).toMatch(/\.(in-addr|ip6)\.arpa\.$/);
+      expect(mail.mtaSts.qname).toBe('_mta-sts.ietf.org.');
+      expect(mail.tlsRpt.qname).toBe('_smtp._tls.ietf.org.');
+      expect(mail.bimi.qname).toBe('default._bimi.ietf.org.');
 
       // Offline time-travel re-verification into 2099 invalidates RRSIGs across DANE, DMARC & DKIM!
       const futureSnap = await reverifySnapshot(snap, {

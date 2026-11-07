@@ -460,6 +460,10 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(mailHtml).toContain('SPF Policy (RFC 7208)');
       expect(mailHtml).toContain('DKIM Keys (RFC 6376)');
       expect(mailHtml).toContain('DMARC Policy (RFC 7489)');
+      expect(mailHtml).toContain('_mta-sts.ietf.org');
+      expect(mailHtml).toContain('_smtp._tls.ietf.org');
+      expect(mailHtml).toContain('default._bimi.ietf.org');
+      expect(mailHtml).toContain('v=BIMI1');
       expect(mailHtml).toContain('_25._tcp.');
       expect(mailHtml).toContain('v=spf1');
       expect(mailHtml).toContain('_dmarc.ietf.org');

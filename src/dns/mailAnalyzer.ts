@@ -25,6 +25,7 @@ import type {
   AnalysisSnapshot,
   AnalyzedRrset,
   AuditFinding,
+  BimiAnalysis,
   CnameEdge,
   DaneHostStatus,
   DkimAnalysis,
@@ -35,6 +36,10 @@ import type {
   DmarcUriDetail,
   DohQueryLog,
   MailAnalysisResult,
+  MtaStsAnalysis,
+  MtaStsMode,
+  MtaStsPolicyData,
+  MtaStsPolicyFetchResult,
   MxAddressEntry,
   MxHostAnalysis,
   NegativeNode,
@@ -43,11 +48,14 @@ import type {
   SpfQualifier,
   SpfTerm,
   TlsaRecordDetail,
+  TlsRptAnalysis,
+  TlsRptUriDetail,
   ValidationStatus,
   ZoneAnalysis,
 } from './types';
 
 const MAX_PROBED_MX_HOSTS = 12;
+const MAX_PROBED_MX_IPS_FOR_PTR = 16;
 const SPF_DNS_LOOKUP_LIMIT = 10;
 const SPF_VOID_LOOKUP_LIMIT = 2;
 const MAX_SPF_NETWORK_QUERIES = 22;
@@ -549,6 +557,214 @@ export function classifyIpAddress(ip: string, family: 4 | 6): MxAddressEntry {
     return { ip, family: 6, isPublic: false, note: 'Multicast (ff00::/8)' };
   }
   return { ip, family: 6, isPublic: true };
+}
+
+/**
+ * Converts an IPv4 (`a.b.c.d`) or IPv6 (`2001:db8::1`) address into its canonical
+ * reverse-DNS `.in-addr.arpa.` or `.ip6.arpa.` FQDN (RFC 1035 §3.5 / RFC 3596 §2.5).
+ */
+export function ipToReverseArpa(ip: string): string | null {
+  const trimmed = ip.trim().toLowerCase();
+  if (!trimmed) return null;
+
+  // IPv4: a.b.c.d -> d.c.b.a.in-addr.arpa.
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(trimmed)) {
+    const octets = trimmed.split('.');
+    for (const o of octets) {
+      const n = Number.parseInt(o, 10);
+      if (Number.isNaN(n) || n < 0 || n > 255 || (o.length > 1 && o.startsWith('0'))) {
+        return null;
+      }
+    }
+    return `${[...octets].reverse().join('.')}.in-addr.arpa.`;
+  }
+
+  // IPv6: expand to 8 16-bit hex groups -> 32 reversed hex nibbles under .ip6.arpa.
+  if (!trimmed.includes(':') || /[^0-9a-f:.]/.test(trimmed) || trimmed.includes(':::')) {
+    return null;
+  }
+
+  let working = trimmed;
+  // Handle embedded IPv4 suffix (e.g. ::ffff:192.0.2.1)
+  const lastColon = working.lastIndexOf(':');
+  if (lastColon !== -1 && working.slice(lastColon + 1).includes('.')) {
+    const ipv4Tail = working.slice(lastColon + 1);
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ipv4Tail)) return null;
+    const octs = ipv4Tail.split('.').map((x) => Number.parseInt(x, 10));
+    if (octs.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return null;
+    const hi = ((octs[0] << 8) | octs[1]).toString(16);
+    const lo = ((octs[2] << 8) | octs[3]).toString(16);
+    working = `${working.slice(0, lastColon)}:${hi}:${lo}`;
+  }
+
+  const dblParts = working.split('::');
+  if (dblParts.length > 2) return null;
+
+  const parseHexGroupList = (part: string): string[] | null => {
+    if (!part) return [];
+    const segs = part.split(':');
+    for (const s of segs) {
+      if (!/^[0-9a-f]{1,4}$/.test(s)) return null;
+    }
+    return segs;
+  };
+
+  let groups: string[];
+  if (dblParts.length === 2) {
+    const left = parseHexGroupList(dblParts[0]);
+    const right = parseHexGroupList(dblParts[1]);
+    if (!left || !right) return null;
+    const missing = 8 - (left.length + right.length);
+    if (missing < 1) return null;
+    groups = [...left, ...new Array<string>(missing).fill('0000'), ...right];
+  } else {
+    const parsed = parseHexGroupList(working);
+    if (!parsed || parsed.length !== 8) return null;
+    groups = parsed;
+  }
+
+  const fullHex = groups.map((g) => g.padStart(4, '0')).join('');
+  if (fullHex.length !== 32) return null;
+  return `${fullHex.split('').reverse().join('.')}.ip6.arpa.`;
+}
+
+/**
+ * Matches an MX hostname against an RFC 8461 §4.1 MTA-STS `mx:` policy pattern.
+ * Note: Wildcard `*.example.com` matches exactly one leftmost label (`mx1.example.com`),
+ * and does NOT match `example.com` or `a.b.example.com`.
+ */
+export function matchesMtaStsMxPattern(mxHostname: string, pattern: string): boolean {
+  const host = displayFqdn(mxHostname).toLowerCase();
+  const pat = pattern.trim().toLowerCase().replace(/\.+$/, '');
+  if (!host || !pat || host === '.') return false;
+
+  if (pat.startsWith('*.')) {
+    const suffix = pat.slice(1); // ".example.com"
+    if (suffix.length < 2 || !host.endsWith(suffix)) return false;
+    const prefix = host.slice(0, host.length - suffix.length);
+    return prefix.length > 0 && !prefix.includes('.');
+  }
+  return host === pat;
+}
+
+/**
+ * Parses an RFC 8461 §3.2 `/.well-known/mta-sts.txt` HTTPS policy file and cross-checks
+ * its `mx:` patterns against the domain's active DNS MX exchangers.
+ */
+export function parseMtaStsPolicyFile(
+  rawBody: string,
+  activeMxHosts: string[] = []
+): MtaStsPolicyData {
+  const issues: string[] = [];
+  const mxPatterns: string[] = [];
+  let version: string | undefined;
+  let mode: MtaStsMode | undefined;
+  let maxAge: number | undefined;
+  let seenVersion = false;
+  let seenMode = false;
+  let seenMaxAge = false;
+
+  const lines = rawBody.split(/\r?\n/);
+  for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+    const line = lines[lineIdx].trim();
+    if (!line) continue;
+    const colonIdx = line.indexOf(':');
+    if (colonIdx <= 0) {
+      issues.push(`Line ${lineIdx + 1}: Malformed MTA-STS policy line "${line}" (missing ':')`);
+      continue;
+    }
+    const key = line.slice(0, colonIdx).trim().toLowerCase();
+    const val = line.slice(colonIdx + 1).trim();
+
+    if (key === 'version') {
+      if (seenVersion) {
+        issues.push('Duplicate "version:" field in mta-sts.txt');
+      }
+      seenVersion = true;
+      version = val;
+      if (val !== 'STSv1') {
+        issues.push(`Unsupported MTA-STS policy version "${val}" (expected "STSv1")`);
+      }
+    } else if (key === 'mode') {
+      if (seenMode) {
+        issues.push('Duplicate "mode:" field in mta-sts.txt');
+      }
+      seenMode = true;
+      const lowerMode = val.toLowerCase();
+      if (lowerMode === 'enforce' || lowerMode === 'testing' || lowerMode === 'none') {
+        mode = lowerMode;
+      } else {
+        issues.push(`Invalid MTA-STS mode "${val}" (expected enforce, testing, or none)`);
+      }
+    } else if (key === 'max_age') {
+      if (seenMaxAge) {
+        issues.push('Duplicate "max_age:" field in mta-sts.txt');
+      }
+      seenMaxAge = true;
+      if (!/^\d{1,10}$/.test(val)) {
+        issues.push(`Invalid max_age "${val}" (expected positive integer seconds)`);
+      } else {
+        const parsedAge = Number.parseInt(val, 10);
+        maxAge = parsedAge;
+        if (parsedAge <= 0) {
+          issues.push('max_age must be greater than 0 seconds');
+        } else if (parsedAge > 31557600) {
+          issues.push(`max_age ${parsedAge}s exceeds RFC 8461 §3.2 31557600s (1 year) limit`);
+        }
+      }
+    } else if (key === 'mx') {
+      if (!val || /\s/.test(val)) {
+        issues.push(`Invalid "mx:" host pattern "${val}"`);
+      } else {
+        mxPatterns.push(val);
+      }
+    }
+  }
+
+  if (!seenVersion) {
+    issues.push('Missing mandatory "version: STSv1" field in mta-sts.txt (RFC 8461 §3.2)');
+  }
+  if (!seenMode) {
+    issues.push('Missing mandatory "mode:" field in mta-sts.txt (RFC 8461 §3.2)');
+  }
+  if (!seenMaxAge) {
+    issues.push('Missing mandatory "max_age:" field in mta-sts.txt (RFC 8461 §3.2)');
+  }
+  if (mode !== 'none' && mxPatterns.length === 0) {
+    issues.push('MTA-STS policy requires at least one "mx:" pattern unless mode is "none" (RFC 8461 §3.2)');
+  }
+
+  const matchedMxHosts: string[] = [];
+  const unmatchedMxHosts: string[] = [];
+  for (const rawMx of activeMxHosts) {
+    const normMx = normalizeFqdn(rawMx);
+    if (normMx === '.') continue;
+    const isMatched = mxPatterns.some((pat) => matchesMtaStsMxPattern(normMx, pat));
+    if (isMatched) {
+      matchedMxHosts.push(normMx);
+    } else {
+      unmatchedMxHosts.push(normMx);
+    }
+  }
+
+  const valid =
+    version === 'STSv1' &&
+    mode !== undefined &&
+    maxAge !== undefined &&
+    maxAge > 0 &&
+    (mode === 'none' || mxPatterns.length > 0) &&
+    issues.length === 0;
+
+  return {
+    version,
+    mode,
+    maxAge,
+    mxPatterns,
+    matchedMxHosts,
+    unmatchedMxHosts,
+    valid,
+    issues,
+  };
 }
 
 function extractTxtJoinedStrings(log: DohQueryLog | undefined, owner: string, rrtype: number): string[] {
@@ -2271,6 +2487,927 @@ function evaluateDkimFromLogs(params: {
   };
 }
 
+export function isMtaStsRecordText(txt: string): boolean {
+  return /^v\s*=\s*STSv1(?:\s*;|\s*$)/i.test(txt.trim());
+}
+
+export function isTlsRptRecordText(txt: string): boolean {
+  return /^v\s*=\s*TLSRPTv1(?:\s*;|\s*$)/i.test(txt.trim());
+}
+
+export function isBimiRecordText(txt: string): boolean {
+  return /^v\s*=\s*BIMI1(?:\s*;|\s*$)/i.test(txt.trim());
+}
+
+function evaluateSingleMxAddressPtr(params: {
+  addr: MxAddressEntry;
+  mxExchange: string;
+  mxFinalHost: string;
+  queries: DohQueryLog[];
+  zones: ZoneAnalysis[];
+  mailFindings: AuditFinding[];
+}): void {
+  const { addr, mxExchange, mxFinalHost, queries, zones, mailFindings } = params;
+  const ptrQname = ipToReverseArpa(addr.ip);
+  addr.ptrQname = ptrQname ?? undefined;
+
+  if (!addr.isPublic || !ptrQname) {
+    addr.fcrdnsStatus = 'unchecked';
+    return;
+  }
+
+  const ptrRes = resolveCnameChainInLogs(queries, ptrQname, RR_TYPES.PTR);
+  const ptrLog =
+    findAnyLog(queries, ptrRes.finalOwner, RR_TYPES.PTR) ??
+    findAnyLog(queries, ptrQname, RR_TYPES.PTR);
+
+  if (!ptrLog) {
+    addr.fcrdnsStatus = 'unchecked';
+    return;
+  }
+
+  // Determine PTR DNSSEC status: use zone evaluation if .arpa zone was traced, otherwise AD bit / RCODE
+  const ptrRrset = findRrsetInZones(zones, ptrRes.finalOwner, RR_TYPES.PTR);
+  const ptrNeg = findNegativeNodeInZones(zones, ptrRes.finalOwner, 'PTR');
+  addr.ptrRrsetId = ptrRrset?.id;
+  addr.ptrNegativeNodeId = ptrNeg?.id;
+  addr.ptrDnssecStatus = ptrRrset
+    ? ptrRrset.status
+    : ptrNeg
+      ? ptrNeg.status
+      : ptrLog.packet.flags.rcode === 2
+        ? 'bogus'
+        : ptrLog.packet.flags.ad
+          ? 'secure'
+          : 'insecure';
+
+  const ptrTargets: string[] = [];
+  for (const ans of ptrLog.packet.answers) {
+    if (ans.name === ptrRes.finalOwner && ans.type === RR_TYPES.PTR) {
+      const target = normalizeFqdn(
+        ans.parsed.kind === 'GENERIC' && ans.parsed.target ? ans.parsed.target : ans.rdataText
+      );
+      if (target !== '.' && !ptrTargets.includes(target)) {
+        ptrTargets.push(target);
+      }
+    }
+  }
+  addr.ptrTargets = ptrTargets;
+
+  if (ptrLog.packet.flags.rcode === 2 && ptrTargets.length === 0) {
+    addr.fcrdnsStatus = 'temperror';
+    return;
+  }
+
+  const dispExch = displayFqdn(mxExchange);
+  if (ptrTargets.length === 0) {
+    addr.fcrdnsStatus = 'no-ptr';
+    mailFindings.push({
+      id: `mail-warn-mx-noptr-${mxExchange}-${addr.ip}`,
+      severity: 'warning',
+      code: 'MX_PTR_MISSING',
+      title: `MX IP ${addr.ip} (${dispExch}) has no reverse DNS (PTR) record`,
+      detail: `Reverse lookup for ${displayFqdn(ptrQname)} returned ${rcodeToString(ptrLog.packet.flags.rcode)} with 0 PTR records. Many receiving MTAs reject or spam-score incoming connections from mail servers without reverse DNS (RFC 1912 §2.1).`,
+      rfc: 'RFC 1912 §2.1',
+      targetId: ptrNeg?.id,
+    });
+    return;
+  }
+
+  // Check Forward-Confirmed Reverse DNS (FCrDNS): does at least one PTR hostname resolve forward back to addr.ip?
+  const matchedNames: string[] = [];
+  let anyForwardChecked = false;
+  const targetRrType = addr.family === 6 ? RR_TYPES.AAAA : RR_TYPES.A;
+  const normIpLower = addr.ip.toLowerCase();
+
+  for (const pt of ptrTargets) {
+    if (pt === mxExchange || pt === mxFinalHost) {
+      anyForwardChecked = true;
+      matchedNames.push(pt);
+      continue;
+    }
+
+    const fwdRes = resolveCnameChainInLogs(queries, pt, targetRrType);
+    const fwdLog =
+      findAnyLog(queries, fwdRes.finalOwner, targetRrType) ??
+      findAnyLog(queries, pt, targetRrType);
+    if (!fwdLog) continue;
+    anyForwardChecked = true;
+
+    const matchesIp = fwdLog.packet.answers.some(
+      (r) =>
+        r.name === fwdRes.finalOwner &&
+        r.type === targetRrType &&
+        r.rdataText.toLowerCase() === normIpLower
+    );
+    if (matchesIp && !matchedNames.includes(pt)) {
+      matchedNames.push(pt);
+    }
+  }
+
+  addr.fcrdnsMatchedNames = matchedNames;
+  if (matchedNames.length > 0) {
+    addr.fcrdnsStatus = 'valid';
+  } else if (anyForwardChecked) {
+    addr.fcrdnsStatus = 'ptr-mismatch';
+    mailFindings.push({
+      id: `mail-warn-mx-fcrdns-${mxExchange}-${addr.ip}`,
+      severity: 'warning',
+      code: 'MX_FCRDNS_MISMATCH',
+      title: `MX IP ${addr.ip} (${dispExch}) fails Forward-Confirmed Reverse DNS (FCrDNS)`,
+      detail: `${displayFqdn(ptrQname)} PTR points to ${ptrTargets.map(displayFqdn).join(', ')}, which does not resolve forward (${addr.family === 6 ? 'AAAA' : 'A'}) back to ${addr.ip}. Anti-spam receivers require forward-confirmed rDNS.`,
+      rfc: 'RFC 1912 §2.1',
+      targetId: ptrRrset?.id,
+    });
+  } else {
+    addr.fcrdnsStatus = 'unchecked';
+  }
+}
+
+function evaluateMtaStsFromLogs(params: {
+  effectiveMailDomain: string;
+  activeMxHosts: string[];
+  mtaStsPolicyFetch?: MtaStsPolicyFetchResult;
+  queries: DohQueryLog[];
+  zones: ZoneAnalysis[];
+  mailFindings: AuditFinding[];
+}): MtaStsAnalysis {
+  const { effectiveMailDomain, activeMxHosts, mtaStsPolicyFetch, queries, zones, mailFindings } =
+    params;
+  const dispDom = displayFqdn(effectiveMailDomain);
+  const qname = normalizeFqdn(`_mta-sts.${effectiveMailDomain}`);
+  const dispQname = displayFqdn(qname);
+  const policyUrl = `https://mta-sts.${dispDom}/.well-known/mta-sts.txt`;
+
+  const cnameRes = resolveCnameChainInLogs(queries, qname, RR_TYPES.TXT);
+  const resolvedOwner = cnameRes.finalOwner;
+  const txtLog =
+    findAnyLog(queries, resolvedOwner, RR_TYPES.TXT) ?? findAnyLog(queries, qname, RR_TYPES.TXT);
+  const allTxt = extractTxtJoinedStrings(txtLog, resolvedOwner, RR_TYPES.TXT);
+  const stsRecords = allTxt.filter(isMtaStsRecordText);
+
+  const dnssec = findEffectiveDnssecStatusForQuery(
+    zones,
+    qname,
+    cnameRes.cnameChain,
+    resolvedOwner,
+    RR_TYPES.TXT,
+    'TXT'
+  );
+  const effectiveDnssecStatus: ValidationStatus =
+    dnssec.rrset || dnssec.negativeNode
+      ? dnssec.status
+      : txtLog?.packet.flags.rcode === 2
+        ? 'bogus'
+        : txtLog?.packet.flags.ad
+          ? 'secure'
+          : dnssec.status !== 'indeterminate'
+            ? dnssec.status
+            : 'insecure';
+
+  const base: MtaStsAnalysis = {
+    present: stsRecords.length > 0,
+    status: 'not-deployed',
+    qname,
+    resolvedOwner,
+    cnameChain: cnameRes.cnameChain,
+    dnssecStatus: effectiveDnssecStatus,
+    txtRrsetId: dnssec.rrset?.id,
+    negativeNodeId: dnssec.negativeNode?.id,
+    rawRecord: stsRecords[0],
+    allStsRecords: stsRecords,
+    extensions: [],
+    policyUrl,
+    policyFetch: mtaStsPolicyFetch,
+    issues: [],
+    summary: `No _mta-sts TXT record published at ${dispQname}.`,
+  };
+
+  if (stsRecords.length === 0) {
+    return base;
+  }
+
+  if (effectiveDnssecStatus === 'bogus') {
+    base.issues.push(`DNSSEC validation failed (BOGUS) for ${dispQname} TXT`);
+    mailFindings.push({
+      id: `mail-err-mtasts-dnssec-bogus-${effectiveMailDomain}`,
+      severity: 'error',
+      code: 'MTA_STS_DNSSEC_BOGUS',
+      title: `MTA-STS TXT record at ${dispQname} failed DNSSEC validation (BOGUS)`,
+      detail: `Validating resolvers return SERVFAIL for ${dispQname} TXT, preventing MTA-STS policy discovery.`,
+      rfc: 'RFC 8461 §3.1',
+      targetId: dnssec.rrset?.id,
+    });
+  }
+
+  if (stsRecords.length > 1) {
+    base.status = 'invalid';
+    const msg = `${dispQname} publishes ${stsRecords.length} v=STSv1 TXT records — RFC 8461 §3.1 mandates discarding MTA-STS when multiple records exist`;
+    base.issues.push(msg);
+    base.summary = `Invalid MTA-STS: multiple v=STSv1 TXT records (${stsRecords.length}) disable MTA-STS discovery.`;
+    mailFindings.push({
+      id: `mail-err-mtasts-multi-${effectiveMailDomain}`,
+      severity: 'error',
+      code: 'MTA_STS_MULTIPLE_TXT_RECORDS',
+      title: `Multiple v=STSv1 TXT records at ${dispQname} (${stsRecords.length} found)`,
+      detail: `Per RFC 8461 §3.1, if more than one v=STSv1 TXT record is returned for _mta-sts, senders MUST assume the recipient domain does not implement MTA-STS.`,
+      rfc: 'RFC 8461 §3.1',
+      targetId: dnssec.rrset?.id,
+    });
+    return base;
+  }
+
+  const raw = stsRecords[0];
+  const segments = raw
+    .split(';')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  let syntaxInvalid = false;
+  const seenKeys = new Set<string>();
+
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const eqIdx = seg.indexOf('=');
+    if (eqIdx <= 0) {
+      syntaxInvalid = true;
+      base.issues.push(`Malformed MTA-STS tag "${seg}" (missing '=')`);
+      continue;
+    }
+    const key = seg.slice(0, eqIdx).trim();
+    const keyLower = key.toLowerCase();
+    const val = seg.slice(eqIdx + 1).trim();
+
+    if (seenKeys.has(keyLower)) {
+      syntaxInvalid = true;
+      base.issues.push(`Duplicate MTA-STS tag "${keyLower}="`);
+      continue;
+    }
+    seenKeys.add(keyLower);
+
+    if (i === 0) {
+      base.version = val;
+      if (keyLower !== 'v' || val !== 'STSv1') {
+        syntaxInvalid = true;
+        base.issues.push(`First tag in _mta-sts TXT must be exact "v=STSv1" (got "${seg}")`);
+      }
+      continue;
+    }
+
+    if (keyLower === 'id') {
+      base.policyId = val;
+      if (!/^[A-Za-z0-9]{1,32}$/.test(val)) {
+        syntaxInvalid = true;
+        base.issues.push(
+          `Invalid MTA-STS id="${val}" — RFC 8461 §3.1 requires 1..32 alphanumeric characters`
+        );
+      }
+    } else {
+      base.extensions.push({ key, value: val });
+    }
+  }
+
+  if (!base.policyId) {
+    syntaxInvalid = true;
+    base.issues.push('Missing mandatory "id=" tag in _mta-sts TXT record (RFC 8461 §3.1)');
+  }
+
+  if (syntaxInvalid || effectiveDnssecStatus === 'bogus') {
+    base.status = 'invalid';
+    base.summary = `Invalid _mta-sts TXT record at ${dispQname}: ${base.issues[0] ?? 'syntax error'}.`;
+    if (syntaxInvalid) {
+      mailFindings.push({
+        id: `mail-err-mtasts-syntax-${effectiveMailDomain}`,
+        severity: 'error',
+        code: 'MTA_STS_INVALID_TXT_SYNTAX',
+        title: `Invalid MTA-STS TXT record syntax at ${dispQname}`,
+        detail: base.issues.join('; '),
+        rfc: 'RFC 8461 §3.1',
+        targetId: dnssec.rrset?.id,
+      });
+    }
+    return base;
+  }
+
+  // Evaluate HTTPS policy file if fetched
+  if (mtaStsPolicyFetch) {
+    if (mtaStsPolicyFetch.ok && mtaStsPolicyFetch.rawBody !== undefined) {
+      const policy = parseMtaStsPolicyFile(mtaStsPolicyFetch.rawBody, activeMxHosts);
+      base.policy = policy;
+      for (const iss of policy.issues) {
+        base.issues.push(iss);
+      }
+
+      if (!policy.valid) {
+        base.status = 'invalid';
+        base.summary = `Invalid MTA-STS policy file at ${policyUrl}: ${policy.issues[0] ?? 'parse error'}.`;
+        mailFindings.push({
+          id: `mail-err-mtasts-policy-invalid-${effectiveMailDomain}`,
+          severity: 'error',
+          code: 'MTA_STS_INVALID_POLICY_FILE',
+          title: `Malformed MTA-STS policy file at ${policyUrl}`,
+          detail: policy.issues.join('; '),
+          rfc: 'RFC 8461 §3.2',
+          targetId: dnssec.rrset?.id,
+        });
+        return base;
+      }
+
+      if (policy.mode !== 'none' && policy.unmatchedMxHosts.length > 0) {
+        const unmatchedDisp = policy.unmatchedMxHosts.map(displayFqdn).join(', ');
+        const msg = `DNS MX exchanger(s) ${unmatchedDisp} do not match MTA-STS policy mx: patterns (${policy.mxPatterns.join(', ')})`;
+        base.issues.push(msg);
+        mailFindings.push({
+          id: `mail-err-mtasts-mx-mismatch-${effectiveMailDomain}`,
+          severity: policy.mode === 'enforce' ? 'error' : 'warning',
+          code: 'MTA_STS_MX_MISMATCH',
+          title: `MTA-STS policy mx: allowlist mismatch for ${unmatchedDisp}`,
+          detail: `${msg}. Under mode: ${policy.mode}, RFC 8461 senders ${policy.mode === 'enforce' ? 'will refuse to deliver mail to unmatched MX hosts' : 'will report policy failures via TLS-RPT'}.`,
+          rfc: 'RFC 8461 §4.1',
+          targetId: dnssec.rrset?.id,
+        });
+      }
+
+      if (policy.maxAge !== undefined && policy.maxAge < 86400 && policy.mode === 'enforce') {
+        const msg = `Short MTA-STS max_age (${policy.maxAge}s < 86400s); RFC 8461 §3.2 recommends caching for at least several weeks`;
+        base.issues.push(msg);
+        mailFindings.push({
+          id: `mail-warn-mtasts-short-age-${effectiveMailDomain}`,
+          severity: 'warning',
+          code: 'MTA_STS_SHORT_MAX_AGE',
+          title: `MTA-STS policy at ${dispDom} has short max_age (${policy.maxAge}s)`,
+          detail: msg,
+          rfc: 'RFC 8461 §3.2',
+          targetId: dnssec.rrset?.id,
+        });
+      }
+
+      if (policy.mode === 'enforce') {
+        base.status = policy.unmatchedMxHosts.length > 0 ? 'invalid' : 'enforce';
+        base.summary =
+          policy.unmatchedMxHosts.length > 0
+            ? `MTA-STS mode=enforce (id=${base.policyId}), but ${policy.unmatchedMxHosts.length} MX host(s) fail mx: pattern match!`
+            : `Active MTA-STS mode=enforce (id=${base.policyId}, max_age=${policy.maxAge}s) — all ${policy.matchedMxHosts.length} MX host(s) match policy.`;
+      } else if (policy.mode === 'testing') {
+        base.status = 'testing';
+        base.summary = `MTA-STS mode=testing (id=${base.policyId}, max_age=${policy.maxAge}s) — report-only mode.`;
+        mailFindings.push({
+          id: `mail-info-mtasts-testing-${effectiveMailDomain}`,
+          severity: 'info',
+          code: 'MTA_STS_TESTING_MODE',
+          title: `MTA-STS policy for ${dispDom} is in "testing" mode`,
+          detail: `Senders validate MX TLS certificates against ${policyUrl} and send failure reports via TLS-RPT, but will still deliver mail over untrusted connections until mode is switched to "enforce".`,
+          rfc: 'RFC 8461 §5',
+          targetId: dnssec.rrset?.id,
+        });
+      } else {
+        base.status = 'none-mode';
+        base.summary = `MTA-STS mode=none (id=${base.policyId}) — policy explicitly disabled.`;
+      }
+      return base;
+    }
+
+    if (mtaStsPolicyFetch.httpStatus && mtaStsPolicyFetch.httpStatus >= 400) {
+      base.status = 'invalid';
+      const msg = `HTTPS MTA-STS policy endpoint ${policyUrl} returned HTTP ${mtaStsPolicyFetch.httpStatus}`;
+      base.issues.push(msg);
+      base.summary = `${dispQname} TXT (id=${base.policyId}) published, but HTTPS policy returned HTTP ${mtaStsPolicyFetch.httpStatus}.`;
+      mailFindings.push({
+        id: `mail-warn-mtasts-http-err-${effectiveMailDomain}`,
+        severity: 'warning',
+        code: 'MTA_STS_POLICY_HTTP_ERROR',
+        title: `MTA-STS policy endpoint for ${dispDom} returned HTTP ${mtaStsPolicyFetch.httpStatus}`,
+        detail: `${dispQname} publishes "v=STSv1; id=${base.policyId}", but fetching ${policyUrl} returned HTTP ${mtaStsPolicyFetch.httpStatus} (RFC 8461 §3.2 requires HTTP 200).`,
+        rfc: 'RFC 8461 §3.2',
+        targetId: dnssec.rrset?.id,
+      });
+      return base;
+    }
+  }
+
+  base.status = 'dns-only';
+  base.summary = `Valid DNS _mta-sts record (v=STSv1; id=${base.policyId}) at ${dispQname}${mtaStsPolicyFetch?.corsOrNetworkError ? ' (HTTPS policy cross-origin restricted in browser)' : ''}.`;
+  return base;
+}
+
+function parseTlsRptUri(rawItem: string): TlsRptUriDetail {
+  const raw = rawItem.trim();
+  const lower = raw.toLowerCase();
+  if (lower.startsWith('mailto:')) {
+    const addr = raw.slice(7).trim();
+    const atIdx = addr.lastIndexOf('@');
+    const valid = atIdx > 0 && atIdx < addr.length - 1 && addr.slice(atIdx + 1).includes('.');
+    return {
+      raw,
+      uri: raw,
+      scheme: 'mailto',
+      syntaxValid: valid,
+      error: valid ? undefined : `Malformed mailto: address in TLS-RPT rua "${raw}"`,
+    };
+  }
+  if (lower.startsWith('https://') || lower.startsWith('http://')) {
+    try {
+      const u = new URL(raw);
+      const scheme = u.protocol.replace(/:$/, '').toLowerCase();
+      return {
+        raw,
+        uri: raw,
+        scheme,
+        syntaxValid: scheme === 'https',
+        error:
+          scheme === 'http'
+            ? 'RFC 8460 §3 requires https:// or mailto: for TLS-RPT reporting (http:// is insecure)'
+            : undefined,
+      };
+    } catch {
+      return {
+        raw,
+        uri: raw,
+        scheme: 'https',
+        syntaxValid: false,
+        error: `Malformed URL in TLS-RPT rua "${raw}"`,
+      };
+    }
+  }
+  return {
+    raw,
+    uri: raw,
+    scheme: raw.split(':')[0]?.toLowerCase() || 'unknown',
+    syntaxValid: false,
+    error: `Unsupported TLS-RPT URI scheme in "${raw}" (RFC 8460 §3 allows mailto: or https://)`,
+  };
+}
+
+function evaluateTlsRptFromLogs(params: {
+  effectiveMailDomain: string;
+  isDomainNxdomain: boolean;
+  daneStatus: MailAnalysisResult['daneStatus'];
+  mtaStsPresent: boolean;
+  queries: DohQueryLog[];
+  zones: ZoneAnalysis[];
+  mailFindings: AuditFinding[];
+}): TlsRptAnalysis {
+  const {
+    effectiveMailDomain,
+    isDomainNxdomain,
+    daneStatus,
+    mtaStsPresent,
+    queries,
+    zones,
+    mailFindings,
+  } = params;
+  const dispDom = displayFqdn(effectiveMailDomain);
+  const qname = normalizeFqdn(`_smtp._tls.${effectiveMailDomain}`);
+  const dispQname = displayFqdn(qname);
+
+  const cnameRes = resolveCnameChainInLogs(queries, qname, RR_TYPES.TXT);
+  const resolvedOwner = cnameRes.finalOwner;
+  const txtLog =
+    findAnyLog(queries, resolvedOwner, RR_TYPES.TXT) ?? findAnyLog(queries, qname, RR_TYPES.TXT);
+  const allTxt = extractTxtJoinedStrings(txtLog, resolvedOwner, RR_TYPES.TXT);
+  const tlsRptRecords = allTxt.filter(isTlsRptRecordText);
+
+  const dnssec = findEffectiveDnssecStatusForQuery(
+    zones,
+    qname,
+    cnameRes.cnameChain,
+    resolvedOwner,
+    RR_TYPES.TXT,
+    'TXT'
+  );
+  const effectiveDnssecStatus: ValidationStatus =
+    dnssec.rrset || dnssec.negativeNode
+      ? dnssec.status
+      : txtLog?.packet.flags.rcode === 2
+        ? 'bogus'
+        : txtLog?.packet.flags.ad
+          ? 'secure'
+          : dnssec.status !== 'indeterminate'
+            ? dnssec.status
+            : 'insecure';
+
+  const base: TlsRptAnalysis = {
+    present: tlsRptRecords.length > 0,
+    status: 'not-deployed',
+    qname,
+    resolvedOwner,
+    cnameChain: cnameRes.cnameChain,
+    dnssecStatus: effectiveDnssecStatus,
+    txtRrsetId: dnssec.rrset?.id,
+    negativeNodeId: dnssec.negativeNode?.id,
+    rawRecord: tlsRptRecords[0],
+    allTlsRptRecords: tlsRptRecords,
+    rua: [],
+    extensions: [],
+    issues: [],
+    summary: `No _smtp._tls TXT record published at ${dispQname}.`,
+  };
+
+  if (tlsRptRecords.length === 0) {
+    const hasTlsEnforcement =
+      daneStatus === 'all-valid' || daneStatus === 'partial' || mtaStsPresent;
+    if (hasTlsEnforcement && !isDomainNxdomain) {
+      const tlsTech =
+        (daneStatus === 'all-valid' || daneStatus === 'partial') && mtaStsPresent
+          ? 'SMTP DANE & MTA-STS'
+          : mtaStsPresent
+            ? 'MTA-STS'
+            : 'SMTP DANE';
+      mailFindings.push({
+        id: `mail-info-tlsrpt-missing-${effectiveMailDomain}`,
+        severity: 'info',
+        code: 'TLSRPT_MISSING_WITH_TLS_POLICY',
+        title: `${tlsTech} active on ${dispDom}, but SMTP TLS Reporting (_smtp._tls) is not configured`,
+        detail: `Publish a TXT record at ${dispQname} (e.g. "v=TLSRPTv1; rua=mailto:tlsrpt@${dispDom}") per RFC 8460 to receive automated telemetry whenever remote senders encounter DANE TLSA or MTA-STS certificate validation failures.`,
+        rfc: 'RFC 8460 §3',
+      });
+    }
+    return base;
+  }
+
+  if (effectiveDnssecStatus === 'bogus') {
+    base.issues.push(`DNSSEC validation failed (BOGUS) for ${dispQname} TXT`);
+    mailFindings.push({
+      id: `mail-err-tlsrpt-dnssec-bogus-${effectiveMailDomain}`,
+      severity: 'error',
+      code: 'TLSRPT_DNSSEC_BOGUS',
+      title: `SMTP TLS-RPT record at ${dispQname} failed DNSSEC validation (BOGUS)`,
+      detail: `Validating resolvers return SERVFAIL for ${dispQname} TXT.`,
+      rfc: 'RFC 8460 §3',
+      targetId: dnssec.rrset?.id,
+    });
+  }
+
+  if (tlsRptRecords.length > 1) {
+    base.status = 'invalid';
+    const msg = `${dispQname} publishes ${tlsRptRecords.length} v=TLSRPTv1 TXT records — RFC 8460 §3 requires discarding TLS-RPT when multiple records exist`;
+    base.issues.push(msg);
+    base.summary = `Invalid TLS-RPT: multiple v=TLSRPTv1 TXT records (${tlsRptRecords.length}) disable reporting.`;
+    mailFindings.push({
+      id: `mail-err-tlsrpt-multi-${effectiveMailDomain}`,
+      severity: 'error',
+      code: 'TLSRPT_MULTIPLE_RECORDS',
+      title: `Multiple v=TLSRPTv1 TXT records at ${dispQname} (${tlsRptRecords.length} found)`,
+      detail: `Per RFC 8460 §3, if multiple v=TLSRPTv1 TXT records exist at _smtp._tls, senders MUST NOT send TLS reports.`,
+      rfc: 'RFC 8460 §3',
+      targetId: dnssec.rrset?.id,
+    });
+    return base;
+  }
+
+  const raw = tlsRptRecords[0];
+  const segments = raw
+    .split(';')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  let syntaxInvalid = false;
+  const seenKeys = new Set<string>();
+
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const eqIdx = seg.indexOf('=');
+    if (eqIdx <= 0) {
+      syntaxInvalid = true;
+      base.issues.push(`Malformed TLS-RPT tag "${seg}" (missing '=')`);
+      continue;
+    }
+    const key = seg.slice(0, eqIdx).trim();
+    const keyLower = key.toLowerCase();
+    const val = seg.slice(eqIdx + 1).trim();
+
+    if (seenKeys.has(keyLower)) {
+      syntaxInvalid = true;
+      base.issues.push(`Duplicate TLS-RPT tag "${keyLower}="`);
+      continue;
+    }
+    seenKeys.add(keyLower);
+
+    if (i === 0) {
+      base.version = val;
+      if (keyLower !== 'v' || val !== 'TLSRPTv1') {
+        syntaxInvalid = true;
+        base.issues.push(`First tag in _smtp._tls TXT must be exact "v=TLSRPTv1" (got "${seg}")`);
+      }
+      continue;
+    }
+
+    if (keyLower === 'rua') {
+      const items = val
+        .split(',')
+        .map((x) => x.trim())
+        .filter((x) => x.length > 0);
+      for (const item of items) {
+        const parsedUri = parseTlsRptUri(item);
+        base.rua.push(parsedUri);
+        if (!parsedUri.syntaxValid && parsedUri.error) {
+          base.issues.push(parsedUri.error);
+        }
+      }
+    } else {
+      base.extensions.push({ key, value: val });
+    }
+  }
+
+  const validUris = base.rua.filter((u) => u.syntaxValid);
+  const invalidUris = base.rua.filter((u) => !u.syntaxValid);
+
+  if (base.rua.length === 0) {
+    syntaxInvalid = true;
+    base.issues.push('Missing mandatory "rua=" reporting URI tag in _smtp._tls TXT (RFC 8460 §3)');
+  } else if (validUris.length === 0) {
+    syntaxInvalid = true;
+  }
+
+  if (syntaxInvalid || effectiveDnssecStatus === 'bogus') {
+    base.status = 'invalid';
+    base.summary = `Invalid TLS-RPT record at ${dispQname}: ${base.issues[0] ?? 'syntax error'}.`;
+    if (syntaxInvalid) {
+      mailFindings.push({
+        id: `mail-err-tlsrpt-syntax-${effectiveMailDomain}`,
+        severity: 'error',
+        code: 'TLSRPT_SYNTAX_INVALID',
+        title: `Invalid SMTP TLS-RPT TXT syntax at ${dispQname}`,
+        detail: base.issues.join('; '),
+        rfc: 'RFC 8460 §3',
+        targetId: dnssec.rrset?.id,
+      });
+    }
+    return base;
+  }
+
+  if (invalidUris.length > 0) {
+    base.status = 'warning';
+    base.summary = `TLS-RPT active (${validUris.length} valid URI, ${invalidUris.length} malformed URI).`;
+    mailFindings.push({
+      id: `mail-warn-tlsrpt-uri-${effectiveMailDomain}`,
+      severity: 'warning',
+      code: 'TLSRPT_URI_WARNING',
+      title: `Malformed URI in ${dispQname} TLS-RPT rua= tag`,
+      detail: invalidUris.map((u) => u.error).join('; '),
+      rfc: 'RFC 8460 §3',
+      targetId: dnssec.rrset?.id,
+    });
+    return base;
+  }
+
+  base.status = 'valid';
+  base.summary = `Active SMTP TLS-RPT (${validUris.map((u) => u.uri).join(', ')}).`;
+  return base;
+}
+
+function evaluateBimiFromLogs(params: {
+  effectiveMailDomain: string;
+  dmarc: DmarcAnalysis;
+  queries: DohQueryLog[];
+  zones: ZoneAnalysis[];
+  mailFindings: AuditFinding[];
+}): BimiAnalysis {
+  const { effectiveMailDomain, dmarc, queries, zones, mailFindings } = params;
+  const selector = 'default';
+  const directQname = normalizeFqdn(`${selector}._bimi.${effectiveMailDomain}`);
+  const orgDomain = estimateOrganizationalDomain(effectiveMailDomain);
+  const isSubdomain = orgDomain !== effectiveMailDomain && orgDomain !== '.';
+  const orgQname = isSubdomain ? normalizeFqdn(`${selector}._bimi.${orgDomain}`) : undefined;
+
+  const directRes = resolveCnameChainInLogs(queries, directQname, RR_TYPES.TXT);
+  const directLog =
+    findAnyLog(queries, directRes.finalOwner, RR_TYPES.TXT) ??
+    findAnyLog(queries, directQname, RR_TYPES.TXT);
+  const directBimi = extractTxtJoinedStrings(directLog, directRes.finalOwner, RR_TYPES.TXT).filter(
+    isBimiRecordText
+  );
+
+  let activeQname = directQname;
+  let activeRes = directRes;
+  let activeLog = directLog;
+  let bimiRecords = directBimi;
+
+  if (directBimi.length === 0 && orgQname) {
+    const orgRes = resolveCnameChainInLogs(queries, orgQname, RR_TYPES.TXT);
+    const orgLog =
+      findAnyLog(queries, orgRes.finalOwner, RR_TYPES.TXT) ??
+      findAnyLog(queries, orgQname, RR_TYPES.TXT);
+    const orgBimi = extractTxtJoinedStrings(orgLog, orgRes.finalOwner, RR_TYPES.TXT).filter(
+      isBimiRecordText
+    );
+    if (orgBimi.length > 0) {
+      activeQname = orgQname;
+      activeRes = orgRes;
+      activeLog = orgLog;
+      bimiRecords = orgBimi;
+    }
+  }
+
+  const dispQname = displayFqdn(activeQname);
+  const dnssec = findEffectiveDnssecStatusForQuery(
+    zones,
+    activeQname,
+    activeRes.cnameChain,
+    activeRes.finalOwner,
+    RR_TYPES.TXT,
+    'TXT'
+  );
+  const effectiveDnssecStatus: ValidationStatus =
+    dnssec.rrset || dnssec.negativeNode
+      ? dnssec.status
+      : activeLog?.packet.flags.rcode === 2
+        ? 'bogus'
+        : activeLog?.packet.flags.ad
+          ? 'secure'
+          : dnssec.status !== 'indeterminate'
+            ? dnssec.status
+            : 'insecure';
+
+  // Evaluate BIMI DMARC prerequisite:
+  // BIMI requires DMARC at enforcement: p=reject (pct=100) or p=quarantine (pct=100), and sp!=none
+  let dmarcEligible = false;
+  let dmarcEligibilityReason = '';
+  if (!dmarc.present || dmarc.verdict === 'invalid' || dmarc.verdict === 'temperror') {
+    dmarcEligible = false;
+    dmarcEligibilityReason = 'No valid DMARC record published';
+  } else {
+    const effectiveP =
+      dmarc.usedOrgFallback && dmarc.subdomainPolicy ? dmarc.subdomainPolicy : dmarc.policy;
+    if (effectiveP === 'none' || !effectiveP) {
+      dmarcEligible = false;
+      dmarcEligibilityReason = `DMARC policy is p=${effectiveP ?? 'none'} (BIMI requires p=quarantine with pct=100 or p=reject)`;
+    } else if (dmarc.pct < 100) {
+      dmarcEligible = false;
+      dmarcEligibilityReason = `DMARC pct=${dmarc.pct}% is below 100% (BIMI requires pct=100)`;
+    } else if (dmarc.subdomainPolicy === 'none') {
+      dmarcEligible = false;
+      dmarcEligibilityReason = `DMARC sp=none disables subdomain enforcement (BIMI disallows sp=none)`;
+    } else {
+      dmarcEligible = true;
+      dmarcEligibilityReason = `DMARC enforcement satisfied (p=${effectiveP}, pct=${dmarc.pct}%)`;
+    }
+  }
+
+  const base: BimiAnalysis = {
+    present: bimiRecords.length > 0,
+    status: 'not-deployed',
+    selector,
+    qname: activeQname,
+    resolvedOwner: activeRes.finalOwner,
+    cnameChain: activeRes.cnameChain,
+    dnssecStatus: effectiveDnssecStatus,
+    txtRrsetId: dnssec.rrset?.id,
+    negativeNodeId: dnssec.negativeNode?.id,
+    rawRecord: bimiRecords[0],
+    allBimiRecords: bimiRecords,
+    dmarcEligible,
+    dmarcEligibilityReason,
+    issues: [],
+    summary: `No BIMI record published at ${displayFqdn(directQname)}.`,
+  };
+
+  if (bimiRecords.length === 0) {
+    return base;
+  }
+
+  if (bimiRecords.length > 1) {
+    base.status = 'invalid';
+    const msg = `${dispQname} publishes ${bimiRecords.length} v=BIMI1 TXT records — multiple BIMI records invalidate discovery`;
+    base.issues.push(msg);
+    base.summary = `Invalid BIMI: multiple v=BIMI1 TXT records (${bimiRecords.length}) at ${dispQname}.`;
+    mailFindings.push({
+      id: `mail-err-bimi-multi-${effectiveMailDomain}`,
+      severity: 'error',
+      code: 'BIMI_MULTIPLE_RECORDS',
+      title: `Multiple v=BIMI1 TXT records at ${dispQname} (${bimiRecords.length} found)`,
+      detail: msg,
+      rfc: 'BIMI Draft',
+      targetId: dnssec.rrset?.id,
+    });
+    return base;
+  }
+
+  const raw = bimiRecords[0];
+  const segments = raw
+    .split(';')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  let syntaxInvalid = false;
+  let seenLTag = false;
+  const seenKeys = new Set<string>();
+
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const eqIdx = seg.indexOf('=');
+    if (eqIdx <= 0) {
+      syntaxInvalid = true;
+      base.issues.push(`Malformed BIMI tag "${seg}" (missing '=')`);
+      continue;
+    }
+    const key = seg.slice(0, eqIdx).trim().toLowerCase();
+    const val = seg.slice(eqIdx + 1).trim();
+
+    if (seenKeys.has(key)) {
+      syntaxInvalid = true;
+      base.issues.push(`Duplicate BIMI tag "${key}="`);
+      continue;
+    }
+    seenKeys.add(key);
+
+    if (i === 0) {
+      base.version = val;
+      if (key !== 'v' || val.toUpperCase() !== 'BIMI1') {
+        syntaxInvalid = true;
+        base.issues.push(`First tag in BIMI TXT must be "v=BIMI1" (got "${seg}")`);
+      }
+      continue;
+    }
+
+    if (key === 'l') {
+      seenLTag = true;
+      base.logoUrl = val || undefined;
+      if (val) {
+        try {
+          const u = new URL(val);
+          if (u.protocol !== 'https:') {
+            syntaxInvalid = true;
+            base.issues.push(`BIMI logo l= URL must use https:// (got "${val}")`);
+          } else if (!/\.svgz?(?:$|\?)/i.test(u.pathname)) {
+            base.issues.push(`BIMI logo l= URL "${val}" does not end in .svg / .svgz (SVG Tiny PS required)`);
+          }
+        } catch {
+          syntaxInvalid = true;
+          base.issues.push(`Malformed BIMI l= logo URL "${val}"`);
+        }
+      }
+    } else if (key === 'a') {
+      base.authorityUrl = val || undefined;
+      if (val) {
+        try {
+          const u = new URL(val);
+          if (u.protocol !== 'https:') {
+            syntaxInvalid = true;
+            base.issues.push(`BIMI authority evidence a= URL must use https:// (got "${val}")`);
+          }
+        } catch {
+          syntaxInvalid = true;
+          base.issues.push(`Malformed BIMI a= authority certificate URL "${val}"`);
+        }
+      }
+    }
+  }
+
+  if (!seenLTag) {
+    syntaxInvalid = true;
+    base.issues.push('Missing mandatory "l=" logo tag in BIMI record');
+  }
+
+  if (syntaxInvalid || effectiveDnssecStatus === 'bogus') {
+    base.status = 'invalid';
+    base.summary = `Invalid BIMI record at ${dispQname}: ${base.issues[0] ?? 'syntax error'}.`;
+    mailFindings.push({
+      id: `mail-err-bimi-syntax-${effectiveMailDomain}`,
+      severity: 'error',
+      code: 'BIMI_SYNTAX_INVALID',
+      title: `Invalid BIMI TXT record at ${dispQname}`,
+      detail: base.issues.join('; '),
+      rfc: 'BIMI Draft',
+      targetId: dnssec.rrset?.id,
+    });
+    return base;
+  }
+
+  if (!base.logoUrl) {
+    base.status = 'declined';
+    base.summary = `Explicit BIMI declination record (v=BIMI1; l=;) at ${dispQname}.`;
+    return base;
+  }
+
+  if (!dmarcEligible) {
+    base.status = 'dmarc-ineligible';
+    const msg = `BIMI record published at ${dispQname}, but ${dmarcEligibilityReason}`;
+    base.issues.push(msg);
+    base.summary = `BIMI ignored by receivers — ${dmarcEligibilityReason}.`;
+    mailFindings.push({
+      id: `mail-warn-bimi-dmarc-${effectiveMailDomain}`,
+      severity: 'warning',
+      code: 'BIMI_DMARC_PREREQUISITE_NOT_MET',
+      title: `BIMI logo published at ${dispQname}, but DMARC policy is not at full enforcement`,
+      detail: `${msg}. Mailbox providers refuse to display BIMI brand logos unless the organizational DMARC policy enforces "p=quarantine; pct=100" or "p=reject" (without "sp=none").`,
+      rfc: 'BIMI Draft',
+      targetId: dnssec.rrset?.id,
+    });
+    return base;
+  }
+
+  if (!base.authorityUrl) {
+    base.status = 'warning';
+    base.summary = `BIMI SVG logo configured (${base.logoUrl}) without VMC/CMC certificate (a= empty).`;
+    return base;
+  }
+
+  base.status = base.issues.length > 0 ? 'warning' : 'valid';
+  base.summary = `Verified BIMI brand logo & VMC/CMC authority certificate at ${dispQname}.`;
+  return base;
+}
+
 /**
  * Pure, deterministic evaluation of MX, SMTP DANE (TLSA), SPF, DKIM, and DMARC from already-captured
  * `DohQueryLog[]` and WebCrypto-evaluated `ZoneAnalysis[]`.
@@ -2283,13 +3420,21 @@ export function evaluateMailFromSnapshotData(params: {
   cnameEdges: CnameEdge[];
   targetDomainStatus: ValidationStatus;
   customDkimSelectors?: string[];
+  mtaStsPolicyFetch?: MtaStsPolicyFetchResult;
 }): {
   mailAnalysis: MailAnalysisResult;
   mailFindings: AuditFinding[];
   overallStatus: ValidationStatus;
   overallSummary: string;
 } {
-  const { targetName, queries, zones, targetDomainStatus, customDkimSelectors = [] } = params;
+  const {
+    targetName,
+    queries,
+    zones,
+    targetDomainStatus,
+    customDkimSelectors = [],
+    mtaStsPolicyFetch,
+  } = params;
   const mailFindings: AuditFinding[] = [];
   const dispTarget = displayFqdn(targetName);
 
@@ -2550,6 +3695,14 @@ export function evaluateMailFromSnapshotData(params: {
           targetId: ipv4Eval.rrset?.id ?? ipv6Eval.rrset?.id,
         });
       }
+      evaluateSingleMxAddressPtr({
+        addr,
+        mxExchange: exch,
+        mxFinalHost: finalHost,
+        queries,
+        zones,
+        mailFindings,
+      });
     }
 
     // Evaluate SMTP DANE (_25._tcp.<exch> TLSA) per RFC 6698 / RFC 7671 / RFC 7672
@@ -3416,6 +4569,70 @@ export function evaluateMailFromSnapshotData(params: {
     mailFindings,
   });
 
+  // 6. MTA-STS (_mta-sts.<domain> TXT + optional HTTPS /.well-known/mta-sts.txt policy file)
+  const mtaSts = evaluateMtaStsFromLogs({
+    effectiveMailDomain,
+    activeMxHosts: nonNullHosts.map((h) => h.exchange),
+    mtaStsPolicyFetch,
+    queries,
+    zones,
+    mailFindings,
+  });
+
+  // 7. SMTP TLS-RPT (_smtp._tls.<domain> TXT)
+  const tlsRpt = evaluateTlsRptFromLogs({
+    effectiveMailDomain,
+    isDomainNxdomain,
+    daneStatus,
+    mtaStsPresent: mtaSts.present,
+    queries,
+    zones,
+    mailFindings,
+  });
+
+  // 8. BIMI (default._bimi.<domain> TXT + DMARC prerequisite check)
+  const bimi = evaluateBimiFromLogs({
+    effectiveMailDomain,
+    dmarc,
+    queries,
+    zones,
+    mailFindings,
+  });
+
+  // 9. Aggregate MX Reverse DNS (PTR & FCrDNS) summary across all public MX IPs
+  const allPublicMxAddrs: MxAddressEntry[] = [];
+  for (const h of nonNullHosts) {
+    for (const a of h.addresses) {
+      if (a.isPublic && !allPublicMxAddrs.some((x) => x.ip === a.ip)) {
+        allPublicMxAddrs.push(a);
+      }
+    }
+  }
+  const checkedAddrs = allPublicMxAddrs.filter(
+    (a) => a.fcrdnsStatus && a.fcrdnsStatus !== 'unchecked'
+  );
+  const fcrdnsValidCount = checkedAddrs.filter((a) => a.fcrdnsStatus === 'valid').length;
+  const fcrdnsNoPtrCount = checkedAddrs.filter((a) => a.fcrdnsStatus === 'no-ptr').length;
+  const fcrdnsMismatchCount = checkedAddrs.filter((a) => a.fcrdnsStatus === 'ptr-mismatch').length;
+
+  let fcrdnsOverallStatus: MailAnalysisResult['fcrdnsSummary']['status'] = 'not-applicable';
+  let fcrdnsText = 'Not applicable (no active MX IP addresses).';
+  if (allPublicMxAddrs.length > 0) {
+    if (checkedAddrs.length === 0) {
+      fcrdnsOverallStatus = 'unchecked';
+      fcrdnsText = `Reverse DNS (PTR / FCrDNS) not queried for ${allPublicMxAddrs.length} MX IP(s).`;
+    } else if (fcrdnsValidCount === checkedAddrs.length) {
+      fcrdnsOverallStatus = 'all-valid';
+      fcrdnsText = `All ${checkedAddrs.length} MX IP${checkedAddrs.length === 1 ? '' : 's'} pass Forward-Confirmed Reverse DNS (FCrDNS).`;
+    } else if (fcrdnsValidCount > 0) {
+      fcrdnsOverallStatus = 'partial';
+      fcrdnsText = `${fcrdnsValidCount}/${checkedAddrs.length} MX IP(s) pass FCrDNS (${fcrdnsNoPtrCount} missing PTR, ${fcrdnsMismatchCount} forward mismatch).`;
+    } else {
+      fcrdnsOverallStatus = 'broken';
+      fcrdnsText = `0/${checkedAddrs.length} MX IP(s) pass FCrDNS (${fcrdnsNoPtrCount} missing PTR, ${fcrdnsMismatchCount} forward mismatch).`;
+    }
+  }
+
   const mailAnalysis: MailAnalysisResult = {
     mxStatus,
     mxDnssecStatus: mxDnssec.status,
@@ -3443,6 +4660,17 @@ export function evaluateMailFromSnapshotData(params: {
     },
     dmarc,
     dkim,
+    mtaSts,
+    tlsRpt,
+    bimi,
+    fcrdnsSummary: {
+      checkedIpCount: checkedAddrs.length,
+      validCount: fcrdnsValidCount,
+      noPtrCount: fcrdnsNoPtrCount,
+      mismatchCount: fcrdnsMismatchCount,
+      status: fcrdnsOverallStatus,
+      summary: fcrdnsText,
+    },
   };
 
   // Compute unified top-level status & summary for Mail Mode
@@ -3456,6 +4684,9 @@ export function evaluateMailFromSnapshotData(params: {
     dmarc.verdict === 'invalid' ||
     dmarc.verdict === 'temperror' ||
     dkim.status === 'broken' ||
+    mtaSts.status === 'invalid' ||
+    tlsRpt.status === 'invalid' ||
+    bimi.status === 'invalid' ||
     mailFindings.some((f) => f.severity === 'error');
 
   const hasMailWarning = mailFindings.some((f) => f.severity === 'warning');
@@ -3862,6 +5093,87 @@ export async function runMailAnalysis(
       if (followTasks.length === 0) break;
       await Promise.all(followTasks);
     }
+
+    // Step 2c: Probe reverse DNS (PTR) & Forward-Confirmed Reverse DNS (FCrDNS) for resolved public MX IPs
+    const logsAfterMx = session.getLogs();
+    const publicMxIps: Array<{ ip: string; family: 4 | 6; ptrQname: string }> = [];
+    for (const exch of mxExchanges) {
+      const aRes = resolveCnameChainInLogs(logsAfterMx, exch, RR_TYPES.A);
+      const aaaaRes = resolveCnameChainInLogs(logsAfterMx, exch, RR_TYPES.AAAA);
+      const finalHost = aRes.cnameChain.length > 0 ? aRes.finalOwner : aaaaRes.finalOwner;
+      const aL = findAnyLog(logsAfterMx, finalHost, RR_TYPES.A) ?? findAnyLog(logsAfterMx, exch, RR_TYPES.A);
+      const aaaaL =
+        findAnyLog(logsAfterMx, finalHost, RR_TYPES.AAAA) ?? findAnyLog(logsAfterMx, exch, RR_TYPES.AAAA);
+
+      for (const ans of aL?.packet.answers ?? []) {
+        if (ans.name === finalHost && ans.type === RR_TYPES.A) {
+          const info = classifyIpAddress(ans.rdataText, 4);
+          const ptrQname = ipToReverseArpa(info.ip);
+          if (info.isPublic && ptrQname && !publicMxIps.some((x) => x.ip === info.ip)) {
+            publicMxIps.push({ ip: info.ip, family: 4, ptrQname });
+          }
+        }
+      }
+      for (const ans of aaaaL?.packet.answers ?? []) {
+        if (ans.name === finalHost && ans.type === RR_TYPES.AAAA) {
+          const info = classifyIpAddress(ans.rdataText, 6);
+          const ptrQname = ipToReverseArpa(info.ip);
+          if (info.isPublic && ptrQname && !publicMxIps.some((x) => x.ip === info.ip)) {
+            publicMxIps.push({ ip: info.ip, family: 6, ptrQname });
+          }
+        }
+      }
+    }
+
+    const cappedMxIps = publicMxIps.slice(0, MAX_PROBED_MX_IPS_FOR_PTR);
+    if (cappedMxIps.length > 0) {
+      const ptrLogs = await Promise.all(
+        cappedMxIps.map((item) =>
+          session
+            .query(item.ptrQname, RR_TYPES.PTR, {
+              cd: false,
+              doBit: true,
+              purpose: `MX rDNS lookup (${item.ptrQname} PTR)`,
+            })
+            .then((log) => ({ item, log }))
+            .catch(() => ({ item, log: undefined }))
+        )
+      );
+
+      // Verify Forward-Confirmed Reverse DNS (FCrDNS): query A/AAAA for any PTR target hostname not already in logs
+      const fcrdnsForwardTasks: Promise<unknown>[] = [];
+      const currentLogs = session.getLogs();
+      const queuedFwd = new Set<string>();
+      for (const { item, log } of ptrLogs) {
+        if (!log) continue;
+        const rrType = item.family === 6 ? RR_TYPES.AAAA : RR_TYPES.A;
+        const rrTypeName = item.family === 6 ? 'AAAA' : 'A';
+        for (const ans of log.packet.answers) {
+          if (ans.type === RR_TYPES.PTR) {
+            const pt = normalizeFqdn(
+              ans.parsed.kind === 'GENERIC' && ans.parsed.target ? ans.parsed.target : ans.rdataText
+            );
+            if (pt === '.' || mxExchanges.includes(pt)) continue;
+            const fwdKey = `${pt}|${rrType}`;
+            if (!queuedFwd.has(fwdKey) && !findAnyLog(currentLogs, pt, rrType)) {
+              queuedFwd.add(fwdKey);
+              fcrdnsForwardTasks.push(
+                session
+                  .query(pt, rrType, {
+                    cd: false,
+                    doBit: true,
+                    purpose: `MX rDNS lookup (${pt} ${rrTypeName})`,
+                  })
+                  .catch(() => undefined)
+              );
+            }
+          }
+        }
+      }
+      if (fcrdnsForwardTasks.length > 0) {
+        await Promise.all(fcrdnsForwardTasks);
+      }
+    }
   }
 
   // Step 3: Recursively walk SPF policy tree (includes, redirects, a, mx, exists)
@@ -4144,6 +5456,125 @@ export async function runMailAnalysis(
     }
   }
 
+  // Step 5d: Probe MTA-STS (_mta-sts), SMTP TLS-RPT (_smtp._tls), and BIMI (default._bimi)
+  currentPhase = 'mail-transport';
+  options.onProgress?.({
+    phase: 'mail-transport',
+    message: `Probing MTA-STS (_mta-sts), TLS-RPT (_smtp._tls) & BIMI (default._bimi) for ${displayDomain}…`,
+    completedQueries: session.getLogs().length,
+  });
+
+  const mtaStsOwner = normalizeFqdn(`_mta-sts.${effectiveMailDomain}`);
+  const tlsRptOwner = normalizeFqdn(`_smtp._tls.${effectiveMailDomain}`);
+  const bimiOwner = normalizeFqdn(`default._bimi.${effectiveMailDomain}`);
+  const transportProbeOwners = [mtaStsOwner, tlsRptOwner, bimiOwner];
+  if (orgDomain !== effectiveMailDomain && orgDomain !== '.') {
+    transportProbeOwners.push(normalizeFqdn(`default._bimi.${orgDomain}`));
+  }
+
+  const transportProbeLogs = await Promise.all(
+    transportProbeOwners.map(async (qn) => {
+      const log = await session
+        .query(qn, RR_TYPES.TXT, {
+          cd: false,
+          doBit: true,
+          purpose: `Mail probe (${qn} TXT)`,
+        })
+        .catch(() => undefined);
+      return { qn, log };
+    })
+  );
+
+  // Upgrade any MTA-STS / TLS-RPT / BIMI owners that returned TXT/CNAME answers or SERVFAIL to full CD=1 Mail targets
+  const matchedTransportOwners = transportProbeLogs
+    .filter(
+      (item) =>
+        item.log &&
+        (item.log.packet.answers.some((r) => r.type === RR_TYPES.TXT || r.type === RR_TYPES.CNAME) ||
+          item.log.packet.flags.rcode === 2)
+    )
+    .map((item) => item.qn);
+
+  if (matchedTransportOwners.length > 0) {
+    await Promise.all(
+      matchedTransportOwners.flatMap((qn) => [
+        discoverZoneCutsForName(session, qn, discoveredZones, checkedCandidates),
+        session.query(qn, RR_TYPES.TXT, {
+          cd: true,
+          doBit: true,
+          purpose: `Mail target (${qn} TXT)`,
+        }),
+      ])
+    );
+
+    const visitedTransportCname = new Set<string>(matchedTransportOwners);
+    for (let hop = 0; hop < 5; hop++) {
+      const logsNow = session.getLogs();
+      const followTasks: Promise<unknown>[] = [];
+      for (const startQn of matchedTransportOwners) {
+        const cRes = resolveCnameChainInLogs(logsNow, startQn, RR_TYPES.TXT);
+        for (const cTarget of cRes.cnameChain) {
+          if (!visitedTransportCname.has(cTarget)) {
+            visitedTransportCname.add(cTarget);
+            followTasks.push(
+              discoverZoneCutsForName(session, cTarget, discoveredZones, checkedCandidates),
+              session.query(cTarget, RR_TYPES.TXT, {
+                cd: true,
+                doBit: true,
+                purpose: `CNAME target (${cTarget} TXT)`,
+              })
+            );
+          }
+        }
+      }
+      if (followTasks.length === 0) break;
+      await Promise.all(followTasks);
+    }
+  }
+
+  // Optional HTTPS policy fetch of https://mta-sts.<domain>/.well-known/mta-sts.txt when _mta-sts TXT is present
+  let mtaStsPolicyFetch: MtaStsPolicyFetchResult | undefined;
+  const mtaStsRes = resolveCnameChainInLogs(session.getLogs(), mtaStsOwner, RR_TYPES.TXT);
+  const mtaStsLog =
+    findAnyLog(session.getLogs(), mtaStsRes.finalOwner, RR_TYPES.TXT) ??
+    findAnyLog(session.getLogs(), mtaStsOwner, RR_TYPES.TXT);
+  const mtaStsTxts = extractTxtJoinedStrings(mtaStsLog, mtaStsRes.finalOwner, RR_TYPES.TXT).filter(
+    isMtaStsRecordText
+  );
+
+  if (mtaStsTxts.length === 1 && !options.fetchImpl) {
+    const policyUrl = `https://mta-sts.${displayFqdn(effectiveMailDomain)}/.well-known/mta-sts.txt`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3500);
+    try {
+      const res = await fetch(policyUrl, {
+        method: 'GET',
+        headers: { Accept: 'text/plain' },
+        signal: controller.signal,
+      });
+      const contentType = res.headers.get('content-type') ?? undefined;
+      const text = await res.text();
+      mtaStsPolicyFetch = {
+        url: policyUrl,
+        fetchedAt: Date.now(),
+        ok: res.ok,
+        httpStatus: res.status,
+        contentType,
+        rawBody: text.slice(0, 16384),
+      };
+    } catch (err) {
+      mtaStsPolicyFetch = {
+        url: policyUrl,
+        fetchedAt: Date.now(),
+        ok: false,
+        corsOrNetworkError:
+          err instanceof Error ? err.message : 'CORS or network error fetching mta-sts.txt',
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   // Include any authoritative SOA zones returned in CD=1 responses
   for (const log of session.getLogs()) {
     if (
@@ -4151,6 +5582,8 @@ export async function runMailAnalysis(
       log.purpose.startsWith('SPF lookup') ||
       log.purpose.startsWith('DMARC lookup') ||
       log.purpose.startsWith('DKIM probe') ||
+      log.purpose.startsWith('Mail probe') ||
+      log.purpose.startsWith('MX rDNS lookup') ||
       log.purpose.startsWith('Nameserver IP')
     ) {
       continue;
@@ -4205,6 +5638,7 @@ export async function runMailAnalysis(
     targetName,
     queryTypes,
     customDkimSelectors,
+    mtaStsPolicyFetch,
     dohEndpoint: endpoint,
     capturedAt,
     validatedAt,

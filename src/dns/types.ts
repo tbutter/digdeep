@@ -422,11 +422,20 @@ export interface TlsaRecordDetail {
   issues: string[];
 }
 
+export type FcrdnsStatus = 'valid' | 'ptr-mismatch' | 'no-ptr' | 'temperror' | 'unchecked';
+
 export interface MxAddressEntry {
   ip: string;
   family: 4 | 6;
   isPublic: boolean;
   note?: string;
+  ptrQname?: string;
+  ptrTargets?: string[];
+  ptrDnssecStatus?: ValidationStatus;
+  ptrRrsetId?: string;
+  ptrNegativeNodeId?: string;
+  fcrdnsStatus?: FcrdnsStatus;
+  fcrdnsMatchedNames?: string[];
 }
 
 export interface MxHostAnalysis {
@@ -598,6 +607,97 @@ export interface DkimAnalysis {
   summary: string;
 }
 
+export interface MtaStsPolicyFetchResult {
+  url: string;
+  fetchedAt: number;
+  ok: boolean;
+  httpStatus?: number;
+  contentType?: string;
+  rawBody?: string;
+  corsOrNetworkError?: string;
+}
+
+export type MtaStsMode = 'enforce' | 'testing' | 'none';
+
+export interface MtaStsPolicyData {
+  version?: string;
+  mode?: MtaStsMode;
+  maxAge?: number;
+  mxPatterns: string[];
+  matchedMxHosts: string[];
+  unmatchedMxHosts: string[];
+  valid: boolean;
+  issues: string[];
+}
+
+export interface MtaStsAnalysis {
+  present: boolean;
+  status: 'enforce' | 'testing' | 'dns-only' | 'none-mode' | 'invalid' | 'not-deployed';
+  qname: string;
+  resolvedOwner: string;
+  cnameChain: string[];
+  dnssecStatus: ValidationStatus;
+  txtRrsetId?: string;
+  negativeNodeId?: string;
+  rawRecord?: string;
+  allStsRecords: string[];
+  version?: string;
+  policyId?: string;
+  extensions: { key: string; value: string }[];
+  policyUrl: string;
+  policyFetch?: MtaStsPolicyFetchResult;
+  policy?: MtaStsPolicyData;
+  issues: string[];
+  summary: string;
+}
+
+export interface TlsRptUriDetail {
+  raw: string;
+  uri: string;
+  scheme: string;
+  syntaxValid: boolean;
+  error?: string;
+}
+
+export interface TlsRptAnalysis {
+  present: boolean;
+  status: 'valid' | 'warning' | 'invalid' | 'not-deployed';
+  qname: string;
+  resolvedOwner: string;
+  cnameChain: string[];
+  dnssecStatus: ValidationStatus;
+  txtRrsetId?: string;
+  negativeNodeId?: string;
+  rawRecord?: string;
+  allTlsRptRecords: string[];
+  version?: string;
+  rua: TlsRptUriDetail[];
+  extensions: { key: string; value: string }[];
+  issues: string[];
+  summary: string;
+}
+
+export interface BimiAnalysis {
+  present: boolean;
+  status: 'valid' | 'declined' | 'dmarc-ineligible' | 'warning' | 'invalid' | 'not-deployed';
+  selector: string;
+  qname: string;
+  resolvedOwner: string;
+  cnameChain: string[];
+  dnssecStatus: ValidationStatus;
+  txtRrsetId?: string;
+  negativeNodeId?: string;
+  rawRecord?: string;
+  allBimiRecords: string[];
+  version?: string;
+  logoUrl?: string;
+  authorityUrl?: string;
+  dmarcEligible: boolean;
+  dmarcEligibilityReason: string;
+  issues: string[];
+  summary: string;
+}
+
 export interface MailAnalysisResult {
   mxStatus: 'valid' | 'null-mx' | 'implicit-a' | 'warning' | 'broken' | 'none';
   mxDnssecStatus: ValidationStatus;
@@ -631,6 +731,17 @@ export interface MailAnalysisResult {
   };
   dmarc: DmarcAnalysis;
   dkim: DkimAnalysis;
+  mtaSts: MtaStsAnalysis;
+  tlsRpt: TlsRptAnalysis;
+  bimi: BimiAnalysis;
+  fcrdnsSummary: {
+    checkedIpCount: number;
+    validCount: number;
+    noPtrCount: number;
+    mismatchCount: number;
+    status: 'all-valid' | 'partial' | 'broken' | 'not-applicable' | 'unchecked';
+    summary: string;
+  };
 }
 
 export interface AnalysisSnapshot {
@@ -641,6 +752,7 @@ export interface AnalysisSnapshot {
   displayDomain: string; // clean display e.g. "cloudflare.com" or "."
   queryTypes: string[];
   customDkimSelectors?: string[];
+  mtaStsPolicyFetch?: MtaStsPolicyFetchResult;
   dohEndpoint: string;
   capturedAt: number; // ms epoch
   validatedAt: number; // ms epoch used for RRSIG timestamp checks
@@ -669,7 +781,8 @@ export interface AnalysisProgress {
     | 'mail-dane'
     | 'mail-spf'
     | 'mail-dmarc'
-    | 'mail-dkim';
+    | 'mail-dkim'
+    | 'mail-transport';
   message: string;
   completedQueries: number;
 }

@@ -37,6 +37,7 @@ import type {
   DnskeyRdata,
   DohQueryLog,
   DsVerification,
+  MtaStsPolicyFetchResult,
   NameserverEntry,
   ResolverVerdict,
   RrsigVerification,
@@ -45,7 +46,7 @@ import type {
   ZoneAnalysis,
 } from './types';
 
-export const SNAPSHOT_ENGINE_VERSION = 5;
+export const SNAPSHOT_ENGINE_VERSION = 6;
 
 export interface AnalyzeOptions extends DohClientOptions {
   queryTypes?: string[];
@@ -377,6 +378,7 @@ export async function reverifySnapshot(
     targetName: snapshot.targetName,
     queryTypes: snapshot.queryTypes,
     customDkimSelectors: snapshot.customDkimSelectors,
+    mtaStsPolicyFetch: snapshot.mtaStsPolicyFetch,
     dohEndpoint: snapshot.dohEndpoint,
     capturedAt: snapshot.capturedAt,
     validatedAt: options.validationTimeMs ?? snapshot.validatedAt,
@@ -397,6 +399,7 @@ interface EvaluateInput {
   targetName: string;
   queryTypes: string[];
   customDkimSelectors?: string[];
+  mtaStsPolicyFetch?: MtaStsPolicyFetchResult;
   dohEndpoint: string;
   capturedAt: number;
   validatedAt: number;
@@ -451,6 +454,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     targetName,
     queryTypes,
     customDkimSelectors,
+    mtaStsPolicyFetch,
     dohEndpoint,
     capturedAt,
     validatedAt,
@@ -461,14 +465,16 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
 
   const validationEpochSec = Math.floor(validatedAt / 1000);
   const enabledAnchors = trustAnchors.filter((ta) => ta.enabled);
-  // Exclude auxiliary out-of-bailiwick nameserver IP, recursive SPF, DMARC report, and speculative DKIM helper lookups from DNSSEC zone reconstruction
+  // Exclude auxiliary out-of-bailiwick nameserver IP, recursive SPF, DMARC report, MX rDNS, and speculative DKIM/Mail helper lookups from DNSSEC zone reconstruction
   const cdLogs = queries.filter(
     (q) =>
       q.cd &&
       !q.purpose.startsWith('Nameserver IP') &&
       !q.purpose.startsWith('SPF lookup') &&
       !q.purpose.startsWith('DMARC lookup') &&
-      !q.purpose.startsWith('DKIM probe')
+      !q.purpose.startsWith('DKIM probe') &&
+      !q.purpose.startsWith('Mail probe') &&
+      !q.purpose.startsWith('MX rDNS lookup')
   );
 
   // Reconstruct set of discovered zones from DNSKEY queries + SOA records
@@ -1653,6 +1659,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       cnameEdges,
       targetDomainStatus: overallStatus,
       customDkimSelectors,
+      mtaStsPolicyFetch,
     });
     mailAnalysis = mailResult.mailAnalysis;
     findings.push(...mailResult.mailFindings);
@@ -1682,6 +1689,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     displayDomain: displayFqdn(targetName),
     queryTypes,
     ...(customDkimSelectors && customDkimSelectors.length > 0 ? { customDkimSelectors } : {}),
+    ...(mtaStsPolicyFetch ? { mtaStsPolicyFetch } : {}),
     dohEndpoint,
     capturedAt,
     validatedAt,
