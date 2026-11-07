@@ -5,6 +5,14 @@ import { AuditPanel } from '../../components/AuditPanel';
 import { ChainGraphView, prepareExportSvgElement } from '../../components/ChainGraphView';
 import { ConsensusView } from '../../components/ConsensusView';
 import { HistoryPanel } from '../../components/HistoryPanel';
+import {
+  ensureIpAsnInfoLoaded,
+  getCachedOrInitialIpInfo,
+  IpAsnHoverCardContent,
+  IpHoverBadge,
+  parseIpToken,
+  seedIpAsnCacheFromSnapshot,
+} from '../../components/IpHoverBadge';
 import { MailAnalysisView } from '../../components/MailAnalysisView';
 import { ResponsesPanel } from '../../components/ResponsesPanel';
 import { ReverseDnsCard } from '../../components/ReverseDnsCard';
@@ -165,7 +173,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v13');
+    expect(swCode).toContain('digdeep-shell-v14');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge when navigator.onLine is false
@@ -565,6 +573,43 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(consensusHtml).toContain('1.1.1.1');
       expect(consensusHtml).toContain('8.8.8.8');
       expect(consensusHtml).toContain('9.9.9.9');
+
+      // Verify IP hover card cache seeding, live DoH lookup, and rendering
+      seedIpAsnCacheFromSnapshot(rdnsSnap);
+      const tok1111 = parseIpToken('1.1.1.1')!;
+      expect(tok1111).toBeTruthy();
+      expect(tok1111.canonicalIp).toBe('1.1.1.1');
+      const seededInfo = getCachedOrInitialIpInfo(tok1111);
+      expect(seededInfo.status).toBe('ready');
+      expect(seededInfo.asns.some((a) => a.asn === 13335)).toBe(true);
+
+      const spfCidrTok = parseIpToken('ip4:192.0.2.0/24')!;
+      expect(spfCidrTok).toBeTruthy();
+      expect(spfCidrTok.canonicalIp).toBe('192.0.2.0');
+      expect(spfCidrTok.cidrSuffix).toBe('/24');
+      expect(spfCidrTok.isPublic).toBe(false);
+
+      const liveQuad9Tok = parseIpToken('9.9.9.9')!;
+      const fetchedQuad9 = await ensureIpAsnInfoLoaded(liveQuad9Tok);
+      expect(fetchedQuad9.status).toBe('ready');
+      expect(fetchedQuad9.asns.some((a) => a.asn === 19281)).toBe(true);
+
+      const hoverCardHtml = renderToStaticMarkup(
+        <IpAsnHoverCardContent
+          entries={[
+            { token: tok1111, info: seededInfo },
+            { token: spfCidrTok, info: getCachedOrInitialIpInfo(spfCidrTok) },
+          ]}
+          titleLabel="www.iana.org · A RRset"
+        />
+      );
+      expect(hoverCardHtml).toContain('AS13335');
+      expect(hoverCardHtml).toContain('1.1.1.0/24');
+      expect(hoverCardHtml).toContain('SPECIAL RANGE');
+
+      const badgeHtml = renderToStaticMarkup(<IpHoverBadge ip="1.1.1.1" />);
+      expect(badgeHtml).toContain('1.1.1.1');
+      expect(badgeHtml).toContain('cursor-help');
     },
     35000
   );

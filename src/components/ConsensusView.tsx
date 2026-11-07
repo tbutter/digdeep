@@ -15,6 +15,7 @@ import type {
   ConsensusAnalysisResult,
   ConsensusResolverClassification,
 } from '../dns/types';
+import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
 
 function getRoleBadgeMeta(role: DohResolverRole): { label: string; cls: string } {
   switch (role) {
@@ -135,6 +136,7 @@ export function ConsensusView({
   onOpenChainGraph: () => void;
   onOpenWireResponses: () => void;
 }) {
+  seedIpAsnCacheFromSnapshot(snapshot);
   const consensus = snapshot.consensusAnalysis;
   if (!consensus) return null;
 
@@ -443,7 +445,7 @@ export function ConsensusView({
                                   : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
                               }`}
                             >
-                              {ip}
+                              <IpHoverBadge ip={ip} />
                             </span>
                           ))}
                           {r.ipv4Answers.length + r.ipv6Answers.length > 4 && (

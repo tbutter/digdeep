@@ -3,8 +3,10 @@ import { useMemo, useState } from 'react';
 import { formatDohShortLabel, rcodeToString } from '../dns/constants';
 import { formatPacketAsDig, formatWireHexDump } from '../dns/digFormat';
 import type { AnalysisSnapshot, DohQueryLog } from '../dns/types';
+import { IpHoverBadge, parseIpToken, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
 
 export function ResponsesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
+  seedIpAsnCacheFromSnapshot(snapshot);
   const [selectedId, setSelectedId] = useState<string>(snapshot.queries[0]?.id ?? '');
   const [mode, setMode] = useState<'dig' | 'hex-resp' | 'hex-req'>('dig');
   const [copied, setCopied] = useState(false);
@@ -161,7 +163,29 @@ export function ResponsesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
 
             <div className="p-4 overflow-auto flex-1 bg-slate-950 text-slate-200 font-mono text-xs leading-relaxed">
               {mode === 'dig' ? (
-                <pre className="whitespace-pre overflow-x-auto">{digText}</pre>
+                <pre className="whitespace-pre overflow-x-auto">
+                  {digText.split('\n').map((line, idx, lines) => {
+                    const nl = idx < lines.length - 1 ? '\n' : '';
+                    if (!line.startsWith(';')) {
+                      const match = /^(\S+\s+\d+\s+\S+\s+(?:A|AAAA)\s+)(\S+)$/.exec(line);
+                      if (match && parseIpToken(match[2])) {
+                        return (
+                          <span key={idx}>
+                            {match[1]}
+                            <IpHoverBadge ip={match[2]} className="text-cyan-300" />
+                            {nl}
+                          </span>
+                        );
+                      }
+                    }
+                    return (
+                      <span key={idx}>
+                        {line}
+                        {nl}
+                      </span>
+                    );
+                  })}
+                </pre>
               ) : (
                 <div className="space-y-0.5">
                   {hexRows.map((row) => (

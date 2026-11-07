@@ -4,6 +4,7 @@ import { DNSSEC_ALGORITHMS, formatAlgorithm, formatDigestType } from '../dns/con
 import { displayFqdn } from '../dns/encoding';
 import type { NegativeProofVerification, ZoneAnalysis } from '../dns/types';
 import type { GraphEdge, GraphNode } from '../graph/layout';
+import { IpHoverBadge } from './IpHoverBadge';
 import { StatusBadge } from './StatusBadge';
 
 export type GraphSelection =
@@ -231,8 +232,13 @@ export function GraphInspector({
                         {displayFqdn(ns.hostname)}
                       </div>
                       {(ns.ipv4.length > 0 || ns.ipv6.length > 0) && (
-                        <div className="font-mono text-[10px] text-slate-500 mt-0.5 break-all">
-                          {[...ns.ipv4, ...ns.ipv6].join(' · ')}
+                        <div className="font-mono text-[10px] text-slate-500 mt-0.5 break-all flex flex-wrap gap-x-1.5 gap-y-0.5">
+                          {[...ns.ipv4, ...ns.ipv6].map((ip, idx, arr) => (
+                            <span key={ip}>
+                              <IpHoverBadge ip={ip} />
+                              {idx < arr.length - 1 ? ' ·' : ''}
+                            </span>
+                          ))}
                         </div>
                       )}
                     </div>
@@ -376,7 +382,11 @@ export function GraphInspector({
                           key={`${rec.rdataBase64}-${i}`}
                           className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 p-2.5 font-mono text-xs break-all text-slate-800 dark:text-slate-200"
                         >
-                          {rec.rdataText}
+                          {rec.typeName === 'A' || rec.typeName === 'AAAA' ? (
+                            <IpHoverBadge ip={rec.rdataText} />
+                          ) : (
+                            rec.rdataText
+                          )}
                         </div>
                       ))}
                     </div>

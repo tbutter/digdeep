@@ -14,6 +14,7 @@ import { useMemo, useRef, useState } from 'react';
 import { formatDohShortLabel } from '../dns/constants';
 import type { AnalysisMode, AnalysisSnapshot } from '../dns/types';
 import { diffSnapshots, getStorageStats } from '../storage/historyStore';
+import { IpHoverBadge } from './IpHoverBadge';
 import { StatusBadge } from './StatusBadge';
 
 function formatBytes(bytes: number): string {
@@ -306,12 +307,22 @@ export function HistoryPanel({
                         </div>
                         {rc.addedRecords.map((r) => (
                           <div key={`+${r}`} className="text-emerald-600 dark:text-emerald-400 break-all">
-                            + {r}
+                            +{' '}
+                            {rc.typeName === 'A' || rc.typeName === 'AAAA' ? (
+                              <IpHoverBadge ip={r} />
+                            ) : (
+                              r
+                            )}
                           </div>
                         ))}
                         {rc.removedRecords.map((r) => (
                           <div key={`-${r}`} className="text-rose-600 dark:text-rose-400 break-all">
-                            − {r}
+                            −{' '}
+                            {rc.typeName === 'A' || rc.typeName === 'AAAA' ? (
+                              <IpHoverBadge ip={r} />
+                            ) : (
+                              r
+                            )}
                           </div>
                         ))}
                         {rc.oldSignerTags.join(',') !== rc.newSignerTags.join(',') && (

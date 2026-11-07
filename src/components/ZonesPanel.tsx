@@ -12,9 +12,11 @@ import {
 import { formatAlgorithm, formatDigestType } from '../dns/constants';
 import { displayFqdn } from '../dns/encoding';
 import type { AnalysisSnapshot } from '../dns/types';
+import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
 import { StatusBadge } from './StatusBadge';
 
 export function ZonesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
+  seedIpAsnCacheFromSnapshot(snapshot);
   return (
     <div className="space-y-5">
       {snapshot.zones.map((zone) => (
@@ -185,8 +187,13 @@ export function ZonesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
                           )}
                         </div>
                         {(ns.ipv4.length > 0 || ns.ipv6.length > 0) && (
-                          <div className="font-mono text-[10px] text-slate-500 truncate mt-0.5">
-                            {[...ns.ipv4, ...ns.ipv6].join(', ')}
+                          <div className="font-mono text-[10px] text-slate-500 flex flex-wrap gap-x-1.5 gap-y-0.5 mt-0.5">
+                            {[...ns.ipv4, ...ns.ipv6].map((ip, ipIdx, arr) => (
+                              <span key={ip}>
+                                <IpHoverBadge ip={ip} />
+                                {ipIdx < arr.length - 1 ? ',' : ''}
+                              </span>
+                            ))}
                           </div>
                         )}
                         {((ns.asns && ns.asns.length > 0) ||
@@ -449,7 +456,14 @@ export function ZonesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
                               <span className="text-slate-500">→</span>
                               <span className="text-slate-700 dark:text-slate-300">
                                 {p.answerValues.length > 0
-                                  ? p.answerValues.join(', ')
+                                  ? p.qtype === 'A' || p.qtype === 'AAAA'
+                                    ? p.answerValues.map((val, vIdx) => (
+                                        <span key={val}>
+                                          <IpHoverBadge ip={val} />
+                                          {vIdx < p.answerValues.length - 1 ? ', ' : ''}
+                                        </span>
+                                      ))
+                                    : p.answerValues.join(', ')
                                   : p.cnameChain.join(' → ')}
                               </span>
                             </div>

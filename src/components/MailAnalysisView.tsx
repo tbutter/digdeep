@@ -31,6 +31,7 @@ import type {
   SpfPolicyVerdict,
   SpfTerm,
 } from '../dns/types';
+import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
 import { StatusBadge } from './StatusBadge';
 
 function getDaneBadgeMeta(status: DaneHostStatus): {
@@ -155,7 +156,11 @@ function SpfTermPill({ term }: { term: SpfTerm }) {
       className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-xs ${colorCls}`}
       title={term.error ?? term.warning ?? (term.countsTowardLookupLimit ? 'Counts toward 10-DNS-lookup limit' : 'Zero DNS lookups')}
     >
-      <span>{term.raw}</span>
+      {term.mechanism === 'ip4' || term.mechanism === 'ip6' ? (
+        <IpHoverBadge ip={term.value ?? term.raw}>{term.raw}</IpHoverBadge>
+      ) : (
+        <span>{term.raw}</span>
+      )}
       {term.countsTowardLookupLimit && (
         <span className="rounded bg-cyan-500/20 px-1 py-0.1 text-[9px] font-bold text-cyan-700 dark:text-cyan-300">
           +1 DNS
@@ -263,7 +268,7 @@ function SpfTreeBranch({ node }: { node: SpfDomainNode }) {
                             key={ip}
                             className="rounded bg-slate-200/70 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-700 dark:text-slate-300"
                           >
-                            {ip}
+                            <IpHoverBadge ip={ip} />
                           </span>
                         ))}
                         {t.resolvedIps.length > 8 && (
@@ -375,7 +380,7 @@ function MxHostCard({
                   <span className="text-[9px] uppercase font-bold opacity-70">
                     IPv{addr.family}
                   </span>
-                  <span>{addr.ip}</span>
+                  <IpHoverBadge ip={addr.ip} />
                   {addr.note && <span className="text-[10px]">({addr.note})</span>}
                   {addr.ptrTargets && addr.ptrTargets.length > 0 && (
                     <span
@@ -788,6 +793,7 @@ export function MailAnalysisView({
   onProbeDkimSelectors?: (rawSelectorsInput: string) => void;
   loading?: boolean;
 }) {
+  seedIpAsnCacheFromSnapshot(snapshot);
   const mail: MailAnalysisResult | undefined = snapshot.mailAnalysis;
   const [dkimInput, setDkimInput] = useState(() =>
     (snapshot.customDkimSelectors ?? []).join(', ')
@@ -1101,7 +1107,7 @@ export function MailAnalysisView({
                   key={addr.ip}
                   className="rounded-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 px-2 py-0.5 font-mono text-xs"
                 >
-                  IPv{addr.family}: {addr.ip}
+                  IPv{addr.family}: <IpHoverBadge ip={addr.ip} />
                 </span>
               ))}
             </div>

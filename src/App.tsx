@@ -26,6 +26,7 @@ import { ChainGraphView } from './components/ChainGraphView';
 import { ConsensusView } from './components/ConsensusView';
 import { DohChooser } from './components/DohChooser';
 import { HistoryPanel } from './components/HistoryPanel';
+import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './components/IpHoverBadge';
 import { MailAnalysisView } from './components/MailAnalysisView';
 import { ResponsesPanel } from './components/ResponsesPanel';
 import { ReverseDnsCard } from './components/ReverseDnsCard';
@@ -733,6 +734,10 @@ export function App() {
         .length
     : 0;
 
+  if (activeSnapshot) {
+    seedIpAsnCacheFromSnapshot(activeSnapshot);
+  }
+
   return (
     <div className="min-h-screen bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col">
       {/* Top Header Bar — sticky on tablet/desktop; scrolls naturally on narrow mobile screens so the graph gets 100% viewport height */}
@@ -1096,7 +1101,7 @@ export function App() {
                     IPv{liveIp.family} Reverse DNS Detected:
                   </span>
                   <code className="font-mono font-bold text-slate-900 dark:text-slate-100">
-                    {liveIp.ip}
+                    <IpHoverBadge ip={liveIp.ip} />
                   </code>
                   <span className="text-slate-400">→</span>
                   <code className="font-mono text-cyan-700 dark:text-cyan-300 break-all">
@@ -1176,7 +1181,7 @@ export function App() {
                     {activeSnapshot.queriedIp && (
                       <>
                         <span className="font-mono font-bold text-base text-cyan-700 dark:text-cyan-300">
-                          {activeSnapshot.queriedIp}
+                          <IpHoverBadge ip={activeSnapshot.queriedIp} />
                         </span>
                         <span className="text-slate-400">→</span>
                       </>

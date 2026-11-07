@@ -21,6 +21,7 @@ import type {
   WebCaaAnalysis,
   WebSvcbRecordDetail,
 } from '../dns/types';
+import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
 import { StatusBadge } from './StatusBadge';
 
 function getHttpsBadgeMeta(status: WebAnalysisResult['httpsStatus']): {
@@ -270,7 +271,7 @@ function SvcbRecordCard({
                           : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
                       }`}
                     >
-                      {ip}
+                      <IpHoverBadge ip={ip} />
                       {drifted ? ' (drift)' : ''}
                     </span>
                   );
@@ -305,7 +306,7 @@ function SvcbRecordCard({
                           : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
                       }`}
                     >
-                      {ip}
+                      <IpHoverBadge ip={ip} />
                       {drifted ? ' (drift)' : ''}
                     </span>
                   );
@@ -379,6 +380,7 @@ export function WebAnalysisView({
   onJumpToGraphTarget: (targetId: string) => void;
   onOpenChainGraph: () => void;
 }) {
+  seedIpAsnCacheFromSnapshot(snapshot);
   const web = snapshot.webAnalysis;
   if (!web) return null;
 
@@ -505,12 +507,24 @@ export function WebAnalysisView({
           <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
             {web.ipv4Addresses.length > 0 && (
               <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5">
-                A: {web.ipv4Addresses.join(', ')}
+                A:{' '}
+                {web.ipv4Addresses.map((ip, idx) => (
+                  <span key={ip}>
+                    <IpHoverBadge ip={ip} />
+                    {idx < web.ipv4Addresses.length - 1 ? ', ' : ''}
+                  </span>
+                ))}
               </span>
             )}
             {web.ipv6Addresses.length > 0 && (
               <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5">
-                AAAA: {web.ipv6Addresses.join(', ')}
+                AAAA:{' '}
+                {web.ipv6Addresses.map((ip, idx) => (
+                  <span key={ip}>
+                    <IpHoverBadge ip={ip} />
+                    {idx < web.ipv6Addresses.length - 1 ? ', ' : ''}
+                  </span>
+                ))}
               </span>
             )}
             <button

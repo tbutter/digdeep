@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { displayFqdn } from '../dns/encoding';
 import type { ReverseDnsAnalysis } from '../dns/types';
+import { IpHoverBadge } from './IpHoverBadge';
 import { StatusBadge } from './StatusBadge';
 
 export interface ReverseDnsCardProps {
@@ -84,7 +85,7 @@ export function ReverseDnsCard({
               <span>IPv{reverseDns.family} rDNS</span>
             </span>
             <span className="font-mono font-bold text-sm sm:text-base text-slate-900 dark:text-slate-100">
-              {reverseDns.ip}
+              <IpHoverBadge ip={reverseDns.ip} />
             </span>
             <ArrowRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
             <span className="font-mono text-xs sm:text-sm font-semibold text-cyan-700 dark:text-cyan-300 break-all">
@@ -232,7 +233,7 @@ export function ReverseDnsCard({
                                 <span className="text-[9px] uppercase opacity-70">
                                   IPv{entry.family}
                                 </span>
-                                <span>{entry.ip}</span>
+                                <IpHoverBadge ip={entry.ip} />
                               </span>
                             );
                           })}

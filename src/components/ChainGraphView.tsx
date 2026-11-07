@@ -16,6 +16,7 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { formatDohShortLabel } from '../dns/constants';
 import type { AnalysisSnapshot, ValidationStatus } from '../dns/types';
 import {
@@ -30,6 +31,11 @@ import {
   type GraphNode,
 } from '../graph/layout';
 import { GraphInspector, type GraphSelection } from './GraphInspector';
+import {
+  IpAsnHoverCardContent,
+  seedIpAsnCacheFromSnapshot,
+  useIpAsnInfos,
+} from './IpHoverBadge';
 import { STATUS_META } from './StatusBadge';
 
 function getEdgeColor(edge: GraphEdge): string {
@@ -247,6 +253,7 @@ export function ChainGraphView({
   focusedTargetId?: string | null;
   onSelectTargetId?: (targetId: string | null) => void;
 }) {
+  seedIpAsnCacheFromSnapshot(snapshot);
   const graph = useMemo(() => buildChainGraph(snapshot, filters), [snapshot, filters]);
   const rootWrapperRef = useRef<HTMLDivElement | null>(null);
   const graphPaneRef = useRef<HTMLDivElement | null>(null);
@@ -700,6 +707,47 @@ export function ChainGraphView({
   };
 
   const isDark = theme === 'dark';
+
+  const hoveredIpNode = useMemo(() => {
+    if (!hoveredId || dragging) return null;
+    return (
+      graph.nodes.find(
+        (n) =>
+          n.id === hoveredId &&
+          n.rrset &&
+          (n.rrset.typeName === 'A' || n.rrset.typeName === 'AAAA') &&
+          n.rrset.records.length > 0
+      ) ?? null
+    );
+  }, [hoveredId, dragging, graph.nodes]);
+
+  const hoveredNodeIps = useMemo(
+    () => (hoveredIpNode?.rrset ? hoveredIpNode.rrset.records.map((r) => r.rdataText) : []),
+    [hoveredIpNode]
+  );
+
+  const hoveredIpEntries = useIpAsnInfos(hoveredNodeIps, Boolean(hoveredIpNode) && !dragging);
+
+  const hoveredIpOverlayPos = useMemo(() => {
+    if (!hoveredIpNode || typeof window === 'undefined' || !containerRef.current) return null;
+    const rect = containerRef.current.getBoundingClientRect();
+    const centerScreenX =
+      rect.left + transform.x + (hoveredIpNode.x + hoveredIpNode.width / 2) * transform.scale;
+    const topScreenY = rect.top + transform.y + hoveredIpNode.y * transform.scale;
+    const bottomScreenY =
+      rect.top + transform.y + (hoveredIpNode.y + hoveredIpNode.height) * transform.scale;
+    const cardHalfWidth = 160;
+    const clampedLeft = Math.max(
+      12 + cardHalfWidth,
+      Math.min(window.innerWidth - 12 - cardHalfWidth, centerScreenX)
+    );
+    const placement: 'top' | 'bottom' = topScreenY > 190 ? 'top' : 'bottom';
+    return {
+      left: clampedLeft,
+      top: placement === 'top' ? topScreenY - 10 : bottomScreenY + 10,
+      placement,
+    };
+  }, [hoveredIpNode, transform]);
 
   return (
     <div
@@ -1185,6 +1233,34 @@ export function ChainGraphView({
 
       {/* Right-Hand Cryptographic & Wire Inspector Drawer */}
       <GraphInspector selection={selection} onClose={() => selectAndNotify(null)} />
+
+      {/* Floating BGP ASN & Network Hover Card for SVG A / AAAA Nodes */}
+      {hoveredIpNode &&
+        hoveredIpOverlayPos &&
+        hoveredIpEntries.length > 0 &&
+        typeof document !== 'undefined' &&
+        document.body &&
+        createPortal(
+          <div
+            style={{
+              position: 'fixed',
+              left: `${hoveredIpOverlayPos.left}px`,
+              top: `${hoveredIpOverlayPos.top}px`,
+              transform:
+                hoveredIpOverlayPos.placement === 'top'
+                  ? 'translate(-50%, -100%)'
+                  : 'translate(-50%, 0)',
+              zIndex: 9999,
+              pointerEvents: 'none',
+            }}
+          >
+            <IpAsnHoverCardContent
+              entries={hoveredIpEntries}
+              titleLabel={`${hoveredIpNode.title} · ${hoveredIpNode.badge} RRset`}
+            />
+          </div>,
+          document.body
+        )}
     </div>
   );
 }
