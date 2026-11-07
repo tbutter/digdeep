@@ -57,6 +57,7 @@ import type {
   CdsRecordDetail,
   CdsRolloverAnalysis,
   CnameEdge,
+  CtLogFetchResult,
   DnsRecord,
   DnskeyRdata,
   DohQueryLog,
@@ -84,7 +85,7 @@ import type {
   ZonemdRecordDetail,
 } from './types';
 
-export const SNAPSHOT_ENGINE_VERSION = 12;
+export const SNAPSHOT_ENGINE_VERSION = 13;
 
 export interface AnalyzeOptions extends DohClientOptions {
   queryTypes?: string[];
@@ -709,6 +710,7 @@ export async function reverifySnapshot(
     queryTypes: snapshot.queryTypes,
     customDkimSelectors: snapshot.customDkimSelectors,
     mtaStsPolicyFetch: snapshot.mtaStsPolicyFetch,
+    ctLogFetch: snapshot.ctLogFetch,
     dohEndpoint: snapshot.dohEndpoint,
     capturedAt: snapshot.capturedAt,
     validatedAt: options.validationTimeMs ?? snapshot.validatedAt,
@@ -731,6 +733,7 @@ interface EvaluateInput {
   queryTypes: string[];
   customDkimSelectors?: string[];
   mtaStsPolicyFetch?: MtaStsPolicyFetchResult;
+  ctLogFetch?: CtLogFetchResult;
   dohEndpoint: string;
   capturedAt: number;
   validatedAt: number;
@@ -787,6 +790,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     queryTypes,
     customDkimSelectors,
     mtaStsPolicyFetch,
+    ctLogFetch,
     dohEndpoint,
     capturedAt,
     validatedAt,
@@ -2743,6 +2747,8 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       zones,
       cnameEdges,
       targetDomainStatus: overallStatus,
+      ctLogFetch,
+      validatedAt,
     });
     webAnalysis = webResult.webAnalysis;
     findings.push(...webResult.webFindings);
@@ -2806,6 +2812,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     queryTypes,
     ...(customDkimSelectors && customDkimSelectors.length > 0 ? { customDkimSelectors } : {}),
     ...(mtaStsPolicyFetch ? { mtaStsPolicyFetch } : {}),
+    ...(ctLogFetch ? { ctLogFetch } : {}),
     dohEndpoint,
     capturedAt,
     validatedAt,

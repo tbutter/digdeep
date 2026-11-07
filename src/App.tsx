@@ -1415,6 +1415,14 @@ export function App() {
                   setActiveTab('graph');
                 }}
                 onOpenChainGraph={() => setActiveTab('graph')}
+                onTraceDomain={(domain) => {
+                  setAnalysisMode('web');
+                  setDomainInput(domain);
+                  void executeAnalysis(domain, activeSnapshot.queryTypes, {
+                    modeOverride: 'web',
+                    pushHistory: true,
+                  });
+                }}
               />
             )}
 

@@ -1191,6 +1191,84 @@ export interface SshfpRecordDetail {
   issues: string[];
 }
 
+export interface RawCtIssuanceEntry {
+  id: string;
+  dnsNames: string[];
+  issuerFriendlyName: string;
+  issuerDn: string;
+  notBefore: string;
+  notAfter: string;
+  revoked: boolean;
+  certSha256?: string;
+  pubkeySha256?: string;
+  issuerPubkeySha256?: string;
+}
+
+export interface CtLogFetchResult {
+  source: 'certspotter' | 'crt.sh' | 'unavailable';
+  url: string;
+  fetchedAt: number;
+  ok: boolean;
+  httpStatus?: number;
+  includeSubdomains?: boolean;
+  entries: RawCtIssuanceEntry[];
+  error?: string;
+}
+
+export interface CtCertificateEntry {
+  id: string;
+  dnsNames: string[];
+  hasWildcardForTarget: boolean;
+  coversTargetDirectly: boolean;
+  issuerFriendlyName: string;
+  issuerDn: string;
+  mappedCaaDomains: string[];
+  notBefore: string;
+  notAfter: string;
+  isExpired: boolean;
+  revoked: boolean;
+  certSha256?: string;
+  pubkeySha256?: string;
+  issuerPubkeySha256?: string;
+  caaAuthorized: 'authorized' | 'unauthorized-ca' | 'unauthorized-wildcard' | 'unrestricted';
+  caaNote: string;
+  matchesTlsa?: boolean;
+  matchedTlsaSummary?: string;
+}
+
+export interface CtIssuerSummary {
+  friendlyName: string;
+  mappedCaaDomains: string[];
+  activeCertCount: number;
+  wildcardCertCount: number;
+  latestNotBefore: string;
+  caaAuthorized: boolean;
+  authorizedForIssue: boolean;
+  authorizedForWildcard: boolean;
+}
+
+export interface WebCtAnalysis {
+  status:
+    | 'caa-compliant'
+    | 'caa-mismatch'
+    | 'unrestricted'
+    | 'no-active-certs'
+    | 'unavailable';
+  source: 'certspotter' | 'crt.sh' | 'unavailable';
+  queriedDomain: string;
+  fetchedAt?: number;
+  error?: string;
+  totalEntries: number;
+  activeCertCount: number;
+  expiredCertCount: number;
+  mismatchedActiveCertCount: number;
+  issuers: CtIssuerSummary[];
+  certificates: CtCertificateEntry[];
+  discoveredSubdomains: string[];
+  tlsaMatchedCertCount: number;
+  summary: string;
+}
+
 export interface WebAnalysisResult {
   targetDomain: string;
   displayDomain: string;
@@ -1232,6 +1310,7 @@ export interface WebAnalysisResult {
     records: SshfpRecordDetail[];
     summary: string;
   };
+  ctAnalysis?: WebCtAnalysis;
 }
 
 export type ConsensusResolverClassification =
@@ -1312,6 +1391,7 @@ export interface AnalysisSnapshot {
   queryTypes: string[];
   customDkimSelectors?: string[];
   mtaStsPolicyFetch?: MtaStsPolicyFetchResult;
+  ctLogFetch?: CtLogFetchResult;
   dohEndpoint: string;
   capturedAt: number; // ms epoch
   validatedAt: number; // ms epoch used for RRSIG timestamp checks

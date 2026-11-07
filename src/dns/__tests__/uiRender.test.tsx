@@ -173,7 +173,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v15');
+    expect(swCode).toContain('digdeep-shell-v16');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge when navigator.onLine is false
@@ -543,19 +543,28 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       const webSnap = await runWebAnalysis('cloudflare.com');
       expect(webSnap.mode).toBe('web');
       expect(webSnap.webAnalysis).toBeDefined();
+      const tracedSubdomains: string[] = [];
       const webHtml = renderToStaticMarkup(
         <WebAnalysisView
           snapshot={webSnap}
           onJumpToGraphTarget={() => {}}
           onOpenChainGraph={() => {}}
+          onTraceDomain={(d) => tracedSubdomains.push(d)}
         />
       );
       expect(webHtml).toContain('HTTPS / SVCB &amp; ECH');
       expect(webHtml).toContain('CAA Policy (RFC 8659)');
+      expect(webHtml).toContain(
+        'Certificate Transparency (CT) ↔ CAA Policy Cross-Check &amp; Subdomain Discovery'
+      );
       expect(webHtml).toContain('Web DANE (_443._tcp)');
       expect(webHtml).toContain('SSHFP (RFC 4255)');
       expect(webHtml).toContain('HTTPS Priority 1');
       expect(webHtml).toContain('h3');
+      if (webSnap.ctLogFetch?.ok) {
+        expect(webHtml).toContain('CT ↔ CAA COMPLIANT');
+        expect(webHtml).toContain('CAA AUTHORIZED ✓');
+      }
 
       const consensusSnap = await runConsensusAnalysis('iana.org');
       expect(consensusSnap.mode).toBe('consensus');

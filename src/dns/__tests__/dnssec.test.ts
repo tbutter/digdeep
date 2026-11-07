@@ -39,7 +39,13 @@ import {
   validateRpkiRoute,
 } from '../ipUtils';
 import { buildDnsQuery, decodeDnsName, encodeDnsName, parseDnsPacket } from '../wire';
-import { parseCaaRecordEntry, runWebAnalysis } from '../webAnalyzer';
+import {
+  mapCtIssuerToCaaDomains,
+  parseCaaRecordEntry,
+  parseCertSpotterJson,
+  parseCrtShJson,
+  runWebAnalysis,
+} from '../webAnalyzer';
 
 describe('DNS Wireformat & RFC Primitives', () => {
   it('normalizes domain names and enforces RFC 4034 §6.1 canonical DNS name order', () => {
@@ -1101,6 +1107,135 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
           (f) => f.code === 'BGP_RPKI_ROA_INVALID' && f.severity === 'warning'
         )
       ).toBe(true);
+    },
+    30000
+  );
+
+  it(
+    'cross-checks Certificate Transparency (CT) log issuances against RFC 8659 CAA policy & _443._tcp DANE TLSA and extracts subdomains',
+    async () => {
+      // 1. Unit tests for CT issuer -> CAA domain mapping and CertSpotter/crt.sh parsers
+      expect(mapCtIssuerToCaaDomains("Let's Encrypt", 'C=US, O=Let\'s Encrypt, CN=E7')).toContain(
+        'letsencrypt.org'
+      );
+      expect(
+        mapCtIssuerToCaaDomains('Google Trust Services', 'C=US, O=Google Trust Services, CN=WE1')
+      ).toContain('pki.goog');
+      expect(mapCtIssuerToCaaDomains('DigiCert', 'C=US, O=DigiCert Inc, CN=DigiCert SHA2')).toContain(
+        'digicert.com'
+      );
+      expect(mapCtIssuerToCaaDomains('Sectigo', 'C=GB, O=Sectigo Limited')).toContain('sectigo.com');
+      expect(mapCtIssuerToCaaDomains('Amazon', 'C=US, O=Amazon, CN=Amazon RSA 2048 M02')).toContain(
+        'amazon.com'
+      );
+
+      const parsedSpotter = parseCertSpotterJson([
+        {
+          id: '9001',
+          dns_names: ['cloudflare.com', '*.cloudflare.com', 'ns.cloudflare.com'],
+          issuer: {
+            friendly_name: "Let's Encrypt",
+            name: "C=US, O=Let's Encrypt, CN=E7",
+            pubkey_sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          },
+          not_before: '2026-10-01T00:00:00Z',
+          not_after: '2027-01-01T00:00:00Z',
+          revoked: false,
+          cert_sha256: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          pubkey_sha256: 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+        },
+      ]);
+      expect(parsedSpotter).toHaveLength(1);
+      expect(parsedSpotter[0].issuerFriendlyName).toBe("Let's Encrypt");
+      expect(parsedSpotter[0].dnsNames).toEqual([
+        'cloudflare.com',
+        '*.cloudflare.com',
+        'ns.cloudflare.com',
+      ]);
+
+      const parsedCrt = parseCrtShJson([
+        {
+          id: 12345,
+          name_value: 'example.com\n*.example.com\napi.example.com',
+          common_name: 'example.com',
+          issuer_name: 'C=US, O=Google Trust Services, CN=WR2',
+          not_before: '2026-09-01T00:00:00',
+          not_after: '2026-12-01T00:00:00',
+        },
+      ]);
+      expect(parsedCrt).toHaveLength(1);
+      expect(parsedCrt[0].issuerFriendlyName).toBe('Google Trust Services');
+      expect(parsedCrt[0].dnsNames).toContain('api.example.com');
+
+      // 2. Live Web analysis on cloudflare.com: verifies live CT log fetch & CAA compliance
+      const webSnap = await runWebAnalysis('cloudflare.com');
+      expect(webSnap.ctLogFetch).toBeDefined();
+      expect(webSnap.webAnalysis?.ctAnalysis).toBeDefined();
+      if (webSnap.ctLogFetch?.ok) {
+        expect(webSnap.webAnalysis?.ctAnalysis?.status).toBe('caa-compliant');
+        expect(webSnap.webAnalysis?.ctAnalysis?.activeCertCount).toBeGreaterThanOrEqual(1);
+        expect(webSnap.webAnalysis?.ctAnalysis?.mismatchedActiveCertCount).toBe(0);
+        expect(webSnap.findings.some((f) => f.code === 'CT_CAA_COMPLIANT')).toBe(true);
+      }
+
+      // 3. Synthetic CT log cross-check: simulate an unauthorized active CA (Amazon) + TLSA SHA-256 match + offline reverifySnapshot
+      const syntheticCtSnap = await evaluateSnapshotFromLogs({
+        id: 'test-ct-caa-mismatch',
+        mode: 'web',
+        targetName: webSnap.targetName,
+        queryTypes: webSnap.queryTypes,
+        ctLogFetch: {
+          source: 'certspotter',
+          url: 'https://api.certspotter.com/v1/issuances?domain=cloudflare.com',
+          fetchedAt: webSnap.capturedAt,
+          ok: true,
+          entries: [
+            {
+              id: 'cert-unauth-amazon',
+              dnsNames: ['cloudflare.com', 'portal.cloudflare.com', 'staging.cloudflare.com'],
+              issuerFriendlyName: 'Amazon',
+              issuerDn: 'C=US, O=Amazon, CN=Amazon RSA 2048 M02',
+              notBefore: '2026-10-01T00:00:00Z',
+              notAfter: '2027-10-01T00:00:00Z',
+              revoked: false,
+              certSha256: '1111111111111111111111111111111111111111111111111111111111111111',
+            },
+            {
+              id: 'cert-auth-le',
+              dnsNames: ['cloudflare.com', '*.cloudflare.com'],
+              issuerFriendlyName: "Let's Encrypt",
+              issuerDn: "C=US, O=Let's Encrypt, CN=E7",
+              notBefore: '2026-10-15T00:00:00Z',
+              notAfter: '2027-01-15T00:00:00Z',
+              revoked: false,
+            },
+          ],
+        },
+        dohEndpoint: webSnap.dohEndpoint,
+        capturedAt: webSnap.capturedAt,
+        validatedAt: webSnap.validatedAt,
+        durationMs: webSnap.durationMs,
+        queries: webSnap.queries,
+        trustAnchors: webSnap.trustAnchorsUsed,
+      });
+
+      expect(syntheticCtSnap.webAnalysis?.ctAnalysis?.status).toBe('caa-mismatch');
+      expect(syntheticCtSnap.webAnalysis?.ctAnalysis?.mismatchedActiveCertCount).toBe(1);
+      expect(syntheticCtSnap.webAnalysis?.ctAnalysis?.discoveredSubdomains).toEqual([
+        'portal.cloudflare.com',
+        'staging.cloudflare.com',
+      ]);
+      expect(
+        syntheticCtSnap.findings.some(
+          (f) => f.code === 'CT_CAA_ISSUER_MISMATCH' && f.severity === 'warning'
+        )
+      ).toBe(true);
+
+      // Verify offline reverifySnapshot preserves ctLogFetch and re-evaluates CT vs CAA
+      const reverified = await reverifySnapshot(syntheticCtSnap, {
+        validationTimeMs: webSnap.validatedAt,
+      });
+      expect(reverified.webAnalysis?.ctAnalysis?.status).toBe('caa-mismatch');
     },
     30000
   );

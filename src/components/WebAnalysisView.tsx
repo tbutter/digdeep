@@ -1,12 +1,16 @@
+import { useState } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
   ArrowUpRight,
   CheckCircle2,
+  FileCheck2,
   Globe,
   KeyRound,
   Lock,
   Network,
+  RefreshCw,
+  Search,
   Server,
   Shield,
   ShieldAlert,
@@ -14,11 +18,14 @@ import {
   Terminal,
 } from 'lucide-react';
 import { displayFqdn } from '../dns/encoding';
+import { fetchCtLogEntries } from '../dns/webAnalyzer';
 import type {
   AnalysisSnapshot,
+  CtCertificateEntry,
   DaneHostStatus,
   WebAnalysisResult,
   WebCaaAnalysis,
+  WebCtAnalysis,
   WebSvcbRecordDetail,
 } from '../dns/types';
 import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
@@ -161,6 +168,67 @@ function getSshfpBadgeMeta(status: WebAnalysisResult['sshfp']['status']): {
     case 'not-deployed':
       return {
         label: 'NO SSHFP',
+        cls: 'bg-slate-500/15 text-slate-600 dark:text-slate-400 border border-slate-500/25',
+      };
+  }
+}
+
+function getCtBadgeMeta(status: WebCtAnalysis['status']): {
+  label: string;
+  cls: string;
+} {
+  switch (status) {
+    case 'caa-compliant':
+      return {
+        label: 'CT ↔ CAA COMPLIANT',
+        cls: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30',
+      };
+    case 'caa-mismatch':
+      return {
+        label: 'CT ↔ CAA MISMATCH',
+        cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/35',
+      };
+    case 'unrestricted':
+      return {
+        label: 'CT ACTIVE · NO CAA',
+        cls: 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30',
+      };
+    case 'no-active-certs':
+      return {
+        label: 'NO ACTIVE CT CERTS',
+        cls: 'bg-slate-500/15 text-slate-600 dark:text-slate-400 border border-slate-500/25',
+      };
+    case 'unavailable':
+      return {
+        label: 'CT LOGS UNAVAILABLE',
+        cls: 'bg-slate-500/15 text-slate-600 dark:text-slate-400 border border-slate-500/25',
+      };
+  }
+}
+
+function getCtCertVerdictMeta(verdict: CtCertificateEntry['caaAuthorized']): {
+  label: string;
+  cls: string;
+} {
+  switch (verdict) {
+    case 'authorized':
+      return {
+        label: 'CAA AUTHORIZED ✓',
+        cls: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30',
+      };
+    case 'unauthorized-ca':
+      return {
+        label: 'UNAUTHORIZED CA',
+        cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/35',
+      };
+    case 'unauthorized-wildcard':
+      return {
+        label: 'WILDCARD NOT IN ISSUEWILD',
+        cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/35',
+      };
+    case 'unrestricted':
+      return {
+        label: 'UNRESTRICTED CAA',
         cls: 'bg-slate-500/15 text-slate-600 dark:text-slate-400 border border-slate-500/25',
       };
   }
@@ -375,19 +443,68 @@ export function WebAnalysisView({
   snapshot,
   onJumpToGraphTarget,
   onOpenChainGraph,
+  onTraceDomain,
 }: {
   snapshot: AnalysisSnapshot;
   onJumpToGraphTarget: (targetId: string) => void;
   onOpenChainGraph: () => void;
+  onTraceDomain?: (domain: string) => void;
 }) {
   seedIpAsnCacheFromSnapshot(snapshot);
   const web = snapshot.webAnalysis;
+  const [showAllCtCerts, setShowAllCtCerts] = useState(false);
+  const [scanningSubdomains, setScanningSubdomains] = useState(false);
+  const [extraSubdomains, setExtraSubdomains] = useState<string[]>([]);
+  const [subScanError, setSubScanError] = useState<string | null>(null);
+
   if (!web) return null;
 
   const httpsMeta = getHttpsBadgeMeta(web.httpsStatus);
   const caaMeta = getCaaBadgeMeta(web.caa.status);
   const daneMeta = getDaneBadgeMeta(web.webDane.status);
   const sshfpMeta = getSshfpBadgeMeta(web.sshfp.status);
+  const ct = web.ctAnalysis;
+  const ctMeta = ct ? getCtBadgeMeta(ct.status) : null;
+
+  const mergedSubdomains = Array.from(
+    new Set([...(ct?.discoveredSubdomains ?? []), ...extraSubdomains])
+  );
+
+  const handleScanSubdomainCtLogs = async () => {
+    setScanningSubdomains(true);
+    setSubScanError(null);
+    try {
+      const res = await fetchCtLogEntries(web.displayDomain, {
+        includeSubdomains: true,
+        timeoutMs: 8000,
+      });
+      if (!res.ok) {
+        setSubScanError(res.error ?? 'Subdomain CT log scan timed out');
+      } else {
+        const base = web.displayDomain.toLowerCase();
+        const found = new Set<string>();
+        for (const entry of res.entries) {
+          for (const san of entry.dnsNames) {
+            const clean = san.replace(/^\*\./, '').trim().toLowerCase();
+            if (
+              clean &&
+              clean !== base &&
+              clean.endsWith(`.${base}`) &&
+              !clean.includes('*') &&
+              !clean.includes('_')
+            ) {
+              found.add(clean);
+            }
+          }
+        }
+        setExtraSubdomains(Array.from(found).sort().slice(0, 80));
+      }
+    } catch (err) {
+      setSubScanError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setScanningSubdomains(false);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -441,6 +558,11 @@ export function WebAnalysisView({
             {web.caa.hasAcmeAccountBinding && (
               <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 px-1.5 py-0.5 font-semibold">
                 RFC 8657 ACME
+              </span>
+            )}
+            {ct && ctMeta && ct.status !== 'unavailable' && (
+              <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${ctMeta.cls}`}>
+                {ctMeta.label}
               </span>
             )}
           </div>
@@ -676,6 +798,269 @@ export function WebAnalysisView({
           </div>
         )}
       </section>
+
+      {/* Section 2.5: Certificate Transparency (CT) ↔ CAA Cross-Check & Subdomain Discovery */}
+      {ct && (
+        <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <FileCheck2 className="w-4 h-4 text-cyan-500" />
+              <h2 className="font-semibold text-sm">
+                Certificate Transparency (CT) ↔ CAA Policy Cross-Check &amp; Subdomain Discovery
+              </h2>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {ct.source !== 'unavailable' && (
+                <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5 font-mono text-[10px] text-slate-600 dark:text-slate-300">
+                  Source: {ct.source === 'certspotter' ? 'CertSpotter CT API' : 'crt.sh CT Log'}
+                </span>
+              )}
+              {ctMeta && (
+                <span className={`rounded-md px-2 py-0.5 font-mono text-[10px] font-bold ${ctMeta.cls}`}>
+                  {ctMeta.label}
+                </span>
+              )}
+            </div>
+          </div>
+
+          <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">{ct.summary}</p>
+
+          {/* Metrics & Subdomain Scan Action Bar */}
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5">
+                Active Certs: <strong>{ct.activeCertCount}</strong>
+              </span>
+              {ct.expiredCertCount > 0 && (
+                <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-slate-500">
+                  Historical/Expired: {ct.expiredCertCount}
+                </span>
+              )}
+              {ct.mismatchedActiveCertCount > 0 && (
+                <span className="rounded bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 px-2 py-0.5 font-bold">
+                  CAA Mismatched Active Certs: {ct.mismatchedActiveCertCount}
+                </span>
+              )}
+              {ct.tlsaMatchedCertCount > 0 && (
+                <span className="rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 px-2 py-0.5 font-bold">
+                  Matches _443._tcp TLSA: {ct.tlsaMatchedCertCount}
+                </span>
+              )}
+            </div>
+
+            <button
+              type="button"
+              disabled={scanningSubdomains}
+              onClick={() => void handleScanSubdomainCtLogs()}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-cyan-500 disabled:opacity-60 px-2.5 py-1 font-sans text-xs font-medium text-cyan-700 dark:text-cyan-300 cursor-pointer"
+              title="Query CertSpotter CT logs with include_subdomains=true to discover additional child hostnames"
+            >
+              {scanningSubdomains ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  <span>Scanning Subdomain CT Logs…</span>
+                </>
+              ) : (
+                <>
+                  <Search className="w-3.5 h-3.5" />
+                  <span>Scan Subdomain CT Logs</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          {subScanError && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-700 dark:text-amber-300">
+              Subdomain CT scan note: {subScanError}
+            </div>
+          )}
+
+          {/* Active CT Issuers vs. CAA Policy Grid */}
+          {ct.issuers.length > 0 && (
+            <div className="space-y-1.5">
+              <div className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+                Observed Certificate Authorities vs. Effective CAA Policy:
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {ct.issuers.map((iss) => {
+                  const isEnforced =
+                    web.caa.status === 'enforced' ||
+                    web.caa.status === 'inherited' ||
+                    web.caa.issuewildCas.length > 0;
+                  return (
+                    <div
+                      key={iss.friendlyName}
+                      className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-2.5 flex flex-wrap items-center justify-between gap-2 text-xs"
+                    >
+                      <div className="space-y-0.5 min-w-0">
+                        <div className="font-semibold text-slate-800 dark:text-slate-100 truncate">
+                          {iss.friendlyName}
+                        </div>
+                        <div className="font-mono text-[11px] text-slate-500">
+                          CAA domain:{' '}
+                          <span className="text-cyan-700 dark:text-cyan-300">
+                            {iss.mappedCaaDomains.length > 0
+                              ? iss.mappedCaaDomains.join(', ')
+                              : 'unmapped'}
+                          </span>{' '}
+                          · {iss.activeCertCount} active cert{iss.activeCertCount === 1 ? '' : 's'}
+                          {iss.wildcardCertCount > 0 ? ` (${iss.wildcardCertCount} wildcard)` : ''}
+                        </div>
+                      </div>
+                      <span
+                        className={`rounded px-2 py-0.5 font-mono text-[10px] font-bold shrink-0 ${
+                          !isEnforced
+                            ? 'bg-slate-500/15 text-slate-600 dark:text-slate-400 border border-slate-500/25'
+                            : iss.caaAuthorized
+                              ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30'
+                              : 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/35'
+                        }`}
+                      >
+                        {!isEnforced
+                          ? 'UNRESTRICTED (NO CAA)'
+                          : iss.caaAuthorized
+                            ? 'CAA AUTHORIZED ✓'
+                            : 'NOT IN CAA POLICY'}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* One-Click Subdomain Discovery Chips from CT SANs */}
+          {mergedSubdomains.length > 0 && (
+            <div className="rounded-lg border border-cyan-500/25 bg-cyan-500/5 p-3 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs font-semibold text-cyan-800 dark:text-cyan-200">
+                  Subdomains Discovered in CT Subject Alternative Names ({mergedSubdomains.length}):
+                </div>
+                <span className="text-[11px] text-slate-500">
+                  Click any hostname to run a Web &amp; HTTPS trace
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {mergedSubdomains.map((sub) =>
+                  onTraceDomain ? (
+                    <button
+                      key={sub}
+                      type="button"
+                      onClick={() => onTraceDomain(sub)}
+                      className="inline-flex items-center gap-1 rounded-md border border-cyan-500/30 bg-white dark:bg-slate-900 hover:border-cyan-500 hover:bg-cyan-500/10 px-2 py-1 font-mono text-xs text-cyan-700 dark:text-cyan-300 transition-colors cursor-pointer"
+                      title={`Trace ${sub} in Web & HTTPS mode`}
+                    >
+                      <span>{sub}</span>
+                      <ArrowUpRight className="w-3 h-3 opacity-75" />
+                    </button>
+                  ) : (
+                    <span
+                      key={sub}
+                      className="inline-flex items-center rounded-md border border-cyan-500/25 bg-white dark:bg-slate-900 px-2 py-1 font-mono text-xs text-cyan-700 dark:text-cyan-300"
+                    >
+                      {sub}
+                    </span>
+                  )
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Recent CT Log Certificates List */}
+          {ct.certificates.length > 0 && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+                  Recent CT Log Certificates ({ct.certificates.length}):
+                </span>
+                {ct.certificates.length > 5 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllCtCerts((v) => !v)}
+                    className="text-xs font-medium text-cyan-700 dark:text-cyan-300 hover:underline cursor-pointer"
+                  >
+                    {showAllCtCerts
+                      ? 'Show fewer'
+                      : `Show all ${ct.certificates.length} certificates`}
+                  </button>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                {(showAllCtCerts ? ct.certificates : ct.certificates.slice(0, 5)).map((cert) => {
+                  const verdictMeta = getCtCertVerdictMeta(cert.caaAuthorized);
+                  const sanPreview = cert.dnsNames.slice(0, 5);
+                  const extraSanCount = Math.max(0, cert.dnsNames.length - sanPreview.length);
+                  return (
+                    <div
+                      key={cert.id}
+                      className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-2.5 text-xs space-y-1.5"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-semibold text-slate-800 dark:text-slate-100">
+                            {cert.issuerFriendlyName}
+                          </span>
+                          {cert.mappedCaaDomains.length > 0 && (
+                            <span className="font-mono text-[11px] text-cyan-700 dark:text-cyan-300">
+                              ({cert.mappedCaaDomains[0]})
+                            </span>
+                          )}
+                          <span
+                            className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                              cert.revoked
+                                ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300'
+                                : cert.isExpired
+                                  ? 'bg-slate-200 dark:bg-slate-800 text-slate-500'
+                                  : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                            }`}
+                          >
+                            {cert.revoked ? 'REVOKED' : cert.isExpired ? 'EXPIRED' : 'ACTIVE'}
+                          </span>
+                          <span className="font-mono text-[11px] text-slate-500">
+                            {cert.notBefore.slice(0, 10)} → {cert.notAfter.slice(0, 10)}
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {cert.matchesTlsa && (
+                            <span
+                              className="rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 px-2 py-0.5 font-mono text-[10px] font-bold"
+                              title={cert.matchedTlsaSummary}
+                            >
+                              Matches _443._tcp TLSA ✓
+                            </span>
+                          )}
+                          <span
+                            className={`rounded px-2 py-0.5 font-mono text-[10px] font-bold ${verdictMeta.cls}`}
+                            title={cert.caaNote}
+                          >
+                            {verdictMeta.label}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-1 font-mono text-[11px] text-slate-600 dark:text-slate-300">
+                        <span className="text-slate-400">SANs:</span>
+                        {sanPreview.map((s) => (
+                          <span
+                            key={s}
+                            className="rounded bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 px-1.5 py-0.5"
+                          >
+                            {s}
+                          </span>
+                        ))}
+                        {extraSanCount > 0 && (
+                          <span className="text-slate-400">+{extraSanCount} more</span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </section>
+      )}
 
       {/* Section 3: Web DANE (_443._tcp TLSA) & SSHFP */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

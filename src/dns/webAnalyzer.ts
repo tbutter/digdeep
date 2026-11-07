@@ -25,10 +25,14 @@ import type {
   CaaRecordEntry,
   CaaTreeHop,
   CnameEdge,
+  CtCertificateEntry,
+  CtIssuerSummary,
+  CtLogFetchResult,
   DaneHostStatus,
   DohQueryLog,
   EchConfigEntry,
   NegativeNode,
+  RawCtIssuanceEntry,
   SshfpRecordDetail,
   SvcParamEntry,
   SvcbRdata,
@@ -36,6 +40,7 @@ import type {
   ValidationStatus,
   WebAnalysisResult,
   WebCaaAnalysis,
+  WebCtAnalysis,
   WebSvcbRecordDetail,
   ZoneAnalysis,
 } from './types';
@@ -450,6 +455,796 @@ function evaluateTlsaRecordDetail(
   };
 }
 
+const CT_CA_DOMAIN_MAPPINGS: Array<{
+  pattern: RegExp;
+  caaDomains: string[];
+}> = [
+  {
+    pattern: /\b(let'?s\s*encrypt|letsencrypt|isrg\b|cn=(?:r3|r10|r11|r12|r13|r14|e1|e5|e6|e7|e8|e9)\b)/i,
+    caaDomains: ['letsencrypt.org'],
+  },
+  {
+    pattern: /\b(google\s+trust\s+services|gts\s+ca|cn=(?:wr1|wr2|wr3|we1|we2|gts\s+ca))\b/i,
+    caaDomains: ['pki.goog'],
+  },
+  {
+    pattern: /\b(digicert|geotrust|thawte|rapidssl|quovadis|encryption\s+everywhere|symantec)\b/i,
+    caaDomains: [
+      'digicert.com',
+      'geotrust.com',
+      'thawte.com',
+      'rapidssl.com',
+      'quovadisglobal.com',
+      'symantec.com',
+    ],
+  },
+  {
+    pattern: /\b(sectigo|comodo|zerossl|usertrust|incommon|gandi|trust-provider)\b/i,
+    caaDomains: [
+      'sectigo.com',
+      'comodoca.com',
+      'usertrust.com',
+      'incommon.org',
+      'gandi.net',
+      'trust-provider.com',
+    ],
+  },
+  {
+    pattern: /\b(amazon|amazontrust|awstrust|starfield)\b/i,
+    caaDomains: [
+      'amazon.com',
+      'amazontrust.com',
+      'awstrust.com',
+      'amazonaws.com',
+      'starfieldtech.com',
+    ],
+  },
+  {
+    pattern: /\b(ssl\.com|ssl\s+corporation)\b/i,
+    caaDomains: ['ssl.com'],
+  },
+  {
+    pattern: /\b(globalsign|alphassl)\b/i,
+    caaDomains: ['globalsign.com'],
+  },
+  {
+    pattern: /\b(entrust)\b/i,
+    caaDomains: ['entrust.net'],
+  },
+  {
+    pattern: /\b(godaddy|go\s*daddy)\b/i,
+    caaDomains: ['godaddy.com', 'starfieldtech.com'],
+  },
+  {
+    pattern: /\b(cloudflare)\b/i,
+    caaDomains: ['cloudflare.com', 'comodoca.com', 'digicert.com', 'letsencrypt.org', 'pki.goog', 'ssl.com'],
+  },
+  {
+    pattern: /\b(harica|hellenic\s+academic)\b/i,
+    caaDomains: ['harica.gr'],
+  },
+  {
+    pattern: /\b(buypass)\b/i,
+    caaDomains: ['buypass.com', 'buypass.no'],
+  },
+  {
+    pattern: /\b(actalis)\b/i,
+    caaDomains: ['actalis.it'],
+  },
+  {
+    pattern: /\b(certum|asseco)\b/i,
+    caaDomains: ['certum.pl'],
+  },
+  {
+    pattern: /\b(swisssign)\b/i,
+    caaDomains: ['swisssign.com'],
+  },
+  {
+    pattern: /\b(microsoft)\b/i,
+    caaDomains: ['microsoft.com'],
+  },
+  {
+    pattern: /\b(apple)\b/i,
+    caaDomains: ['apple.com'],
+  },
+  {
+    pattern: /\b(identrust)\b/i,
+    caaDomains: ['identrust.com'],
+  },
+  {
+    pattern: /\b(trustwave|securetrust|vikingcloud)\b/i,
+    caaDomains: ['trustwave.com', 'securetrust.com'],
+  },
+  {
+    pattern: /\b(telia)\b/i,
+    caaDomains: ['telia.com', 'telia.fi'],
+  },
+  {
+    pattern: /\b(certigna|dhimyotis)\b/i,
+    caaDomains: ['certigna.fr'],
+  },
+  {
+    pattern: /\b(firmaprofesional)\b/i,
+    caaDomains: ['firmaprofesional.com'],
+  },
+  {
+    pattern: /\b(dfn-verein|dfn-pki|deutsche\s+forschungsnetz)\b/i,
+    caaDomains: ['dfn.de', 'harica.gr', 'sectigo.com'],
+  },
+  {
+    pattern: /\b(g[eé]ant|terena)\b/i,
+    caaDomains: ['sectigo.com', 'comodoca.com', 'harica.gr', 'geant.org'],
+  },
+];
+
+/**
+ * Maps a Certificate Transparency X.509 issuer (`friendly_name` and Distinguished Name `issuerDn`)
+ * to its corresponding RFC 8659 `CAA` issuer domain name(s) (e.g. `letsencrypt.org`, `pki.goog`).
+ */
+export function mapCtIssuerToCaaDomains(
+  friendlyName: string,
+  issuerDn: string,
+  candidateCaaDomains: string[] = []
+): string[] {
+  const combined = `${friendlyName} ${issuerDn}`;
+  const matched = new Set<string>();
+
+  for (const rule of CT_CA_DOMAIN_MAPPINGS) {
+    if (rule.pattern.test(combined)) {
+      for (const dom of rule.caaDomains) {
+        matched.add(dom);
+      }
+    }
+  }
+
+  const lowerCombined = combined.toLowerCase();
+  for (const cand of candidateCaaDomains) {
+    const cleanCand = cand.trim().toLowerCase().replace(/\.$/, '');
+    if (!cleanCand || cleanCand.startsWith(';')) continue;
+    if (lowerCombined.includes(cleanCand)) {
+      matched.add(cleanCand);
+      continue;
+    }
+    const baseLabel = cleanCand.split('.')[0];
+    if (baseLabel && baseLabel.length >= 4 && lowerCombined.includes(baseLabel)) {
+      matched.add(cleanCand);
+    }
+  }
+
+  return Array.from(matched);
+}
+
+/**
+ * Parses a CertSpotter `/v1/issuances` JSON array into normalized `RawCtIssuanceEntry[]`.
+ */
+export function parseCertSpotterJson(rawJson: unknown): RawCtIssuanceEntry[] {
+  if (!Array.isArray(rawJson)) return [];
+  const entries: RawCtIssuanceEntry[] = [];
+
+  for (const item of rawJson) {
+    if (!item || typeof item !== 'object') continue;
+    const obj = item as Record<string, unknown>;
+    const id = String(obj.id ?? '').trim();
+    const rawNames = Array.isArray(obj.dns_names) ? obj.dns_names : [];
+    const dnsNames = Array.from(
+      new Set(
+        rawNames
+          .map((n) => String(n ?? '').trim().toLowerCase().replace(/\.$/, ''))
+          .filter(Boolean)
+      )
+    );
+    const issuerObj =
+      obj.issuer && typeof obj.issuer === 'object'
+        ? (obj.issuer as Record<string, unknown>)
+        : {};
+    const issuerFriendlyName = String(issuerObj.friendly_name ?? '').trim();
+    const issuerDn = String(issuerObj.name ?? '').trim();
+    const notBefore = String(obj.not_before ?? '').trim();
+    const notAfter = String(obj.not_after ?? '').trim();
+    const revoked = Boolean(obj.revoked);
+    const certSha256 =
+      typeof obj.cert_sha256 === 'string' && obj.cert_sha256.trim().length > 0
+        ? obj.cert_sha256.trim().toLowerCase()
+        : undefined;
+    const pubkeySha256 =
+      typeof obj.pubkey_sha256 === 'string' && obj.pubkey_sha256.trim().length > 0
+        ? obj.pubkey_sha256.trim().toLowerCase()
+        : undefined;
+    const issuerPubkeySha256 =
+      typeof issuerObj.pubkey_sha256 === 'string' && issuerObj.pubkey_sha256.trim().length > 0
+        ? issuerObj.pubkey_sha256.trim().toLowerCase()
+        : undefined;
+
+    if (!id && dnsNames.length === 0) continue;
+    entries.push({
+      id: id || `${notBefore}-${dnsNames[0] ?? 'cert'}`,
+      dnsNames,
+      issuerFriendlyName: issuerFriendlyName || extractFriendlyIssuerFromDn(issuerDn),
+      issuerDn,
+      notBefore,
+      notAfter,
+      revoked,
+      certSha256,
+      pubkeySha256,
+      issuerPubkeySha256,
+    });
+  }
+
+  return entries;
+}
+
+function extractFriendlyIssuerFromDn(dn: string): string {
+  const oMatch = dn.match(/(?:^|,\s*)O=([^,]+)/i);
+  if (oMatch?.[1]) return oMatch[1].trim().replace(/^"|"$/g, '');
+  const cnMatch = dn.match(/(?:^|,\s*)CN=([^,]+)/i);
+  if (cnMatch?.[1]) return cnMatch[1].trim().replace(/^"|"$/g, '');
+  return dn.trim() || 'Unknown CA';
+}
+
+/**
+ * Parses a `crt.sh/?q=<domain>&output=json` JSON array into normalized `RawCtIssuanceEntry[]`.
+ */
+export function parseCrtShJson(rawJson: unknown): RawCtIssuanceEntry[] {
+  if (!Array.isArray(rawJson)) return [];
+  const entries: RawCtIssuanceEntry[] = [];
+  const seenIds = new Set<string>();
+
+  for (const item of rawJson) {
+    if (!item || typeof item !== 'object') continue;
+    const obj = item as Record<string, unknown>;
+    const id = String(obj.id ?? obj.min_cert_id ?? '').trim();
+    if (id && seenIds.has(id)) continue;
+    if (id) seenIds.add(id);
+
+    const nameVal = String(obj.name_value ?? '');
+    const commonName = String(obj.common_name ?? '');
+    const dnsNames = Array.from(
+      new Set(
+        [...nameVal.split(/\r?\n/), commonName]
+          .map((n) => n.trim().toLowerCase().replace(/\.$/, ''))
+          .filter(Boolean)
+      )
+    );
+    const issuerDn = String(obj.issuer_name ?? '').trim();
+    const notBefore = String(obj.not_before ?? '').trim();
+    const notAfter = String(obj.not_after ?? '').trim();
+    if (dnsNames.length === 0) continue;
+
+    entries.push({
+      id: id || `${notBefore}-${dnsNames[0]}`,
+      dnsNames,
+      issuerFriendlyName: extractFriendlyIssuerFromDn(issuerDn),
+      issuerDn,
+      notBefore,
+      notAfter,
+      revoked: false,
+    });
+  }
+
+  return entries;
+}
+
+const ctFetchCache = new Map<string, CtLogFetchResult>();
+
+export function clearCtFetchCache(): void {
+  ctFetchCache.clear();
+}
+
+export function seedCtFetchCache(
+  domain: string,
+  result: CtLogFetchResult,
+  includeSubdomains = false
+): void {
+  const clean = displayFqdn(normalizeFqdn(domain)).toLowerCase();
+  ctFetchCache.set(`${clean}|${includeSubdomains ? 'sub' : 'direct'}`, result);
+}
+
+/**
+ * Queries CORS-enabled Certificate Transparency logs (`api.certspotter.com` with `crt.sh` fallback)
+ * for certificates covering `domain`.
+ */
+export async function fetchCtLogEntries(
+  domain: string,
+  options: {
+    fetchImpl?: typeof fetch;
+    timeoutMs?: number;
+    includeSubdomains?: boolean;
+    bypassCache?: boolean;
+  } = {}
+): Promise<CtLogFetchResult> {
+  const cleanDomain = displayFqdn(normalizeFqdn(domain)).toLowerCase();
+  const includeSub = Boolean(options.includeSubdomains);
+  const cacheKey = `${cleanDomain}|${includeSub ? 'sub' : 'direct'}`;
+  if (!options.bypassCache) {
+    const cached = ctFetchCache.get(cacheKey);
+    if (cached) return cached;
+  }
+
+  const fetchFn = options.fetchImpl ?? globalThis.fetch?.bind(globalThis);
+  const certSpotterUrl = `https://api.certspotter.com/v1/issuances?domain=${encodeURIComponent(cleanDomain)}&include_subdomains=${includeSub ? 'true' : 'false'}&expand=dns_names&expand=issuer`;
+
+  if (!fetchFn || !cleanDomain || cleanDomain === '.' || !cleanDomain.includes('.')) {
+    return {
+      source: 'unavailable',
+      url: certSpotterUrl,
+      fetchedAt: Date.now(),
+      ok: false,
+      includeSubdomains: includeSub,
+      entries: [],
+      error: 'CT log lookup unavailable for this target',
+    };
+  }
+
+  const timeoutMs = options.timeoutMs ?? 4500;
+
+  const tryCertSpotter = async (subFlag: boolean): Promise<CtLogFetchResult> => {
+    const url = `https://api.certspotter.com/v1/issuances?domain=${encodeURIComponent(cleanDomain)}&include_subdomains=${subFlag ? 'true' : 'false'}&expand=dns_names&expand=issuer`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetchFn(url, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        return {
+          source: 'certspotter',
+          url,
+          fetchedAt: Date.now(),
+          ok: false,
+          httpStatus: res.status,
+          includeSubdomains: subFlag,
+          entries: [],
+          error: `CertSpotter HTTP ${res.status}`,
+        };
+      }
+      const ctype = res.headers?.get?.('content-type') ?? '';
+      if (ctype.includes('application/dns-message')) {
+        return {
+          source: 'unavailable',
+          url,
+          fetchedAt: Date.now(),
+          ok: false,
+          includeSubdomains: subFlag,
+          entries: [],
+          error: 'Mock DoH transport active (skipped external CT HTTP query)',
+        };
+      }
+      const data = await res.json();
+      const entries = parseCertSpotterJson(data);
+      return {
+        source: 'certspotter',
+        url,
+        fetchedAt: Date.now(),
+        ok: true,
+        httpStatus: res.status,
+        includeSubdomains: subFlag,
+        entries,
+      };
+    } catch (err) {
+      return {
+        source: 'certspotter',
+        url,
+        fetchedAt: Date.now(),
+        ok: false,
+        includeSubdomains: subFlag,
+        entries: [],
+        error: err instanceof Error ? err.message : String(err),
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  let primary = await tryCertSpotter(includeSub);
+
+  // If direct domain lookup succeeded with 0 entries and includeSubdomains was false, try include_subdomains=true once
+  if (primary.ok && primary.entries.length === 0 && !includeSub) {
+    const subAttempt = await tryCertSpotter(true);
+    if (subAttempt.ok && subAttempt.entries.length > 0) {
+      primary = subAttempt;
+    }
+  }
+
+  if (primary.ok) {
+    ctFetchCache.set(cacheKey, primary);
+    return primary;
+  }
+
+  // If mock DoH transport was detected, do not attempt crt.sh
+  if (primary.source === 'unavailable') {
+    return primary;
+  }
+
+  // Fallback to crt.sh JSON endpoint
+  const crtUrl = `https://crt.sh/?q=${encodeURIComponent(cleanDomain)}&output=json&exclude=expired&deduplicate=Y`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.min(timeoutMs, 3500));
+  try {
+    const res = await fetchFn(crtUrl, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const entries = parseCrtShJson(data);
+      const fallbackResult: CtLogFetchResult = {
+        source: 'crt.sh',
+        url: crtUrl,
+        fetchedAt: Date.now(),
+        ok: true,
+        httpStatus: res.status,
+        includeSubdomains: true,
+        entries,
+      };
+      ctFetchCache.set(cacheKey, fallbackResult);
+      return fallbackResult;
+    }
+  } catch {
+    // Keep primary error
+  } finally {
+    clearTimeout(timer);
+  }
+
+  return primary;
+}
+
+function isValidDiscoveredSubdomain(candidate: string, baseDomain: string): boolean {
+  if (!candidate || candidate === baseDomain) return false;
+  if (!candidate.endsWith(`.${baseDomain}`)) return false;
+  if (candidate.includes('*') || candidate.includes(' ') || candidate.includes('_')) return false;
+  return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i.test(
+    candidate
+  );
+}
+
+/**
+ * Cross-checks Certificate Transparency (`CT`) log issuances against the evaluated RFC 8659 `CAA`
+ * policy and `_443._tcp` DANE `TLSA` bindings, and extracts discovered subdomains from SANs.
+ */
+function evaluateWebCertificateTransparency(params: {
+  targetName: string;
+  effectiveDomain: string;
+  caa: WebCaaAnalysis;
+  tlsaRecords: TlsaRecordDetail[];
+  ctLogFetch?: CtLogFetchResult;
+  validatedAtMs: number;
+  webFindings: AuditFinding[];
+}): WebCtAnalysis | undefined {
+  const {
+    targetName,
+    effectiveDomain,
+    caa,
+    tlsaRecords,
+    ctLogFetch,
+    validatedAtMs,
+    webFindings,
+  } = params;
+  if (!ctLogFetch) return undefined;
+
+  const dispTarget = displayFqdn(targetName).toLowerCase();
+  const dispEffective = displayFqdn(effectiveDomain).toLowerCase();
+
+  if (!ctLogFetch.ok) {
+    return {
+      status: 'unavailable',
+      source: ctLogFetch.source,
+      queriedDomain: dispTarget,
+      fetchedAt: ctLogFetch.fetchedAt,
+      error: ctLogFetch.error ?? 'Certificate Transparency log query failed or timed out',
+      totalEntries: 0,
+      activeCertCount: 0,
+      expiredCertCount: 0,
+      mismatchedActiveCertCount: 0,
+      issuers: [],
+      certificates: [],
+      discoveredSubdomains: [],
+      tlsaMatchedCertCount: 0,
+      summary: `Certificate Transparency log lookup unavailable (${ctLogFetch.error ?? 'network/timeout'}).`,
+    };
+  }
+
+  const issueRestricted =
+    caa.status === 'enforced' || caa.status === 'inherited' || caa.issueCas.length > 0;
+  const hasExplicitIssuewild = caa.issuewildCas.length > 0;
+  const wildcardRestricted = hasExplicitIssuewild || issueRestricted;
+
+  const authorizedIssueCas = new Set(
+    caa.issueCas
+      .map((c) => c.trim().toLowerCase().replace(/\.$/, ''))
+      .filter((c) => c && !c.startsWith(';'))
+  );
+  const authorizedWildcardCas = hasExplicitIssuewild
+    ? new Set(
+        caa.issuewildCas
+          .map((c) => c.trim().toLowerCase().replace(/\.$/, ''))
+          .filter((c) => c && !c.startsWith(';'))
+      )
+    : authorizedIssueCas;
+
+  const allCandidateCaaDomains = Array.from(
+    new Set([...authorizedIssueCas, ...authorizedWildcardCas])
+  );
+
+  // Sort entries newest notBefore first
+  const sortedRaw = [...ctLogFetch.entries].sort((a, b) => {
+    const ta = Date.parse(a.notBefore) || 0;
+    const tb = Date.parse(b.notBefore) || 0;
+    return tb - ta;
+  });
+
+  const activeSubdomains = new Set<string>();
+  const historicalSubdomains = new Set<string>();
+  const certificates: CtCertificateEntry[] = [];
+
+  let activeCertCount = 0;
+  let expiredCertCount = 0;
+  let mismatchedActiveCertCount = 0;
+  let tlsaMatchedCertCount = 0;
+
+  for (const raw of sortedRaw) {
+    const notAfterMs = Date.parse(raw.notAfter);
+    const isExpired = Number.isFinite(notAfterMs) ? notAfterMs < validatedAtMs : false;
+    const isActive = !isExpired && !raw.revoked;
+
+    if (isActive) {
+      activeCertCount++;
+    } else {
+      expiredCertCount++;
+    }
+
+    for (const san of raw.dnsNames) {
+      const cleanSan = san.replace(/^\*\./, '').trim().toLowerCase();
+      if (isValidDiscoveredSubdomain(cleanSan, dispTarget)) {
+        if (isActive) {
+          activeSubdomains.add(cleanSan);
+        } else {
+          historicalSubdomains.add(cleanSan);
+        }
+      }
+    }
+
+    const coversTargetDirectly = raw.dnsNames.some(
+      (n) =>
+        n === dispTarget ||
+        n === `*.${dispTarget}` ||
+        n === dispEffective ||
+        n === `*.${dispEffective}`
+    );
+    const hasWildcardForTarget = raw.dnsNames.some(
+      (n) =>
+        n === `*.${dispTarget}` ||
+        n === `*.${dispEffective}` ||
+        (!coversTargetDirectly && n.startsWith('*.'))
+    );
+    const hasNonWildcardForTarget = raw.dnsNames.some(
+      (n) => n === dispTarget || n === dispEffective || (!coversTargetDirectly && !n.startsWith('*.'))
+    );
+
+    const mappedCaaDomains = mapCtIssuerToCaaDomains(
+      raw.issuerFriendlyName,
+      raw.issuerDn,
+      allCandidateCaaDomains
+    );
+
+    const matchesIssue = mappedCaaDomains.some((d) => authorizedIssueCas.has(d));
+    const matchesWildcard = mappedCaaDomains.some((d) => authorizedWildcardCas.has(d));
+
+    let caaAuthorized: CtCertificateEntry['caaAuthorized'] = 'unrestricted';
+    let caaNote = 'No restricting CAA policy active';
+
+    if (hasWildcardForTarget && wildcardRestricted) {
+      if (!matchesWildcard) {
+        if (matchesIssue && hasExplicitIssuewild) {
+          caaAuthorized = 'unauthorized-wildcard';
+          caaNote = `${raw.issuerFriendlyName} (${mappedCaaDomains.join(', ') || 'unmapped'}) is in CAA issue, but not authorized by explicit issuewild (${Array.from(authorizedWildcardCas).join(', ') || 'deny all'})`;
+        } else {
+          caaAuthorized = 'unauthorized-ca';
+          caaNote = `${raw.issuerFriendlyName} (${mappedCaaDomains.join(', ') || 'unmapped'}) is not authorized by CAA ${hasExplicitIssuewild ? 'issuewild' : 'issue'} policy`;
+        }
+      } else if (hasNonWildcardForTarget && issueRestricted && !matchesIssue) {
+        caaAuthorized = 'unauthorized-ca';
+        caaNote = `${raw.issuerFriendlyName} (${mappedCaaDomains.join(', ') || 'unmapped'}) is not authorized by CAA issue policy (${Array.from(authorizedIssueCas).join(', ') || 'deny all'})`;
+      } else {
+        caaAuthorized = 'authorized';
+        const matchedDom = mappedCaaDomains.find(
+          (d) => authorizedWildcardCas.has(d) || authorizedIssueCas.has(d)
+        );
+        caaNote = `Authorized by CAA (${matchedDom ?? mappedCaaDomains[0]})`;
+      }
+    } else if (issueRestricted) {
+      if (matchesIssue) {
+        caaAuthorized = 'authorized';
+        const matchedDom = mappedCaaDomains.find((d) => authorizedIssueCas.has(d));
+        caaNote = `Authorized by CAA issue "${matchedDom ?? mappedCaaDomains[0]}"`;
+      } else {
+        caaAuthorized = 'unauthorized-ca';
+        caaNote = `${raw.issuerFriendlyName} (${mappedCaaDomains.join(', ') || 'unmapped'}) is not listed in CAA issue (${Array.from(authorizedIssueCas).join(', ') || 'deny all'})`;
+      }
+    }
+
+    if (
+      isActive &&
+      coversTargetDirectly &&
+      (caaAuthorized === 'unauthorized-ca' || caaAuthorized === 'unauthorized-wildcard')
+    ) {
+      mismatchedActiveCertCount++;
+    }
+
+    // Cross-reference against _443._tcp DANE TLSA SHA-256 digests
+    let matchesTlsa: boolean | undefined;
+    let matchedTlsaSummary: string | undefined;
+    const validSha256Tlsas = tlsaRecords.filter((t) => t.rdataValid && t.matchingType === 1);
+    if (validSha256Tlsas.length > 0 && (raw.certSha256 || raw.pubkeySha256 || raw.issuerPubkeySha256)) {
+      matchesTlsa = false;
+      for (const tlsa of validSha256Tlsas) {
+        const hex = tlsa.certAssociationHex.toLowerCase();
+        if (tlsa.selector === 0 && raw.certSha256 && hex === raw.certSha256) {
+          matchesTlsa = true;
+          matchedTlsaSummary = `Matches TLSA ${tlsa.usage} (${tlsa.usageMnemonic}) Selector 0 (Cert SHA-256)`;
+          break;
+        }
+        if (tlsa.selector === 1) {
+          if (raw.pubkeySha256 && hex === raw.pubkeySha256) {
+            matchesTlsa = true;
+            matchedTlsaSummary = `Matches TLSA ${tlsa.usage} (${tlsa.usageMnemonic}) Selector 1 (Leaf SPKI SHA-256)`;
+            break;
+          }
+          if (
+            (tlsa.usage === 2 || tlsa.usage === 0) &&
+            raw.issuerPubkeySha256 &&
+            hex === raw.issuerPubkeySha256
+          ) {
+            matchesTlsa = true;
+            matchedTlsaSummary = `Matches TLSA ${tlsa.usage} (${tlsa.usageMnemonic}) Selector 1 (Issuer TA SPKI SHA-256)`;
+            break;
+          }
+        }
+      }
+      if (matchesTlsa) {
+        tlsaMatchedCertCount++;
+      }
+    }
+
+    certificates.push({
+      id: raw.id,
+      dnsNames: raw.dnsNames,
+      hasWildcardForTarget,
+      coversTargetDirectly,
+      issuerFriendlyName: raw.issuerFriendlyName,
+      issuerDn: raw.issuerDn,
+      mappedCaaDomains,
+      notBefore: raw.notBefore,
+      notAfter: raw.notAfter,
+      isExpired,
+      revoked: raw.revoked,
+      certSha256: raw.certSha256,
+      pubkeySha256: raw.pubkeySha256,
+      issuerPubkeySha256: raw.issuerPubkeySha256,
+      caaAuthorized,
+      caaNote,
+      matchesTlsa,
+      matchedTlsaSummary,
+    });
+  }
+
+  // Summarize active certificate issuers (or all issuers if no active certs exist)
+  const certsForIssuerSummary =
+    activeCertCount > 0
+      ? certificates.filter((c) => !c.isExpired && !c.revoked)
+      : certificates;
+  const issuerMap = new Map<string, CtIssuerSummary>();
+  for (const cert of certsForIssuerSummary) {
+    const key = cert.issuerFriendlyName || cert.issuerDn || 'Unknown CA';
+    const existing = issuerMap.get(key);
+    const authIssue = !issueRestricted || cert.mappedCaaDomains.some((d) => authorizedIssueCas.has(d));
+    const authWild =
+      !wildcardRestricted || cert.mappedCaaDomains.some((d) => authorizedWildcardCas.has(d));
+    const certAuth = cert.caaAuthorized === 'authorized' || cert.caaAuthorized === 'unrestricted';
+
+    if (!existing) {
+      issuerMap.set(key, {
+        friendlyName: key,
+        mappedCaaDomains: cert.mappedCaaDomains,
+        activeCertCount: !cert.isExpired && !cert.revoked ? 1 : 0,
+        wildcardCertCount: cert.hasWildcardForTarget ? 1 : 0,
+        latestNotBefore: cert.notBefore,
+        caaAuthorized: certAuth,
+        authorizedForIssue: authIssue,
+        authorizedForWildcard: authWild,
+      });
+    } else {
+      if (!cert.isExpired && !cert.revoked) existing.activeCertCount++;
+      if (cert.hasWildcardForTarget) existing.wildcardCertCount++;
+      if (!certAuth) existing.caaAuthorized = false;
+    }
+  }
+
+  const issuers = Array.from(issuerMap.values()).sort(
+    (a, b) => b.activeCertCount - a.activeCertCount
+  );
+
+  const discoveredSubdomains = [
+    ...Array.from(activeSubdomains).sort(),
+    ...Array.from(historicalSubdomains)
+      .filter((s) => !activeSubdomains.has(s))
+      .sort(),
+  ].slice(0, 60);
+
+  let status: WebCtAnalysis['status'] = 'no-active-certs';
+  let summary = '';
+
+  if (certificates.length === 0 || activeCertCount === 0) {
+    status = 'no-active-certs';
+    summary =
+      certificates.length === 0
+        ? `No Certificate Transparency log entries found for ${dispTarget}.`
+        : `Found ${certificates.length} historical CT certificate(s) for ${dispTarget}, none currently unexpired.`;
+  } else if (mismatchedActiveCertCount > 0) {
+    status = 'caa-mismatch';
+    const unauthorizedIssuers = Array.from(
+      new Set(
+        certificates
+          .filter(
+            (c) =>
+              !c.isExpired &&
+              !c.revoked &&
+              c.coversTargetDirectly &&
+              (c.caaAuthorized === 'unauthorized-ca' ||
+                c.caaAuthorized === 'unauthorized-wildcard')
+          )
+          .map(
+            (c) =>
+              `${c.issuerFriendlyName} (${c.mappedCaaDomains.join(', ') || 'unmapped'})`
+          )
+      )
+    );
+    summary = `CAA Policy Mismatch: ${mismatchedActiveCertCount} active certificate(s) in CT logs were issued by ${unauthorizedIssuers.join(', ')}, which is not authorized by the current CAA policy (${caa.issueCas.join(', ') || 'none'}).`;
+    webFindings.push({
+      id: `web-warn-ct-caa-mismatch-${targetName}`,
+      severity: 'warning',
+      code: 'CT_CAA_ISSUER_MISMATCH',
+      title: `CT log shows ${mismatchedActiveCertCount} active certificate(s) for ${dispTarget} from CA not in current CAA policy`,
+      detail: `Active unexpired certificate(s) in Certificate Transparency logs were issued by ${unauthorizedIssuers.join(', ')}, whereas the effective CAA policy at ${displayFqdn(caa.effectiveOwner ?? targetName)} only authorizes: issue=[${caa.issueCas.join(', ') || 'none'}]${caa.issuewildCas.length > 0 ? `, issuewild=[${caa.issuewildCas.join(', ')}]` : ''}. This occurs when CAA records were tightened after certificate issuance (potentially breaking automated ACME renewals) or if a sub-delegation/CA bypassed policy.`,
+      rfc: 'RFC 8659 / RFC 6962',
+    });
+  } else if (issueRestricted || wildcardRestricted) {
+    status = 'caa-compliant';
+    const issuerNames = issuers.map((i) => i.friendlyName).join(', ');
+    summary = `All ${activeCertCount} active CT certificate(s) for ${dispTarget} (issued by ${issuerNames}) match the enforced CAA policy (${caa.issueCas.join(', ')})${discoveredSubdomains.length > 0 ? ` · ${discoveredSubdomains.length} subdomain${discoveredSubdomains.length === 1 ? '' : 's'} discovered in SANs` : ''}.`;
+    webFindings.push({
+      id: `web-info-ct-caa-compliant-${targetName}`,
+      severity: 'info',
+      code: 'CT_CAA_COMPLIANT',
+      title: `Certificate Transparency (CT) logs match CAA policy for ${dispTarget} (${activeCertCount} active cert${activeCertCount === 1 ? '' : 's'})`,
+      detail: `Verified ${activeCertCount} active unexpired TLS certificate(s) in CT logs (${issuerNames}); every active issuer is authorized by the domain's RFC 8659 CAA policy (${caa.issueCas.join(', ')}).`,
+      rfc: 'RFC 8659 / RFC 6962',
+    });
+  } else {
+    status = 'unrestricted';
+    const issuerNames = issuers.map((i) => i.friendlyName).join(', ');
+    summary = `${activeCertCount} active CT certificate(s) found for ${dispTarget} (issued by ${issuerNames}), but no restricting CAA policy is published.${discoveredSubdomains.length > 0 ? ` Discovered ${discoveredSubdomains.length} subdomain${discoveredSubdomains.length === 1 ? '' : 's'} in CT SANs.` : ''}`;
+  }
+
+  return {
+    status,
+    source: ctLogFetch.source,
+    queriedDomain: dispTarget,
+    fetchedAt: ctLogFetch.fetchedAt,
+    totalEntries: certificates.length,
+    activeCertCount,
+    expiredCertCount,
+    mismatchedActiveCertCount,
+    issuers,
+    certificates: certificates.slice(0, 25),
+    discoveredSubdomains,
+    tlsaMatchedCertCount,
+    summary,
+  };
+}
+
 /**
  * Evaluates Web & HTTPS records (HTTPS/SVCB RFC 9460, ECH, tree-walking CAA RFC 8659/8657,
  * `_443._tcp` DANE TLSA, and SSHFP) deterministically from captured `DohQueryLog[]` and `ZoneAnalysis[]`.
@@ -460,13 +1255,15 @@ export function evaluateWebFromSnapshotData(params: {
   zones: ZoneAnalysis[];
   cnameEdges: CnameEdge[];
   targetDomainStatus: ValidationStatus;
+  ctLogFetch?: CtLogFetchResult;
+  validatedAt?: number;
 }): {
   webAnalysis: WebAnalysisResult;
   webFindings: AuditFinding[];
   overallStatus: ValidationStatus;
   overallSummary: string;
 } {
-  const { targetName, queries, zones, targetDomainStatus } = params;
+  const { targetName, queries, zones, targetDomainStatus, ctLogFetch, validatedAt } = params;
   const webFindings: AuditFinding[] = [];
   const dispTarget = displayFqdn(targetName);
 
@@ -1062,6 +1859,17 @@ export function evaluateWebFromSnapshotData(params: {
     sshfpSummary = `DNSSEC-validated SSHFP host key fingerprints active (${algos.join(', ')}).`;
   }
 
+  // 7. Evaluate Certificate Transparency (CT) Log Issuances vs. CAA Policy & Web DANE TLSA
+  const ctAnalysis = evaluateWebCertificateTransparency({
+    targetName,
+    effectiveDomain,
+    caa: caaAnalysis,
+    tlsaRecords,
+    ctLogFetch,
+    validatedAtMs: validatedAt ?? Date.now(),
+    webFindings,
+  });
+
   const webAnalysis: WebAnalysisResult = {
     targetDomain: targetName,
     displayDomain: dispTarget,
@@ -1103,6 +1911,7 @@ export function evaluateWebFromSnapshotData(params: {
       records: sshfpRecords,
       summary: sshfpSummary,
     },
+    ...(ctAnalysis ? { ctAnalysis } : {}),
   };
 
   // Synthesize overall status & summary for Web mode
@@ -1133,11 +1942,20 @@ export function evaluateWebFromSnapshotData(params: {
     caaStatus === 'enforced'
       ? `CAA enforced (${issueCas.join(', ') || 'deny'})`
       : caaStatus === 'inherited'
-        ? `CAA inherited from ${ displayFqdn(effectiveCaaHop?.name ?? '') }`
+        ? `CAA inherited from ${displayFqdn(effectiveCaaHop?.name ?? '')}`
         : caaStatus === 'unprotected'
           ? 'CAA unprotected'
           : `CAA ${caaStatus}`
   );
+  if (ctAnalysis && ctAnalysis.status !== 'unavailable' && ctAnalysis.activeCertCount > 0) {
+    parts.push(
+      ctAnalysis.status === 'caa-compliant'
+        ? `CT ↔ CAA compliant (${ctAnalysis.activeCertCount} active)`
+        : ctAnalysis.status === 'caa-mismatch'
+          ? `CT ↔ CAA MISMATCH (${ctAnalysis.mismatchedActiveCertCount})`
+          : `CT (${ctAnalysis.activeCertCount} active)`
+    );
+  }
   if (tlsaRecords.length > 0) {
     parts.push(`_443._tcp DANE (${webDaneStatus})`);
   }
@@ -1193,6 +2011,12 @@ export async function runWebAnalysis(
 
   const discoveredZones = new Set<string>(['.']);
   const checkedCandidates = new Set<string>(['.']);
+
+  // Launch Certificate Transparency (CT) log fetch concurrently with DNS queries
+  const ctLogPromise = fetchCtLogEntries(displayDomain, {
+    fetchImpl: options.fetchImpl,
+    timeoutMs: options.timeoutMs ? Math.min(options.timeoutMs, 4500) : 4500,
+  });
 
   // Step 1: Discover zone cuts + query A, AAAA, HTTPS, SVCB, CAA, SSHFP at targetName (+ CD=0 validating check)
   await Promise.all([
@@ -1412,9 +2236,11 @@ export async function runWebAnalysis(
   currentPhase = 'validating';
   options.onProgress?.({
     phase: 'validating',
-    message: 'Verifying DNSSEC, HTTPS/SVCB, ECH, CAA & Web DANE via WebCrypto…',
+    message: 'Verifying DNSSEC, HTTPS/SVCB, ECH, CAA, CT logs & Web DANE via WebCrypto…',
     completedQueries: session.getLogs().length,
   });
+
+  const ctLogFetch = await ctLogPromise;
 
   const capturedAt = Date.now();
   const validatedAt = options.validationTimeMs ?? capturedAt;
@@ -1425,6 +2251,7 @@ export async function runWebAnalysis(
     mode: 'web',
     targetName,
     queryTypes,
+    ctLogFetch,
     dohEndpoint: endpoint,
     capturedAt,
     validatedAt,
