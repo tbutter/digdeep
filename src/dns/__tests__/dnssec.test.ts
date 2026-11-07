@@ -22,6 +22,7 @@ import {
   reverseArpaToIp,
 } from '../ipUtils';
 import { buildDnsQuery, decodeDnsName, encodeDnsName, parseDnsPacket } from '../wire';
+import { parseCaaRecordEntry, runWebAnalysis } from '../webAnalyzer';
 
 describe('DNS Wireformat & RFC Primitives', () => {
   it('normalizes domain names and enforces RFC 4034 §6.1 canonical DNS name order', () => {
@@ -480,6 +481,166 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
       expect(mutatedSnap.findings.some((f) => f.code === 'CDS_DELETE_SIGNAL')).toBe(true);
       expect(mutLeaf?.nsDiversity?.danglingHosts).toContain(firstNsHost);
       expect(mutatedSnap.findings.some((f) => f.code === 'DANGLING_NS_TARGET')).toBe(true);
+    },
+    25000
+  );
+
+  it(
+    'decodes RFC 9460 HTTPS/SVCB SvcParams, TLS ECHConfigList, SSHFP, RFC 8659/8657 CAA & runs live Web analysis',
+    async () => {
+      const buildSingleRrPacket = (owner: string, rrtype: number, rdata: Uint8Array) => {
+        const nameWire = encodeDnsName(owner, false);
+        const header = new Uint8Array([
+          0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        ]);
+        const qTail = new Uint8Array([(rrtype >> 8) & 0xff, rrtype & 0xff, 0x00, 0x01]);
+        const ansMeta = new Uint8Array(10);
+        const v = new DataView(ansMeta.buffer);
+        v.setUint16(0, rrtype, false);
+        v.setUint16(2, 1, false);
+        v.setUint32(4, 3600, false);
+        v.setUint16(8, rdata.length, false);
+        return parseDnsPacket(concatBytes(header, nameWire, qTail, nameWire, ansMeta, rdata));
+      };
+
+      // 1. Construct binary ECHConfigList (version 0xfe0d, configId=42, KEM=0x0020 X25519, 32B pubKey, KDF=1/AEAD=1, maxNameLen=64, publicName="cloudflare-ech.com")
+      const pubNameBytes = new TextEncoder().encode('cloudflare-ech.com');
+      const pubKeyBytes = new Uint8Array(32).fill(0xab);
+      const echContents = concatBytes(
+        new Uint8Array([
+          42, // config_id = 42
+          0x00, 0x20, // kem_id = 0x0020 (DHKEM(X25519, HKDF-SHA256))
+          0x00, 0x20, // public_key length = 32
+        ]),
+        pubKeyBytes,
+        new Uint8Array([
+          0x00, 0x04, // cipher_suites length = 4
+          0x00, 0x01, // KDF = HKDF-SHA256 (0x0001)
+          0x00, 0x01, // AEAD = AES-128-GCM (0x0001)
+          64, // maximum_name_length = 64
+          pubNameBytes.length,
+        ]),
+        pubNameBytes,
+        new Uint8Array([0x00, 0x00]) // extensions length = 0
+      );
+      const echConfigEntry = concatBytes(
+        new Uint8Array([
+          0xfe, 0x0d, // version = 0xfe0d (Draft-13+)
+          (echContents.length >> 8) & 0xff,
+          echContents.length & 0xff,
+        ]),
+        echContents
+      );
+      const echConfigList = concatBytes(
+        new Uint8Array([(echConfigEntry.length >> 8) & 0xff, echConfigEntry.length & 0xff]),
+        echConfigEntry
+      );
+
+      // Construct HTTPS RDATA: priority=1, target=".", SvcParams: alpn(1)="h3,h2", port(3)=8443, ipv4hint(4)=192.0.2.1, ech(5)=echConfigList
+      const alpnVal = new Uint8Array([2, 0x68, 0x33, 2, 0x68, 0x32]); // "h3", "h2"
+      const httpsRdata = concatBytes(
+        new Uint8Array([
+          0x00, 0x01, // priority = 1 (ServiceMode)
+          0x00, // target = "."
+          // Key 1 (alpn)
+          0x00, 0x01, 0x00, alpnVal.length,
+        ]),
+        alpnVal,
+        new Uint8Array([
+          // Key 3 (port = 8443 = 0x20fb)
+          0x00, 0x03, 0x00, 0x02, 0x20, 0xfb,
+          // Key 4 (ipv4hint = 192.0.2.1)
+          0x00, 0x04, 0x00, 0x04, 192, 0, 2, 1,
+          // Key 5 (ech)
+          0x00, 0x05, (echConfigList.length >> 8) & 0xff, echConfigList.length & 0xff,
+        ]),
+        echConfigList
+      );
+
+      const httpsPkt = buildSingleRrPacket('example.com.', RR_TYPES.HTTPS, httpsRdata);
+      const httpsAns = httpsPkt.answers[0];
+      expect(httpsAns.typeName).toBe('HTTPS');
+      expect(httpsAns.parsed.kind).toBe('SVCB');
+      if (httpsAns.parsed.kind === 'SVCB') {
+        expect(httpsAns.parsed.priority).toBe(1);
+        expect(httpsAns.parsed.isAliasMode).toBe(false);
+        const echParam = httpsAns.parsed.params.find((p) => p.key === 5);
+        expect(echParam?.echConfigs).toHaveLength(1);
+        expect(echParam?.echConfigs?.[0]?.publicName).toBe('cloudflare-ech.com');
+        expect(echParam?.echConfigs?.[0]?.kemName).toContain('X25519');
+        expect(echParam?.echConfigs?.[0]?.cipherSuites[0]?.aeadName).toBe('AES-128-GCM');
+      }
+
+      // 2. Test SSHFP (TYPE44) RDATA decoder (Algo 4 = Ed25519, FP Type 2 = SHA-256)
+      const sshfpDigest = new Uint8Array(32).fill(0x5a);
+      const sshfpRdata = concatBytes(new Uint8Array([4, 2]), sshfpDigest);
+      const sshfpPkt = buildSingleRrPacket('example.com.', RR_TYPES.SSHFP, sshfpRdata);
+      const sshfpAns = sshfpPkt.answers[0];
+      expect(sshfpAns.parsed.kind).toBe('SSHFP');
+      if (sshfpAns.parsed.kind === 'SSHFP') {
+        expect(sshfpAns.parsed.algorithmName).toContain('Ed25519');
+        expect(sshfpAns.parsed.fpTypeName).toBe('SHA-256');
+        expect(sshfpAns.parsed.fingerprintHex).toHaveLength(64);
+      }
+
+      // 3. Test RFC 8659 & RFC 8657 CAA record parser
+      const acmeCaa = parseCaaRecordEntry(
+        'example.com.',
+        128,
+        'issue',
+        'letsencrypt.org; validationmethods=dns-01; accounturi=https://acme-v02.api.letsencrypt.org/acme/acct/12345'
+      );
+      expect(acmeCaa.valid).toBe(true);
+      expect(acmeCaa.critical).toBe(true);
+      expect(acmeCaa.caDomain).toBe('letsencrypt.org');
+      expect(acmeCaa.parameters).toEqual([
+        { key: 'validationmethods', value: 'dns-01' },
+        { key: 'accounturi', value: 'https://acme-v02.api.letsencrypt.org/acme/acct/12345' },
+      ]);
+
+      const unknownCritCaa = parseCaaRecordEntry('example.com.', 128, 'futuretag', 'someval');
+      expect(unknownCritCaa.valid).toBe(false);
+      expect(unknownCritCaa.recognizedTag).toBe(false);
+
+      // 4. Live Web & HTTPS Analysis on cloudflare.com
+      const webSnap = await runWebAnalysis('cloudflare.com');
+      expect(webSnap.mode).toBe('web');
+      expect(webSnap.webAnalysis).toBeDefined();
+      expect(webSnap.webAnalysis?.httpsRecords.length).toBeGreaterThan(0);
+      expect(webSnap.webAnalysis?.supportsHttp3).toBe(true);
+      expect(webSnap.webAnalysis?.supportsHttp2).toBe(true);
+      expect(webSnap.webAnalysis?.caa.hops.length).toBeGreaterThanOrEqual(2);
+
+      // 5. Synthetic mutation on webSnap to verify ipv4hint drift & ECH detection
+      const driftedQueries = webSnap.queries.map((q) => {
+        if (q.qname === 'cloudflare.com.' && q.qtype === RR_TYPES.HTTPS) {
+          return {
+            ...q,
+            packet: {
+              ...q.packet,
+              answers: httpsPkt.answers.map((a) => ({ ...a, name: 'cloudflare.com.' })),
+            },
+          };
+        }
+        return q;
+      });
+      const driftedSnap = await evaluateSnapshotFromLogs({
+        id: 'test-web-drift-ech',
+        mode: 'web',
+        targetName: webSnap.targetName,
+        queryTypes: webSnap.queryTypes,
+        dohEndpoint: webSnap.dohEndpoint,
+        capturedAt: webSnap.capturedAt,
+        validatedAt: webSnap.validatedAt,
+        durationMs: webSnap.durationMs,
+        queries: driftedQueries,
+        trustAnchors: webSnap.trustAnchorsUsed,
+      });
+      expect(driftedSnap.webAnalysis?.echEnabled).toBe(true);
+      expect(driftedSnap.webAnalysis?.echPublicNames).toContain('cloudflare-ech.com');
+      expect(driftedSnap.webAnalysis?.ipHintStatus).toBe('drift-detected');
+      expect(driftedSnap.findings.some((f) => f.code === 'HTTPS_ECH_ENABLED')).toBe(true);
+      expect(driftedSnap.findings.some((f) => f.code === 'HTTPS_IP_HINT_DRIFT')).toBe(true);
     },
     25000
   );

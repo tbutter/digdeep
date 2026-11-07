@@ -1,4 +1,14 @@
-import { EDE_CODES, RR_TYPES, rrTypeToString } from './constants';
+import {
+  EDE_CODES,
+  HPKE_AEAD_IDS,
+  HPKE_KDF_IDS,
+  HPKE_KEM_IDS,
+  RR_TYPES,
+  SSHFP_ALGORITHMS,
+  SSHFP_FP_TYPES,
+  rrTypeToString,
+  svcParamKeyToString,
+} from './constants';
 import {
   bytesToBase32Hex,
   bytesToBase64,
@@ -16,9 +26,12 @@ import type {
   DnsPacket,
   DnsQuestion,
   DnsRecord,
+  EchCipherSuite,
+  EchConfigEntry,
   EdeEntry,
   EdnsInfo,
   ParsedRdata,
+  SvcParamEntry,
 } from './types';
 
 const textDecoder = new TextDecoder('utf-8', { fatal: false });
@@ -271,6 +284,80 @@ function parseCharacterStrings(rdata: Uint8Array): string {
   return decodeCharacterStringChunks(rdata)
     .map((s) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`)
     .join(' ');
+}
+
+/**
+ * Decodes an RFC 9460 / draft-ietf-tls-esni `ECHConfigList` binary structure (SvcParamKey 5 `ech`).
+ */
+export function parseEchConfigList(buf: Uint8Array): EchConfigEntry[] {
+  if (buf.length < 4) return [];
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const totalLen = view.getUint16(0, false);
+  const limit = Math.min(buf.length, 2 + totalLen);
+  let pos = 2;
+  const entries: EchConfigEntry[] = [];
+
+  while (pos + 4 <= limit) {
+    const version = view.getUint16(pos, false);
+    const configLen = view.getUint16(pos + 2, false);
+    pos += 4;
+    if (pos + configLen > limit) break;
+
+    const contents = buf.subarray(pos, pos + configLen);
+    pos += configLen;
+
+    // Draft-13+ / RFC ECH version 0xfe0d
+    if (contents.length >= 8) {
+      const cView = new DataView(contents.buffer, contents.byteOffset, contents.byteLength);
+      let cPos = 0;
+      const configId = contents[cPos++];
+      const kemId = cView.getUint16(cPos, false);
+      cPos += 2;
+      if (cPos + 2 > contents.length) continue;
+      const pubKeyLen = cView.getUint16(cPos, false);
+      cPos += 2;
+      if (cPos + pubKeyLen + 2 > contents.length) continue;
+      const pubKeyBytes = contents.subarray(cPos, cPos + pubKeyLen);
+      cPos += pubKeyLen;
+
+      const suitesByteLen = cView.getUint16(cPos, false);
+      cPos += 2;
+      if (cPos + suitesByteLen + 2 > contents.length) continue;
+      const cipherSuites: EchCipherSuite[] = [];
+      for (let s = 0; s + 4 <= suitesByteLen; s += 4) {
+        const kdfId = cView.getUint16(cPos + s, false);
+        const aeadId = cView.getUint16(cPos + s + 2, false);
+        cipherSuites.push({
+          kdfId,
+          kdfName: HPKE_KDF_IDS[kdfId] ?? `KDF-0x${kdfId.toString(16).padStart(4, '0')}`,
+          aeadId,
+          aeadName: HPKE_AEAD_IDS[aeadId] ?? `AEAD-0x${aeadId.toString(16).padStart(4, '0')}`,
+        });
+      }
+      cPos += suitesByteLen;
+
+      const maximumNameLength = contents[cPos++];
+      if (cPos >= contents.length) continue;
+      const publicNameLen = contents[cPos++];
+      if (cPos + publicNameLen > contents.length) continue;
+      const publicName = textDecoder.decode(contents.subarray(cPos, cPos + publicNameLen));
+
+      entries.push({
+        version,
+        versionHex: `0x${version.toString(16).padStart(4, '0')}`,
+        configId,
+        kemId,
+        kemName: HPKE_KEM_IDS[kemId] ?? `KEM-0x${kemId.toString(16).padStart(4, '0')}`,
+        publicKeyLength: pubKeyLen,
+        publicKeyHex: bytesToHex(pubKeyBytes),
+        cipherSuites,
+        maximumNameLength,
+        publicName,
+      });
+    }
+  }
+
+  return entries;
 }
 
 /**
@@ -629,7 +716,14 @@ function parseRecordRdata(
     return {
       canonicalRdata: new Uint8Array(rawRdata),
       rdataText: `${alg} ${fpType} ${fp}`,
-      parsed: { kind: 'GENERIC' },
+      parsed: {
+        kind: 'SSHFP',
+        algorithm: alg,
+        algorithmName: SSHFP_ALGORITHMS[alg]?.name ?? `ALG-${alg}`,
+        fpType,
+        fpTypeName: SSHFP_FP_TYPES[fpType]?.name ?? `TYPE-${fpType}`,
+        fingerprintHex: fp,
+      },
     };
   }
 
@@ -656,21 +750,35 @@ function parseRecordRdata(
     };
   }
 
-  // 19. SVCB (64) & HTTPS (65) basic presentation
+  // 19. SVCB (64) & HTTPS (65) full RFC 9460 SvcParams & ECHConfigList decoding
   if ((rrtype === RR_TYPES.SVCB || rrtype === RR_TYPES.HTTPS) && rdlength >= 3) {
     const svcPriority = view.getUint16(0, false);
     const targetDec = decodeDnsName(packetBuf, rdataOffset + 2);
     const targetName = normalizeFqdn(targetDec.name);
     const paramsBuf = rawRdata.subarray(2 + targetDec.bytesRead);
     const paramStrs: string[] = [];
+    const params: SvcParamEntry[] = [];
     let pPos = 0;
     while (pPos + 4 <= paramsBuf.length) {
       const pView = new DataView(paramsBuf.buffer, paramsBuf.byteOffset + pPos, 4);
       const key = pView.getUint16(0, false);
       const vLen = pView.getUint16(2, false);
-      const val = paramsBuf.subarray(pPos + 4, pPos + 4 + vLen);
-      if (key === 1) {
-        // alpn
+      const val = paramsBuf.subarray(pPos + 4, Math.min(paramsBuf.length, pPos + 4 + vLen));
+      const keyName = svcParamKeyToString(key);
+      const rawHex = bytesToHex(val);
+
+      if (key === 0 && val.length >= 2 && val.length % 2 === 0) {
+        // mandatory (key 0): list of uint16 SvcParamKeys
+        const mKeys: string[] = [];
+        const mView = new DataView(val.buffer, val.byteOffset, val.byteLength);
+        for (let k = 0; k < val.length; k += 2) {
+          mKeys.push(svcParamKeyToString(mView.getUint16(k, false)));
+        }
+        const valueText = mKeys.join(',');
+        paramStrs.push(`mandatory=${valueText}`);
+        params.push({ key, keyName, rawHex, valueText, mandatoryKeys: mKeys });
+      } else if (key === 1) {
+        // alpn (key 1)
         const alpns: string[] = [];
         let aPos = 0;
         while (aPos < val.length) {
@@ -678,28 +786,73 @@ function parseRecordRdata(
           alpns.push(textDecoder.decode(val.subarray(aPos + 1, aPos + 1 + al)));
           aPos += 1 + al;
         }
-        paramStrs.push(`alpn="${alpns.join(',')}"`);
-      } else if (key === 4 && val.length % 4 === 0) {
+        const valueText = alpns.join(',');
+        paramStrs.push(`alpn="${valueText}"`);
+        params.push({ key, keyName, rawHex, valueText, alpns });
+      } else if (key === 2) {
+        // no-default-alpn (key 2)
+        paramStrs.push('no-default-alpn');
+        params.push({ key, keyName, rawHex, valueText: '' });
+      } else if (key === 3 && val.length === 2) {
+        // port (key 3)
+        const portView = new DataView(val.buffer, val.byteOffset, 2);
+        const port = portView.getUint16(0, false);
+        paramStrs.push(`port=${port}`);
+        params.push({ key, keyName, rawHex, valueText: String(port), port });
+      } else if (key === 4 && val.length >= 4 && val.length % 4 === 0) {
+        // ipv4hint (key 4)
         const ips: string[] = [];
         for (let k = 0; k < val.length; k += 4) {
           ips.push(`${val[k]}.${val[k + 1]}.${val[k + 2]}.${val[k + 3]}`);
         }
-        paramStrs.push(`ipv4hint=${ips.join(',')}`);
-      } else if (key === 6 && val.length % 16 === 0) {
+        const valueText = ips.join(',');
+        paramStrs.push(`ipv4hint=${valueText}`);
+        params.push({ key, keyName, rawHex, valueText, ipv4Hints: ips });
+      } else if (key === 5) {
+        // ech (key 5): TLS Encrypted ClientHello ECHConfigList
+        const echB64 = bytesToBase64(val);
+        const echConfigs = parseEchConfigList(val);
+        paramStrs.push(`ech="${echB64}"`);
+        params.push({
+          key,
+          keyName,
+          rawHex,
+          valueText: echB64,
+          echConfigListBase64: echB64,
+          echConfigs,
+        });
+      } else if (key === 6 && val.length >= 16 && val.length % 16 === 0) {
+        // ipv6hint (key 6)
         const ip6s: string[] = [];
         for (let k = 0; k < val.length; k += 16) {
           ip6s.push(formatIpv6(val.subarray(k, k + 16)));
         }
-        paramStrs.push(`ipv6hint=${ip6s.join(',')}`);
+        const valueText = ip6s.join(',');
+        paramStrs.push(`ipv6hint=${valueText}`);
+        params.push({ key, keyName, rawHex, valueText, ipv6Hints: ip6s });
+      } else if (key === 7) {
+        // dohpath (key 7, RFC 9461)
+        const dohPath = textDecoder.decode(val);
+        paramStrs.push(`dohpath="${dohPath}"`);
+        params.push({ key, keyName, rawHex, valueText: dohPath, dohPath });
       } else {
-        paramStrs.push(`key${key}=0x${bytesToHex(val)}`);
+        const valueText = val.length > 0 ? `0x${rawHex}` : '';
+        paramStrs.push(val.length > 0 ? `${keyName}=${valueText}` : keyName);
+        params.push({ key, keyName, rawHex, valueText });
       }
       pPos += 4 + vLen;
     }
     return {
       canonicalRdata: new Uint8Array(rawRdata),
       rdataText: `${svcPriority} ${targetName}${paramStrs.length ? ` ${paramStrs.join(' ')}` : ''}`,
-      parsed: { kind: 'GENERIC', target: svcPriority === 0 ? targetName : undefined },
+      parsed: {
+        kind: 'SVCB',
+        rrtypeName: rrtype === RR_TYPES.HTTPS ? 'HTTPS' : 'SVCB',
+        priority: svcPriority,
+        isAliasMode: svcPriority === 0,
+        target: targetName,
+        params,
+      },
     };
   }
 

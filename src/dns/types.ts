@@ -2,7 +2,7 @@ import type { TrustAnchor } from './constants';
 
 export type ValidationStatus = 'secure' | 'insecure' | 'bogus' | 'warning' | 'indeterminate';
 
-export type AnalysisMode = 'dnssec' | 'mail';
+export type AnalysisMode = 'dnssec' | 'mail' | 'web';
 
 export interface DnsHeaderFlags {
   qr: boolean;
@@ -162,6 +162,59 @@ export interface CsyncRdata {
   typeNames: string[];
 }
 
+export interface EchCipherSuite {
+  kdfId: number;
+  kdfName: string;
+  aeadId: number;
+  aeadName: string;
+}
+
+export interface EchConfigEntry {
+  version: number;
+  versionHex: string;
+  configId: number;
+  kemId: number;
+  kemName: string;
+  publicKeyLength: number;
+  publicKeyHex: string;
+  cipherSuites: EchCipherSuite[];
+  maximumNameLength: number;
+  publicName: string;
+}
+
+export interface SvcParamEntry {
+  key: number;
+  keyName: string;
+  rawHex: string;
+  valueText: string;
+  mandatoryKeys?: string[];
+  alpns?: string[];
+  port?: number;
+  ipv4Hints?: string[];
+  ipv6Hints?: string[];
+  echConfigListBase64?: string;
+  echConfigs?: EchConfigEntry[];
+  dohPath?: string;
+}
+
+export interface SvcbRdata {
+  kind: 'SVCB';
+  rrtypeName: 'SVCB' | 'HTTPS';
+  priority: number;
+  isAliasMode: boolean;
+  target: string;
+  params: SvcParamEntry[];
+}
+
+export interface SshfpRdata {
+  kind: 'SSHFP';
+  algorithm: number;
+  algorithmName: string;
+  fpType: number;
+  fpTypeName: string;
+  fingerprintHex: string;
+}
+
 export interface GenericRdata {
   kind: 'GENERIC';
   target?: string;
@@ -181,6 +234,8 @@ export type ParsedRdata =
   | TxtRdata
   | TlsaRdata
   | CsyncRdata
+  | SvcbRdata
+  | SshfpRdata
   | GenericRdata;
 
 export interface DnsRecord {
@@ -869,6 +924,123 @@ export interface ReverseDnsAnalysis {
   bgp?: ReverseIpBgpInfo;
 }
 
+export interface WebSvcbRecordDetail {
+  ownerName: string;
+  rrtypeName: 'HTTPS' | 'SVCB';
+  ttl: number;
+  priority: number;
+  isAliasMode: boolean;
+  target: string;
+  params: SvcParamEntry[];
+  alpns: string[];
+  hasH3: boolean;
+  hasH2: boolean;
+  noDefaultAlpn: boolean;
+  port?: number;
+  ipv4Hints: string[];
+  ipv6Hints: string[];
+  ipv4HintsMatched: string[];
+  ipv4HintsDrifted: string[];
+  ipv6HintsMatched: string[];
+  ipv6HintsDrifted: string[];
+  echConfigs: EchConfigEntry[];
+  issues: string[];
+}
+
+export interface CaaRecordEntry {
+  ownerName: string;
+  flags: number;
+  critical: boolean;
+  tag: string;
+  rawValue: string;
+  caDomain?: string;
+  parameters: { key: string; value: string }[];
+  recognizedTag: boolean;
+  valid: boolean;
+  issues: string[];
+}
+
+export interface CaaTreeHop {
+  name: string;
+  displayName: string;
+  depth: number;
+  dnssecStatus: ValidationStatus;
+  rrsetId?: string;
+  negativeNodeId?: string;
+  records: CaaRecordEntry[];
+  isEffectivePolicySource: boolean;
+}
+
+export interface WebCaaAnalysis {
+  status: 'enforced' | 'inherited' | 'permissive' | 'unprotected' | 'invalid';
+  effectiveOwner?: string;
+  dnssecStatus: ValidationStatus;
+  hops: CaaTreeHop[];
+  issueCas: string[];
+  issuewildCas: string[];
+  iodefUris: string[];
+  hasAcmeAccountBinding: boolean;
+  hasCriticalUnknownTag: boolean;
+  issues: string[];
+  summary: string;
+}
+
+export interface SshfpRecordDetail {
+  ownerName: string;
+  ttl: number;
+  algorithm: number;
+  algorithmName: string;
+  fpType: number;
+  fpTypeName: string;
+  fingerprintHex: string;
+  deprecated: boolean;
+  valid: boolean;
+  issues: string[];
+}
+
+export interface WebAnalysisResult {
+  targetDomain: string;
+  displayDomain: string;
+  cnameChain: string[];
+  ipv4Addresses: string[];
+  ipv6Addresses: string[];
+  addressDnssecStatus: ValidationStatus;
+  httpsStatus: 'ech-enabled' | 'valid' | 'alias-mode' | 'warning' | 'not-deployed' | 'bogus';
+  httpsDnssecStatus: ValidationStatus;
+  httpsRrsetId?: string;
+  httpsNegativeNodeId?: string;
+  httpsRecords: WebSvcbRecordDetail[];
+  svcbRecords: WebSvcbRecordDetail[];
+  supportsHttp3: boolean;
+  supportsHttp2: boolean;
+  echEnabled: boolean;
+  echPublicNames: string[];
+  ipHintStatus: 'matched' | 'drift-detected' | 'not-used';
+  httpsSummary: string;
+  caa: WebCaaAnalysis;
+  webDane: {
+    qname: string;
+    resolvedOwner: string;
+    cnameChain: string[];
+    status: DaneHostStatus;
+    dnssecStatus: ValidationStatus;
+    rrsetId?: string;
+    negativeNodeId?: string;
+    records: TlsaRecordDetail[];
+    rolloverReady: boolean;
+    summary: string;
+  };
+  sshfp: {
+    present: boolean;
+    status: 'secure' | 'insecure-ignored' | 'warning' | 'bogus' | 'not-deployed';
+    dnssecStatus: ValidationStatus;
+    rrsetId?: string;
+    negativeNodeId?: string;
+    records: SshfpRecordDetail[];
+    summary: string;
+  };
+}
+
 export interface AnalysisSnapshot {
   id: string;
   version: number;
@@ -892,6 +1064,7 @@ export interface AnalysisSnapshot {
   queries: DohQueryLog[];
   trustAnchorsUsed: TrustAnchor[];
   mailAnalysis?: MailAnalysisResult;
+  webAnalysis?: WebAnalysisResult;
   reverseDns?: ReverseDnsAnalysis;
   pinned?: boolean;
   note?: string;
@@ -909,7 +1082,10 @@ export interface AnalysisProgress {
     | 'mail-spf'
     | 'mail-dmarc'
     | 'mail-dkim'
-    | 'mail-transport';
+    | 'mail-transport'
+    | 'web-https'
+    | 'web-caa'
+    | 'web-dane';
   message: string;
   completedQueries: number;
 }

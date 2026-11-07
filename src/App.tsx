@@ -28,13 +28,15 @@ import { MailAnalysisView } from './components/MailAnalysisView';
 import { ResponsesPanel } from './components/ResponsesPanel';
 import { ReverseDnsCard } from './components/ReverseDnsCard';
 import { SettingsModal } from './components/SettingsModal';
-import { STATUS_META, StatusBadge } from './components/StatusBadge';
+import { StatusBadge, STATUS_META } from './components/StatusBadge';
+import { WebAnalysisView } from './components/WebAnalysisView';
 import { ZonesPanel } from './components/ZonesPanel';
 import { reverifySnapshot, runDnsvizAnalysis, SNAPSHOT_ENGINE_VERSION } from './dns/analyzer';
 import { ANALYSIS_MODES, formatDohShortLabel, QUERYABLE_RR_TYPES } from './dns/constants';
 import { parseReverseIpInput } from './dns/ipUtils';
 import { parseDkimSelectorInput, runMailAnalysis } from './dns/mailAnalyzer';
 import type { AnalysisMode, AnalysisProgress, AnalysisSnapshot } from './dns/types';
+import { runWebAnalysis } from './dns/webAnalyzer';
 import { usePwaInstall } from './pwa/usePwaInstall';
 import {
   clearUnpinnedSnapshots,
@@ -75,6 +77,12 @@ const FOOTER_EXAMPLE_TRACES: ReadonlyArray<{
     mode: 'mail',
     types: ['MX', 'TXT'],
     label: 'ietf.org (MX + DANE + SPF + DKIM + DMARC)',
+  },
+  {
+    domain: 'cloudflare.com',
+    mode: 'web',
+    types: ['A', 'AAAA', 'HTTPS', 'CAA'],
+    label: 'cloudflare.com (HTTPS + ECH + CAA)',
   },
   { domain: '9.9.9.9', types: ['PTR'], label: '9.9.9.9 (rDNS PTR + FCrDNS + BGP ASN)' },
   { domain: 'cloudflare.com', types: ['A', 'AAAA'], label: 'cloudflare.com (ECDSA)' },
@@ -119,7 +127,8 @@ export function App() {
           latestSnap.displayDomain.toLowerCase() === initialIpParsed.displayArpa.toLowerCase()) ||
         (deepLink.name === '.' && latestSnap.displayDomain === '.'));
 
-    const defaultTab: ActiveTab = initialMode === 'mail' ? 'mail' : 'graph';
+    const defaultTab: ActiveTab =
+      initialMode === 'mail' ? 'mail' : initialMode === 'web' ? 'web' : 'graph';
 
     return {
       settings: effectiveSettings,
@@ -187,7 +196,9 @@ export function App() {
       const modeLabel =
         activeSnapshot.mode === 'mail'
           ? 'Mail · DANE · SPF · DKIM · DMARC'
-          : 'DNSSEC Visualizer';
+          : activeSnapshot.mode === 'web'
+            ? 'Web · HTTPS/SVCB · ECH · CAA · DANE'
+            : 'DNSSEC Visualizer';
       document.title = `${activeSnapshot.displayDomain} (${verdict}) — DigDeep ${modeLabel}`;
     } else {
       document.title = DEFAULT_PAGE_TITLE;
@@ -260,11 +271,18 @@ export function App() {
       setLoading(true);
       setError(null);
       setProgress({
-        phase: modeToRun === 'mail' ? 'mail-mx' : 'zone-cuts',
+        phase:
+          modeToRun === 'mail'
+            ? 'mail-mx'
+            : modeToRun === 'web'
+              ? 'web-https'
+              : 'zone-cuts',
         message:
           modeToRun === 'mail'
             ? `Starting ${formatDohShortLabel(endpointToUse)} Mail, DANE, SPF, DKIM & DMARC analysis for ${cleanDomain}…`
-            : `Starting ${formatDohShortLabel(endpointToUse)} DoH trace for ${cleanDomain}…`,
+            : modeToRun === 'web'
+              ? `Starting ${formatDohShortLabel(endpointToUse)} Web, HTTPS/SVCB, ECH, CAA & DANE analysis for ${cleanDomain}…`
+              : `Starting ${formatDohShortLabel(endpointToUse)} DoH trace for ${cleanDomain}…`,
         completedQueries: 0,
       });
 
@@ -277,12 +295,18 @@ export function App() {
                 trustAnchors: settings.trustAnchors,
                 onProgress: (p) => setProgress(p),
               })
-            : await runDnsvizAnalysis(cleanDomain, {
-                endpoint: endpointToUse,
-                queryTypes: cleanTypes,
-                trustAnchors: settings.trustAnchors,
-                onProgress: (p) => setProgress(p),
-              });
+            : modeToRun === 'web'
+              ? await runWebAnalysis(cleanDomain, {
+                  endpoint: endpointToUse,
+                  trustAnchors: settings.trustAnchors,
+                  onProgress: (p) => setProgress(p),
+                })
+              : await runDnsvizAnalysis(cleanDomain, {
+                  endpoint: endpointToUse,
+                  queryTypes: cleanTypes,
+                  trustAnchors: settings.trustAnchors,
+                  onProgress: (p) => setProgress(p),
+                });
 
         const updatedList = saveSnapshot(snap);
         setSnapshots(updatedList);
@@ -294,7 +318,12 @@ export function App() {
             nextTab = 'mail';
             setActiveTab('mail');
           }
-        } else if (activeTab === 'history' || activeTab === 'mail') {
+        } else if (modeToRun === 'web') {
+          if (activeTab === 'history' || (activeSnapshot?.mode ?? 'dnssec') !== 'web') {
+            nextTab = 'web';
+            setActiveTab('web');
+          }
+        } else if (activeTab === 'history' || activeTab === 'mail' || activeTab === 'web') {
           nextTab = 'graph';
           setActiveTab('graph');
         }
@@ -382,7 +411,7 @@ export function App() {
       setAnalysisMode(nextMode);
       setCustomDkimSelectors(nextDkimSels);
       if (parsed.tab) setActiveTab(parsed.tab);
-      else setActiveTab(nextMode === 'mail' ? 'mail' : 'graph');
+      else setActiveTab(nextMode === 'mail' ? 'mail' : nextMode === 'web' ? 'web' : 'graph');
 
       setFocusedGraphTarget(parsed.focus);
 
@@ -396,7 +425,13 @@ export function App() {
       }
 
       if (!parsed.name) return;
-      const targetTypes = parsed.types ?? (nextMode === 'mail' ? ['MX', 'TXT'] : ['A', 'AAAA']);
+      const targetTypes =
+        parsed.types ??
+        (nextMode === 'mail'
+          ? ['MX', 'TXT']
+          : nextMode === 'web'
+            ? ['A', 'AAAA', 'HTTPS', 'SVCB', 'CAA', 'TLSA', 'SSHFP']
+            : ['A', 'AAAA']);
       const targetDoh = parsed.dohEndpoint ?? settings.dohEndpoint;
       setDomainInput(parsed.name);
       if (nextMode === 'dnssec') {
@@ -414,7 +449,9 @@ export function App() {
           s.displayDomain.toLowerCase() === parsed.name!.toLowerCase().replace(/\.$/, '') &&
           (nextMode === 'mail'
             ? (s.customDkimSelectors ?? []).join(',') === nextDkimSels.join(',')
-            : s.queryTypes.join(',') === targetTypes.join(',')) &&
+            : nextMode === 'web'
+              ? true
+              : s.queryTypes.join(',') === targetTypes.join(',')) &&
           s.dohEndpoint === targetDoh
       );
       if (cached) {
@@ -507,7 +544,7 @@ export function App() {
     if (isOffline) {
       if (matchingSaved) {
         setActiveSnapshot(matchingSaved);
-        setActiveTab(nextMode === 'mail' ? 'mail' : 'graph');
+        setActiveTab(nextMode === 'mail' ? 'mail' : nextMode === 'web' ? 'web' : 'graph');
       }
       return;
     }
@@ -724,7 +761,7 @@ export function App() {
             >
               {ANALYSIS_MODES.map((m) => {
                 const active = analysisMode === m.id;
-                const ModeIcon = m.id === 'mail' ? Mail : Network;
+                const ModeIcon = m.id === 'mail' ? Mail : m.id === 'web' ? Globe : Network;
                 return (
                   <button
                     key={m.id}
@@ -793,7 +830,7 @@ export function App() {
                   {showExtraTypes ? 'Less' : 'More'}
                 </button>
               </div>
-            ) : (
+            ) : analysisMode === 'mail' ? (
               <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
                 <span className="font-medium">Checks:</span>
                 <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
@@ -813,6 +850,25 @@ export function App() {
                 </span>
                 <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   WebCrypto DNSSEC
+                </span>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                <span className="font-medium">Checks:</span>
+                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                  HTTPS / SVCB (RFC 9460)
+                </span>
+                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                  TLS ECHConfigList
+                </span>
+                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                  ipv4hint / ipv6hint Drift
+                </span>
+                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                  Tree-Walking CAA (RFC 8659/8657)
+                </span>
+                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                  _443._tcp DANE &amp; SSHFP
                 </span>
               </div>
             )}
@@ -920,6 +976,10 @@ export function App() {
                       <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 px-2 py-0.5 font-mono text-[11px] font-semibold">
                         MAIL · MX · DANE · SPF · DKIM · DMARC
                       </span>
+                    ) : activeSnapshot.mode === 'web' ? (
+                      <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 px-2 py-0.5 font-mono text-[11px] font-semibold">
+                        WEB · HTTPS/SVCB · ECH · CAA · DANE
+                      </span>
                     ) : (
                       <span className="font-mono text-xs text-slate-500">
                         [{activeSnapshot.queryTypes.join(', ')}]
@@ -1023,6 +1083,15 @@ export function App() {
                         },
                       ]
                     : []),
+                  ...(activeSnapshot.mode === 'web'
+                    ? [
+                        {
+                          id: 'web' as const,
+                          label: 'Web, HTTPS/SVCB, ECH, CAA & DANE',
+                          icon: Globe,
+                        },
+                      ]
+                    : []),
                   { id: 'graph' as const, label: 'DNSSEC Chain Graph', icon: Network },
                   {
                     id: 'audit' as const,
@@ -1107,8 +1176,21 @@ export function App() {
               />
             )}
 
+            {activeTab === 'web' && activeSnapshot.mode === 'web' && (
+              <WebAnalysisView
+                key={activeSnapshot.id}
+                snapshot={activeSnapshot}
+                onJumpToGraphTarget={(targetId) => {
+                  setFocusedGraphTarget(targetId);
+                  setActiveTab('graph');
+                }}
+                onOpenChainGraph={() => setActiveTab('graph')}
+              />
+            )}
+
             {(activeTab === 'graph' ||
-              (activeTab === 'mail' && activeSnapshot.mode !== 'mail')) && (
+              (activeTab === 'mail' && activeSnapshot.mode !== 'mail') ||
+              (activeTab === 'web' && activeSnapshot.mode !== 'web')) && (
               <ChainGraphView
                 snapshot={activeSnapshot}
                 theme={theme}
@@ -1156,7 +1238,9 @@ export function App() {
                   if (snapMode === 'dnssec') {
                     setSelectedTypes(snap.queryTypes);
                   }
-                  setActiveTab(snapMode === 'mail' ? 'mail' : 'graph');
+                  setActiveTab(
+                    snapMode === 'mail' ? 'mail' : snapMode === 'web' ? 'web' : 'graph'
+                  );
                 }}
                 onReprobe={(dom, types, mode) => {
                   const nextMode: AnalysisMode = mode ?? 'dnssec';
@@ -1206,7 +1290,9 @@ export function App() {
               setFocusedGraphTarget(null);
               setAnalysisMode(snapMode);
               setActiveSnapshot(snap);
-              setActiveTab(snapMode === 'mail' ? 'mail' : 'graph');
+              setActiveTab(
+                snapMode === 'mail' ? 'mail' : snapMode === 'web' ? 'web' : 'graph'
+              );
             }}
             onReprobe={(dom, types, mode) => {
               const nextMode: AnalysisMode = mode ?? 'dnssec';
@@ -1243,7 +1329,9 @@ export function App() {
               const href =
                 exMode === 'mail'
                   ? `?name=${encodeURIComponent(ex.domain)}&mode=mail`
-                  : `?name=${encodeURIComponent(ex.domain)}&types=${ex.types.join(',')}`;
+                  : exMode === 'web'
+                    ? `?name=${encodeURIComponent(ex.domain)}&mode=web`
+                    : `?name=${encodeURIComponent(ex.domain)}&types=${ex.types.join(',')}`;
               return (
                 <a
                   key={`${ex.domain}-${exMode}`}

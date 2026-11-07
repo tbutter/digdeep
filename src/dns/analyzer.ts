@@ -35,6 +35,7 @@ import {
   type ParsedReverseIpTarget,
 } from './ipUtils';
 import { evaluateMailFromSnapshotData } from './mailAnalyzer';
+import { evaluateWebFromSnapshotData } from './webAnalyzer';
 import type {
   AnalysisMode,
   AnalysisProgress,
@@ -878,7 +879,8 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     const isTarget =
       log.purpose.startsWith('Target RRset') ||
       log.purpose.startsWith('CNAME target') ||
-      log.purpose.startsWith('Mail target');
+      log.purpose.startsWith('Mail target') ||
+      log.purpose.startsWith('Web target');
     addSectionRecords(log.packet.answers, 'answer', isTarget);
     addSectionRecords(log.packet.authorities, 'authority', false);
   }
@@ -2033,7 +2035,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     qt,
   }));
   for (const log of cdLogs) {
-    if (log.purpose.startsWith('Mail target')) {
+    if (log.purpose.startsWith('Mail target') || log.purpose.startsWith('Web target')) {
       if (!targetProbes.some((p) => p.owner === log.qname && p.qt === log.qtypeName)) {
         targetProbes.push({ owner: log.qname, qt: log.qtypeName });
       }
@@ -2338,26 +2340,27 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     .map((zn) => zonesByName.get(zn))
     .filter((z): z is ZoneAnalysis => Boolean(z));
 
+  const isSpecializedMode = mode === 'mail' || mode === 'web';
   const targetLeafZones = zones.filter((z) => {
     const isTargetAnc = isSubdomainOrEqual(targetName, z.zoneName);
     const isCnameTargetAnc =
-      mode !== 'mail' && cnameEdges.some((ce) => isSubdomainOrEqual(ce.toName, z.zoneName));
+      !isSpecializedMode && cnameEdges.some((ce) => isSubdomainOrEqual(ce.toName, z.zoneName));
     return isTargetAnc || isCnameTargetAnc;
   });
 
   // Check target RRset / negativeNode statuses specifically
   const targetElementStatuses: ValidationStatus[] = [];
   for (const z of zones) {
-    if (mode === 'mail' && !isSubdomainOrEqual(targetName, z.zoneName)) {
+    if (isSpecializedMode && !isSubdomainOrEqual(targetName, z.zoneName)) {
       continue;
     }
     for (const r of z.rrsets) {
-      if (r.isQueryTarget && (mode !== 'mail' || r.name === targetName)) {
+      if (r.isQueryTarget && (!isSpecializedMode || r.name === targetName)) {
         targetElementStatuses.push(r.status);
       }
     }
     for (const n of z.negativeNodes) {
-      if (mode !== 'mail' || n.qname === targetName) {
+      if (!isSpecializedMode || n.qname === targetName) {
         targetElementStatuses.push(n.status);
       }
     }
@@ -2424,8 +2427,24 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     overallSummary = mailResult.overallSummary;
   }
 
+  let webAnalysis: AnalysisSnapshot['webAnalysis'];
+  if (mode === 'web') {
+    const webResult = evaluateWebFromSnapshotData({
+      targetName,
+      queries,
+      zones,
+      cnameEdges,
+      targetDomainStatus: overallStatus,
+    });
+    webAnalysis = webResult.webAnalysis;
+    findings.push(...webResult.webFindings);
+    overallStatus = webResult.overallStatus;
+    overallSummary = webResult.overallSummary;
+  }
+
   let reverseDns: ReverseDnsAnalysis | undefined;
-  const reverseIpTarget = mode !== 'mail' ? parseReverseIpInput(queriedIp ?? targetName) : null;
+  const reverseIpTarget =
+    mode !== 'mail' && mode !== 'web' ? parseReverseIpInput(queriedIp ?? targetName) : null;
   if (reverseIpTarget) {
     const rdnsEval = evaluateReverseDnsFromSnapshotData({
       reverseIpTarget,
@@ -2475,6 +2494,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     queries,
     trustAnchorsUsed: trustAnchors,
     ...(mailAnalysis ? { mailAnalysis } : {}),
+    ...(webAnalysis ? { webAnalysis } : {}),
     ...(reverseDns ? { reverseDns } : {}),
   };
 }

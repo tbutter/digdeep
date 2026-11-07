@@ -216,7 +216,7 @@ export const TLSA_MATCHING_TYPES: Record<
  * Extensible Analysis Mode Registry
  */
 export interface AnalysisModeDescriptor {
-  id: 'dnssec' | 'mail';
+  id: 'dnssec' | 'mail' | 'web';
   label: string;
   shortLabel: string;
   actionLabel: string;
@@ -239,7 +239,68 @@ export const ANALYSIS_MODES: readonly AnalysisModeDescriptor[] = [
     description:
       'MX routing, SMTP DANE (_25._tcp TLSA), SPF (10-lookup tree), DKIM keys (_domainkey), and DMARC (_dmarc) with WebCrypto DNSSEC',
   },
+  {
+    id: 'web',
+    label: 'Web · HTTPS/SVCB, ECH, CAA & DANE',
+    shortLabel: 'Web (HTTPS · ECH · CAA · DANE · SSHFP)',
+    actionLabel: 'Analyze Web & TLS DNS',
+    description:
+      'HTTPS/SVCB (RFC 9460 ALPN, IP hints, TLS ECH), tree-walking CAA (RFC 8659/8657), Web DANE (_443._tcp TLSA), and SSHFP with WebCrypto DNSSEC',
+  },
 ] as const;
+
+export const SVC_PARAM_KEY_NAMES: Record<number, string> = {
+  0: 'mandatory',
+  1: 'alpn',
+  2: 'no-default-alpn',
+  3: 'port',
+  4: 'ipv4hint',
+  5: 'ech',
+  6: 'ipv6hint',
+  7: 'dohpath',
+  8: 'ohttp',
+};
+
+export function svcParamKeyToString(key: number): string {
+  return SVC_PARAM_KEY_NAMES[key] ?? `key${key}`;
+}
+
+export const HPKE_KEM_IDS: Record<number, string> = {
+  0x0010: 'DHKEM(P-256, HKDF-SHA256)',
+  0x0011: 'DHKEM(P-384, HKDF-SHA384)',
+  0x0012: 'DHKEM(P-521, HKDF-SHA512)',
+  0x0020: 'DHKEM(X25519, HKDF-SHA256)',
+  0x0021: 'DHKEM(X448, HKDF-SHA512)',
+};
+
+export const HPKE_KDF_IDS: Record<number, string> = {
+  0x0001: 'HKDF-SHA256',
+  0x0002: 'HKDF-SHA384',
+  0x0003: 'HKDF-SHA512',
+};
+
+export const HPKE_AEAD_IDS: Record<number, string> = {
+  0x0001: 'AES-128-GCM',
+  0x0002: 'AES-256-GCM',
+  0x0003: 'ChaCha20Poly1305',
+  0xffff: 'Export-Only',
+};
+
+export const SSHFP_ALGORITHMS: Record<number, { name: string; deprecated?: boolean }> = {
+  1: { name: 'RSA' },
+  2: { name: 'DSA', deprecated: true },
+  3: { name: 'ECDSA' },
+  4: { name: 'Ed25519' },
+  6: { name: 'Ed448' },
+};
+
+export const SSHFP_FP_TYPES: Record<
+  number,
+  { name: string; expectedHexLength: number; deprecated?: boolean }
+> = {
+  1: { name: 'SHA-1', expectedHexLength: 40, deprecated: true },
+  2: { name: 'SHA-256', expectedHexLength: 64 },
+};
 
 /**
  * RFC 8914 Extended DNS Error Codes (EDNS0 Option 15)

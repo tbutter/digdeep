@@ -5,10 +5,18 @@ import {
 } from './dns/constants';
 import type { AnalysisMode } from './dns/types';
 
-export type ActiveTab = 'mail' | 'graph' | 'audit' | 'responses' | 'zones' | 'history';
+export type ActiveTab = 'mail' | 'web' | 'graph' | 'audit' | 'responses' | 'zones' | 'history';
 
-const VALID_TABS: readonly ActiveTab[] = ['mail', 'graph', 'audit', 'responses', 'zones', 'history'];
-const VALID_MODES: readonly AnalysisMode[] = ['dnssec', 'mail'];
+const VALID_TABS: readonly ActiveTab[] = [
+  'mail',
+  'web',
+  'graph',
+  'audit',
+  'responses',
+  'zones',
+  'history',
+];
+const VALID_MODES: readonly AnalysisMode[] = ['dnssec', 'mail', 'web'];
 
 export interface DeepLinkState {
   name: string;
@@ -186,6 +194,8 @@ export function parseDeepLinkParams(
 
   if (mode === null && tab === 'mail') {
     mode = 'mail';
+  } else if (mode === null && tab === 'web') {
+    mode = 'web';
   }
 
   const rawFocus = params.get('focus');
@@ -246,6 +256,8 @@ export function buildDeepLinkSearch(
     if (cleanSels.length > 0) {
       params.set('dkim', Array.from(new Set(cleanSels)).join(','));
     }
+  } else if (mode === 'web') {
+    params.set('mode', 'web');
   } else {
     params.set('types', cleanTypes.join(','));
   }
@@ -254,7 +266,7 @@ export function buildDeepLinkSearch(
     params.set('doh', formatDohParam(state.dohEndpoint));
   }
 
-  const defaultTab: ActiveTab = mode === 'mail' ? 'mail' : 'graph';
+  const defaultTab: ActiveTab = mode === 'mail' ? 'mail' : mode === 'web' ? 'web' : 'graph';
   // History is stored in browser localStorage, so shared links open on the primary tab instead
   const effectiveTab: ActiveTab =
     options?.forShare && state.tab === 'history' ? defaultTab : state.tab;

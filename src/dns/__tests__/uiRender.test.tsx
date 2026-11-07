@@ -8,6 +8,7 @@ import { MailAnalysisView } from '../../components/MailAnalysisView';
 import { ResponsesPanel } from '../../components/ResponsesPanel';
 import { ReverseDnsCard } from '../../components/ReverseDnsCard';
 import { SettingsModal } from '../../components/SettingsModal';
+import { WebAnalysisView } from '../../components/WebAnalysisView';
 import { ZonesPanel } from '../../components/ZonesPanel';
 import { buildChainGraph } from '../../graph/layout';
 import { DEFAULT_USER_SETTINGS, saveSnapshot } from '../../storage/historyStore';
@@ -18,6 +19,7 @@ import {
 } from '../../urlState';
 import { runDnsvizAnalysis } from '../analyzer';
 import { runMailAnalysis } from '../mailAnalyzer';
+import { runWebAnalysis } from '../webAnalyzer';
 
 // Minimal localStorage shim for HistoryPanel stats
 const mem = new Map<string, string>();
@@ -300,6 +302,20 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(parsedMail.mode).toBe('mail');
     expect(parsedMail.tab).toBe('graph');
 
+    // Web mode deep links round-trip cleanly
+    const webBarDefault = buildDeepLinkSearch({
+      name: 'cloudflare.com',
+      mode: 'web',
+      types: ['A', 'AAAA', 'HTTPS', 'CAA'],
+      dohEndpoint: 'https://1.1.1.1/dns-query',
+      tab: 'web',
+    });
+    expect(webBarDefault).toBe('?name=cloudflare.com&mode=web');
+
+    const parsedWeb = parseDeepLinkParams('?name=cloudflare.com&tab=web');
+    expect(parsedWeb.mode).toBe('web');
+    expect(parsedWeb.tab).toBe('web');
+
     // Custom DKIM selectors imply mail mode and round-trip in share URLs
     const parsedDkim = parseDeepLinkParams('?name=ietf.org&dkim=ietf1,mail');
     expect(parsedDkim.mode).toBe('mail');
@@ -498,6 +514,23 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(rdnsHtml).toContain('FCrDNS VERIFIED ✓');
       expect(rdnsHtml).toContain('AS13335');
       expect(rdnsHtml).toContain('1.1.1.0/24');
+
+      const webSnap = await runWebAnalysis('cloudflare.com');
+      expect(webSnap.mode).toBe('web');
+      expect(webSnap.webAnalysis).toBeDefined();
+      const webHtml = renderToStaticMarkup(
+        <WebAnalysisView
+          snapshot={webSnap}
+          onJumpToGraphTarget={() => {}}
+          onOpenChainGraph={() => {}}
+        />
+      );
+      expect(webHtml).toContain('HTTPS / SVCB &amp; ECH');
+      expect(webHtml).toContain('CAA Policy (RFC 8659)');
+      expect(webHtml).toContain('Web DANE (_443._tcp)');
+      expect(webHtml).toContain('SSHFP (RFC 4255)');
+      expect(webHtml).toContain('HTTPS Priority 1');
+      expect(webHtml).toContain('h3');
     },
     25000
   );
