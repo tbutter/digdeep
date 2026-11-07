@@ -68,7 +68,7 @@ import type {
   ZoneAnalysis,
 } from './types';
 
-export const SNAPSHOT_ENGINE_VERSION = 8;
+export const SNAPSHOT_ENGINE_VERSION = 9;
 
 export interface AnalyzeOptions extends DohClientOptions {
   queryTypes?: string[];

@@ -238,16 +238,27 @@ export function evaluateConsensusFromSnapshotData(params: {
       }
     }
 
+    const hasSinkholeIp = [...ipv4Answers, ...ipv6Answers].some(isSinkholeIpAddress);
+    const hasValidNonSinkholeIp = [...ipv4Answers, ...ipv6Answers].some(
+      (ip) => !isSinkholeIpAddress(ip)
+    );
     const isSinkholed =
-      [...ipv4Answers, ...ipv6Answers].some(isSinkholeIpAddress) ||
-      ede.some((e) => categorizeEdeCode(e.infoCode) === 'policy-blocked');
+      hasSinkholeIp ||
+      ((rcode !== 0 || !hasValidNonSinkholeIp) &&
+        ede.some((e) => categorizeEdeCode(e.infoCode) === 'policy-blocked'));
 
     let classification: ConsensusResolverClassification = 'resolved-insecure';
     if (isSinkholed) {
       classification = 'policy-blocked';
-    } else if (ede.some((e) => categorizeEdeCode(e.infoCode) === 'dnssec-bogus')) {
+    } else if (
+      (rcode !== 0 || !hasValidNonSinkholeIp) &&
+      ede.some((e) => categorizeEdeCode(e.infoCode) === 'dnssec-bogus')
+    ) {
       classification = 'dnssec-bogus';
-    } else if (ede.some((e) => categorizeEdeCode(e.infoCode) === 'upstream-reachability')) {
+    } else if (
+      (rcode !== 0 || !hasValidNonSinkholeIp) &&
+      ede.some((e) => categorizeEdeCode(e.infoCode) === 'upstream-reachability')
+    ) {
       classification = 'upstream-error';
     } else if (rcode === 2) {
       // Distinguish SERVFAIL caused by DNSSEC validation failure vs upstream error
