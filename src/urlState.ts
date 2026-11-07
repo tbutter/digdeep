@@ -14,6 +14,7 @@ export interface DeepLinkState {
   name: string;
   mode?: AnalysisMode;
   types: string[];
+  dkimSelectors?: string[];
   dohEndpoint: string;
   tab: ActiveTab;
   focus?: string | null;
@@ -26,6 +27,7 @@ export interface ParsedDeepLink {
   name: string | null;
   mode: AnalysisMode | null;
   types: string[] | null;
+  dkimSelectors: string[] | null;
   dohEndpoint: string | null;
   isUntrustedCustomDoh: boolean;
   tab: ActiveTab | null;
@@ -152,6 +154,25 @@ export function parseDeepLinkParams(
     }
   }
 
+  const rawDkim = params.get('dkim');
+  let dkimSelectors: string[] | null = null;
+  if (rawDkim) {
+    const parsedSels = Array.from(
+      new Set(
+        rawDkim
+          .split(',')
+          .map((s) => s.trim().toLowerCase())
+          .filter((s) => s.length > 0 && s.length <= 120 && /^[a-z0-9._-]+$/.test(s))
+      )
+    ).slice(0, 12);
+    if (parsedSels.length > 0) {
+      dkimSelectors = parsedSels;
+      if (mode === null) {
+        mode = 'mail';
+      }
+    }
+  }
+
   const { dohEndpoint, isUntrustedCustomDoh } = resolveDohParam(
     params.get('doh'),
     savedCustomEndpoints
@@ -185,6 +206,7 @@ export function parseDeepLinkParams(
     name !== null ||
     mode !== null ||
     types !== null ||
+    dkimSelectors !== null ||
     dohEndpoint !== null ||
     tab !== null ||
     focus !== null ||
@@ -196,6 +218,7 @@ export function parseDeepLinkParams(
     name,
     mode,
     types,
+    dkimSelectors,
     dohEndpoint,
     isUntrustedCustomDoh,
     tab,
@@ -217,6 +240,12 @@ export function buildDeepLinkSearch(
   params.set('name', cleanName);
   if (mode === 'mail') {
     params.set('mode', 'mail');
+    const cleanSels = (state.dkimSelectors ?? [])
+      .map((s) => s.trim().toLowerCase())
+      .filter((s) => s.length > 0 && /^[a-z0-9._-]+$/.test(s));
+    if (cleanSels.length > 0) {
+      params.set('dkim', Array.from(new Set(cleanSels)).join(','));
+    }
   } else {
     params.set('types', cleanTypes.join(','));
   }

@@ -397,7 +397,7 @@ export function HistoryPanel({
                     <StatusBadge status={snap.overallStatus} size="xs" />
                     {snap.mode === 'mail' && (
                       <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 px-1.5 py-0.5 font-mono text-[10px] font-semibold">
-                        MAIL · DANE · SPF
+                        MAIL · DANE · SPF · DKIM · DMARC
                       </span>
                     )}
                     <div className="flex gap-1">

@@ -6,19 +6,25 @@ import {
   ChevronDown,
   ChevronRight,
   FileText,
+  KeyRound,
   Lock,
   Mail,
   Network,
+  Search,
   Server,
+  Shield,
   ShieldAlert,
   ShieldCheck,
   ShieldOff,
 } from 'lucide-react';
-import { useState } from 'react';
+import { type FormEvent, useState } from 'react';
 import { displayFqdn } from '../dns/encoding';
 import type {
   AnalysisSnapshot,
   DaneHostStatus,
+  DkimKeyStatus,
+  DkimSelectorResult,
+  DmarcVerdict,
   MailAnalysisResult,
   MxHostAnalysis,
   SpfDomainNode,
@@ -510,16 +516,232 @@ function MxHostCard({
   );
 }
 
+function getDmarcVerdictMeta(verdict: DmarcVerdict): {
+  label: string;
+  cls: string;
+} {
+  switch (verdict) {
+    case 'reject':
+      return {
+        label: 'REJECT (p=reject)',
+        cls: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30',
+      };
+    case 'quarantine':
+      return {
+        label: 'QUARANTINE (p=quarantine)',
+        cls: 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30',
+      };
+    case 'monitor-only':
+      return {
+        label: 'MONITOR ONLY (p=none)',
+        cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30',
+      };
+    case 'invalid':
+      return {
+        label: 'INVALID SYNTAX',
+        cls: 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/35',
+      };
+    case 'temperror':
+      return {
+        label: 'TEMPERROR',
+        cls: 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/35',
+      };
+    case 'none':
+      return {
+        label: 'NOT PUBLISHED',
+        cls: 'bg-slate-500/15 text-slate-600 dark:text-slate-400 border border-slate-500/30',
+      };
+  }
+}
+
+function getDkimStatusMeta(sel: DkimSelectorResult): {
+  label: string;
+  cls: string;
+} {
+  const keyTag =
+    sel.keyType === 'ed25519'
+      ? 'Ed25519 (256-bit)'
+      : sel.keyBits
+        ? `RSA ${sel.keyBits}-bit`
+        : sel.keyType.toUpperCase();
+
+  switch (sel.status as DkimKeyStatus) {
+    case 'valid':
+      return {
+        label: `${keyTag} · STRONG`,
+        cls: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30',
+      };
+    case 'warning':
+      return {
+        label: `${keyTag} · WARN`,
+        cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30',
+      };
+    case 'revoked':
+      return {
+        label: 'KEY REVOKED (p=)',
+        cls: 'bg-slate-500/15 text-slate-700 dark:text-slate-300 border border-slate-500/30',
+      };
+    case 'weak':
+      return {
+        label: `${keyTag} · WEAK`,
+        cls: 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/35',
+      };
+    case 'invalid':
+      return {
+        label: 'INVALID KEY',
+        cls: 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/35',
+      };
+    case 'missing':
+      return {
+        label: 'NOT FOUND',
+        cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30',
+      };
+  }
+}
+
+function DkimSelectorCard({
+  sel,
+  onJumpToGraphTarget,
+}: {
+  sel: DkimSelectorResult;
+  onJumpToGraphTarget: (targetId: string) => void;
+}) {
+  const statusMeta = getDkimStatusMeta(sel);
+  const graphTargetId = sel.txtRrsetId ?? sel.negativeNodeId;
+
+  return (
+    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-3.5 space-y-2.5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-lg bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 px-2 py-0.5 font-mono text-xs font-bold">
+            s={sel.selector}
+          </span>
+          <span className="font-mono text-xs font-semibold text-slate-800 dark:text-slate-200">
+            {displayFqdn(sel.qname)}
+          </span>
+          <span className="rounded bg-slate-200/80 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] uppercase text-slate-600 dark:text-slate-300">
+            {sel.source === 'custom' ? 'Custom' : 'Auto-discovered'}
+          </span>
+          <span className={`rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold ${statusMeta.cls}`}>
+            {statusMeta.label}
+          </span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <StatusBadge status={sel.dnssecStatus} size="xs" />
+          {graphTargetId && (
+            <button
+              type="button"
+              onClick={() => onJumpToGraphTarget(graphTargetId)}
+              className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-0.5 text-[11px] font-medium text-cyan-600 dark:text-cyan-400 hover:border-cyan-500 cursor-pointer"
+            >
+              <span>Inspect Key Proof in Graph</span>
+              <ArrowUpRight className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {sel.cnameChain.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
+          <span className="font-medium text-slate-500">CNAME Delegation:</span>
+          <span className="font-mono">{displayFqdn(sel.qname)}</span>
+          {sel.cnameChain.map((c) => (
+            <span key={c} className="inline-flex items-center gap-1 font-mono text-cyan-600 dark:text-cyan-400">
+              <ArrowRight className="w-3 h-3 text-slate-400" />
+              {displayFqdn(c)}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {sel.present && (
+        <div className="flex flex-wrap gap-1.5 text-[11px] font-mono">
+          {sel.version && (
+            <span className="rounded bg-slate-200/70 dark:bg-slate-800 px-2 py-0.5 text-slate-700 dark:text-slate-300">
+              v={sel.version}
+            </span>
+          )}
+          <span className="rounded bg-slate-200/70 dark:bg-slate-800 px-2 py-0.5 text-slate-700 dark:text-slate-300">
+            k={sel.keyType}
+          </span>
+          {sel.keyBits !== undefined && (
+            <span className="rounded bg-slate-200/70 dark:bg-slate-800 px-2 py-0.5 text-slate-700 dark:text-slate-300">
+              {sel.keyBits} bits{sel.rsaExponent ? ` (e=${sel.rsaExponent})` : ''}
+            </span>
+          )}
+          {sel.hashAlgorithms && sel.hashAlgorithms.length > 0 && (
+            <span className="rounded bg-slate-200/70 dark:bg-slate-800 px-2 py-0.5 text-slate-700 dark:text-slate-300">
+              h={sel.hashAlgorithms.join(':')}
+            </span>
+          )}
+          {sel.serviceTypes && sel.serviceTypes.length > 0 && (
+            <span className="rounded bg-slate-200/70 dark:bg-slate-800 px-2 py-0.5 text-slate-700 dark:text-slate-300">
+              s={sel.serviceTypes.join(':')}
+            </span>
+          )}
+          {sel.isTestingMode && (
+            <span className="rounded bg-amber-500/20 text-amber-800 dark:text-amber-200 px-2 py-0.5 font-semibold">
+              t=y (Testing Mode)
+            </span>
+          )}
+          {sel.isStrictSubdomain && (
+            <span className="rounded bg-cyan-500/15 text-cyan-800 dark:text-cyan-200 px-2 py-0.5 font-semibold">
+              t=s (Strict Subdomain i=)
+            </span>
+          )}
+          {sel.notesTag && (
+            <span className="rounded bg-slate-200/70 dark:bg-slate-800 px-2 py-0.5 text-slate-600 dark:text-slate-400">
+              n=&quot;{sel.notesTag}&quot;
+            </span>
+          )}
+        </div>
+      )}
+
+      {sel.rawRecord && (
+        <div className="rounded-lg bg-slate-100 dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 px-2.5 py-1.5 font-mono text-[11px] text-slate-700 dark:text-slate-300 break-all">
+          {sel.rawRecord}
+        </div>
+      )}
+
+      {sel.issues.length > 0 && (
+        <div className="space-y-1">
+          {sel.issues.map((iss, idx) => (
+            <div
+              key={`${sel.qname}-iss-${idx}`}
+              className={`text-xs flex items-start gap-1.5 ${
+                sel.status === 'weak' || sel.status === 'invalid'
+                  ? 'text-rose-600 dark:text-rose-400'
+                  : 'text-amber-700 dark:text-amber-300'
+              }`}
+            >
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span>{iss}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function MailAnalysisView({
   snapshot,
   onJumpToGraphTarget,
   onOpenChainGraph,
+  onProbeDkimSelectors,
+  loading = false,
 }: {
   snapshot: AnalysisSnapshot;
   onJumpToGraphTarget: (targetId: string) => void;
   onOpenChainGraph: () => void;
+  onProbeDkimSelectors?: (rawSelectorsInput: string) => void;
+  loading?: boolean;
 }) {
   const mail: MailAnalysisResult | undefined = snapshot.mailAnalysis;
+  const [dkimInput, setDkimInput] = useState(() =>
+    (snapshot.customDkimSelectors ?? []).join(', ')
+  );
 
   if (!mail) {
     return (
@@ -527,8 +749,8 @@ export function MailAnalysisView({
         <Mail className="w-8 h-8 text-slate-400 mx-auto" />
         <div className="font-semibold text-sm">No Mail Analysis Data in Snapshot</div>
         <p className="text-xs text-slate-500">
-          Run an analysis in Mail (MX · DANE · SPF) mode to inspect mail exchangers, TLSA pins, and
-          SPF lookup trees.
+          Run an analysis in Mail mode to inspect MX routing, SMTP DANE TLSA, SPF, DKIM keys, and
+          DMARC policies.
         </p>
       </div>
     );
@@ -539,6 +761,10 @@ export function MailAnalysisView({
     (h) => !h.isNullMx && (h.dane.status === 'dane-valid' || h.dane.status === 'dane-warning')
   ).length;
   const spfVerdictMeta = getSpfVerdictMeta(mail.spf.verdict);
+  const dmarcVerdictMeta = getDmarcVerdictMeta(mail.dmarc.verdict);
+  const activeDkimSelectors = mail.dkim.selectors.filter(
+    (s) => s.present && s.status !== 'revoked'
+  );
   const lookupPct = Math.min(100, Math.round((mail.spf.dnsLookupCount / mail.spf.dnsLookupLimit) * 100));
   const lookupBarColor =
     mail.spf.dnsLookupCount > mail.spf.dnsLookupLimit
@@ -547,10 +773,17 @@ export function MailAnalysisView({
         ? 'bg-amber-500'
         : 'bg-emerald-500';
 
+  const handleDkimSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    if (onProbeDkimSelectors) {
+      onProbeDkimSelectors(dkimInput);
+    }
+  };
+
   return (
     <div className="space-y-5">
-      {/* Top 4-Pillar Mail Security Scorecard */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3.5">
+      {/* Top 6-Pillar Mail Security Scorecard */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
         {/* 1. MX Routing Card */}
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-2">
           <div className="flex items-center justify-between gap-2">
@@ -651,7 +884,60 @@ export function MailAnalysisView({
           </p>
         </div>
 
-        {/* 4. Multi-Zone DNSSEC Chain Card */}
+        {/* 4. DKIM Keys Card */}
+        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-cyan-600 dark:text-cyan-400">
+              <KeyRound className="w-3.5 h-3.5" />
+              DKIM Keys (RFC 6376)
+            </span>
+            {mail.dkim.status === 'verified' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+            ) : mail.dkim.status === 'broken' ? (
+              <ShieldAlert className="w-4 h-4 text-rose-500" />
+            ) : mail.dkim.status === 'warning' ? (
+              <AlertTriangle className="w-4 h-4 text-amber-500" />
+            ) : (
+              <ShieldOff className="w-4 h-4 text-slate-400" />
+            )}
+          </div>
+          <div className="font-bold text-sm text-slate-900 dark:text-slate-100">
+            {activeDkimSelectors.length > 0
+              ? `${activeDkimSelectors.length} Active Selector${activeDkimSelectors.length === 1 ? '' : 's'} Found`
+              : mail.dkim.status === 'broken'
+                ? 'Selector Error / Missing'
+                : 'No Common Selector Matched'}
+          </div>
+          <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+            {mail.dkim.summary}
+          </p>
+        </div>
+
+        {/* 5. DMARC Policy Card */}
+        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-cyan-600 dark:text-cyan-400">
+              <Shield className="w-3.5 h-3.5" />
+              DMARC Policy (RFC 7489)
+            </span>
+            <span
+              className={`rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold ${dmarcVerdictMeta.cls}`}
+            >
+              {dmarcVerdictMeta.label}
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-bold text-sm text-slate-900 dark:text-slate-100 font-mono">
+              {displayFqdn(mail.dmarc.queriedOwner)}
+            </span>
+            <StatusBadge status={mail.dmarc.dnssecStatus} size="xs" />
+          </div>
+          <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+            {mail.dmarc.summary}
+          </p>
+        </div>
+
+        {/* 6. Multi-Zone DNSSEC Chain Card */}
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 flex flex-col justify-between gap-2">
           <div className="space-y-2">
             <div className="flex items-center justify-between gap-2">
@@ -665,8 +951,10 @@ export function MailAnalysisView({
             </div>
             <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
               Verified DS, DNSKEY, RRSIG &amp; NSEC/NSEC3 chains across{' '}
-              <span className="font-mono font-semibold">{snapshot.displayDomain}</span>, MX hosts,
-              and <span className="font-mono">_25._tcp</span> TLSA owners.
+              <span className="font-mono font-semibold">{snapshot.displayDomain}</span>, MX,{' '}
+              <span className="font-mono">_25._tcp</span> TLSA,{' '}
+              <span className="font-mono">_domainkey</span>, and{' '}
+              <span className="font-mono">_dmarc</span>.
             </p>
           </div>
           <button
@@ -805,6 +1093,302 @@ export function MailAnalysisView({
             <SpfTreeBranch node={mail.spf.rootNode} />
           </div>
         )}
+      </section>
+
+      {/* Section 3: DMARC Policy, Identifier Alignment & External Report Verification */}
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              <Shield className="w-4 h-4 text-cyan-500" />
+              <span>DMARC Policy &amp; Alignment (_dmarc · RFC 7489 / RFC 9091)</span>
+            </h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Inspects <code className="font-mono">_dmarc</code> disposition policy, SPF/DKIM From:
+              alignment, organizational fallback, and RFC 7489 §7.1 external{' '}
+              <code className="font-mono">_report._dmarc</code> authorization.
+            </p>
+          </div>
+          {(mail.dmarc.txtRrsetId || mail.dmarc.negativeNodeId) && (
+            <button
+              type="button"
+              onClick={() =>
+                onJumpToGraphTarget((mail.dmarc.txtRrsetId ?? mail.dmarc.negativeNodeId)!)
+              }
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:border-cyan-500 transition-colors cursor-pointer"
+            >
+              <span>
+                {mail.dmarc.txtRrsetId ? 'Locate DMARC RRset in Graph' : 'Locate NSEC Proof in Graph'}
+              </span>
+              <ArrowUpRight className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+
+        {!mail.dmarc.present ? (
+          <div className="rounded-xl border border-amber-500/35 bg-amber-500/5 p-5 space-y-1.5">
+            <div className="font-semibold text-sm text-amber-800 dark:text-amber-200">
+              No DMARC (v=DMARC1) Record Published at {displayFqdn(mail.dmarc.queriedOwner)}
+            </div>
+            <p className="text-xs text-slate-600 dark:text-slate-300">
+              Publish a TXT record at{' '}
+              <code className="font-mono font-semibold">
+                _dmarc.{snapshot.displayDomain}
+              </code>{' '}
+              (e.g.{' '}
+              <code className="font-mono">
+                v=DMARC1; p=quarantine; rua=mailto:dmarc@{snapshot.displayDomain}
+              </code>
+              ) to protect visible <code className="font-mono">From:</code> headers against spoofing.
+            </p>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-mono text-xs font-bold text-slate-900 dark:text-slate-100">
+                  {displayFqdn(mail.dmarc.queriedOwner)}
+                </span>
+                {mail.dmarc.usedOrgFallback && (
+                  <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 px-2 py-0.5 font-mono text-[10px] font-semibold">
+                    ORG DOMAIN FALLBACK (RFC 7489 §6.6.3)
+                  </span>
+                )}
+                <span
+                  className={`rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold ${dmarcVerdictMeta.cls}`}
+                >
+                  {dmarcVerdictMeta.label}
+                </span>
+                <StatusBadge status={mail.dmarc.dnssecStatus} size="xs" />
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono">
+                {mail.dmarc.policy && (
+                  <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-slate-700 dark:text-slate-200">
+                    p={mail.dmarc.policy}
+                  </span>
+                )}
+                <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-slate-700 dark:text-slate-200">
+                  sp={mail.dmarc.subdomainPolicy ?? `${mail.dmarc.policy ?? 'none'} (inherited)`}
+                </span>
+                {mail.dmarc.nonExistentSubdomainPolicy && (
+                  <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-slate-700 dark:text-slate-200">
+                    np={mail.dmarc.nonExistentSubdomainPolicy}
+                  </span>
+                )}
+                <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-slate-700 dark:text-slate-200">
+                  adkim={mail.dmarc.adkim === 's' ? 's (strict)' : 'r (relaxed)'}
+                </span>
+                <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-slate-700 dark:text-slate-200">
+                  aspf={mail.dmarc.aspf === 's' ? 's (strict)' : 'r (relaxed)'}
+                </span>
+                <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-slate-700 dark:text-slate-200">
+                  pct={mail.dmarc.pct}%
+                </span>
+              </div>
+            </div>
+
+            {mail.dmarc.cnameChain.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
+                <span className="font-medium text-slate-500">CNAME Delegation:</span>
+                <span className="font-mono">{displayFqdn(mail.dmarc.queriedOwner)}</span>
+                {mail.dmarc.cnameChain.map((c) => (
+                  <span
+                    key={c}
+                    className="inline-flex items-center gap-1 font-mono text-cyan-600 dark:text-cyan-400"
+                  >
+                    <ArrowRight className="w-3 h-3 text-slate-400" />
+                    {displayFqdn(c)}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {mail.dmarc.rawRecord && (
+              <div className="rounded-lg bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 px-3 py-2 font-mono text-xs text-slate-800 dark:text-slate-200 break-all">
+                {mail.dmarc.rawRecord}
+              </div>
+            )}
+
+            {mail.dmarc.tags.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {mail.dmarc.tags.map((t, idx) => (
+                  <span
+                    key={`dmarc-tag-${idx}-${t.tag}`}
+                    title={t.note}
+                    className={`rounded-md border px-2 py-0.5 font-mono text-xs ${
+                      !t.valid
+                        ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/40'
+                        : !t.known
+                          ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/30'
+                          : 'bg-slate-100 dark:bg-slate-800/80 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700'
+                    }`}
+                  >
+                    {t.tag}={t.value}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {(mail.dmarc.rua.length > 0 || mail.dmarc.ruf.length > 0) && (
+              <div className="space-y-2 pt-1 border-t border-slate-200/80 dark:border-slate-800">
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                  DMARC Reporting Destinations &amp; RFC 7489 §7.1 Authorization
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {[
+                    ...mail.dmarc.rua.map((u) => ({ kind: 'rua (Aggregate)', u })),
+                    ...mail.dmarc.ruf.map((u) => ({ kind: 'ruf (Forensic)', u })),
+                  ].map(({ kind, u }, idx) => (
+                    <div
+                      key={`dmarc-uri-${idx}-${u.raw}`}
+                      className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-2.5 space-y-1 text-xs"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-1.5">
+                        <span className="font-mono text-[10px] uppercase font-semibold text-slate-500">
+                          {kind}
+                        </span>
+                        {!u.syntaxValid ? (
+                          <span className="rounded bg-rose-500/15 text-rose-700 dark:text-rose-300 px-1.5 py-0.5 font-mono text-[10px] font-semibold">
+                            INVALID URI
+                          </span>
+                        ) : !u.isExternalDomain ? (
+                          <span className="rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 px-1.5 py-0.5 font-mono text-[10px] font-semibold">
+                            SAME ORG DOMAIN
+                          </span>
+                        ) : u.externalAuthorized === 'authorized' ? (
+                          <span
+                            className="rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 px-1.5 py-0.5 font-mono text-[10px] font-semibold"
+                            title={
+                              u.externalVerifyQname
+                                ? `Verified ${displayFqdn(u.externalVerifyQname)} TXT = v=DMARC1`
+                                : undefined
+                            }
+                          >
+                            EXTERNAL AUTHORIZED (v=DMARC1)
+                          </span>
+                        ) : u.externalAuthorized === 'unauthorized' ? (
+                          <span
+                            className="rounded bg-rose-500/15 text-rose-700 dark:text-rose-300 px-1.5 py-0.5 font-mono text-[10px] font-semibold"
+                            title={
+                              u.externalVerifyQname
+                                ? `Missing ${displayFqdn(u.externalVerifyQname)} TXT v=DMARC1`
+                                : undefined
+                            }
+                          >
+                            MISSING _report._dmarc
+                          </span>
+                        ) : (
+                          <span className="rounded bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400 px-1.5 py-0.5 font-mono text-[10px]">
+                            EXTERNAL
+                          </span>
+                        )}
+                      </div>
+                      <div className="font-mono text-slate-800 dark:text-slate-200 break-all">
+                        {u.uri}
+                        {u.maxSizeSpec && (
+                          <span className="ml-1.5 rounded bg-slate-200/80 dark:bg-slate-800 px-1 py-0.2 text-[10px] text-slate-600 dark:text-slate-300">
+                            max {u.maxSizeSpec}
+                          </span>
+                        )}
+                      </div>
+                      {u.isExternalDomain && u.externalVerifyQname && (
+                        <div className="font-mono text-[10px] text-slate-500 break-all">
+                          Auth record: {displayFqdn(u.externalVerifyQname)} TXT
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {mail.dmarc.issues.length > 0 && (
+              <div className="space-y-1">
+                {mail.dmarc.issues.map((iss, i) => (
+                  <div
+                    key={`dmarc-iss-${i}`}
+                    className="text-xs text-rose-600 dark:text-rose-400 flex items-start gap-1.5"
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                    <span>{iss}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
+      {/* Section 4: DKIM Public Keys & Custom Selector / Header Inspector */}
+      <section className="space-y-3">
+        <div>
+          <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+            <KeyRound className="w-4 h-4 text-cyan-500" />
+            <span>DKIM Public Keys (_domainkey · RFC 6376 / RFC 8301 / RFC 8463)</span>
+          </h2>
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            Automatically probes common &amp; provider-hinted selectors, decodes RSA/Ed25519 key
+            sizes, and lets you inspect custom selectors or a pasted{' '}
+            <code className="font-mono">DKIM-Signature:</code> email header.
+          </p>
+        </div>
+
+        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-3.5">
+          {onProbeDkimSelectors && (
+            <form onSubmit={handleDkimSubmit} className="flex flex-col sm:flex-row gap-2">
+              <div className="relative flex-1">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={dkimInput}
+                  onChange={(e) => setDkimInput(e.target.value)}
+                  placeholder="Enter DKIM selector(s) (e.g. selector1, google, ietf1) or paste a DKIM-Signature: header…"
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 pl-9 pr-3 py-2 font-mono text-xs text-slate-900 dark:text-slate-100 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={loading}
+                className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-60 px-3.5 py-2 text-xs font-semibold text-slate-950 transition-colors cursor-pointer shrink-0"
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                <span>Probe DKIM Selector(s)</span>
+              </button>
+            </form>
+          )}
+
+          {mail.dkim.probedSelectors.length > 0 && (
+            <div className="text-[11px] text-slate-500 dark:text-slate-400">
+              Probed {mail.dkim.probedSelectors.length} selector
+              {mail.dkim.probedSelectors.length === 1 ? '' : 's'} under{' '}
+              <span className="font-mono">_domainkey.{snapshot.displayDomain}</span>:{' '}
+              <span className="font-mono text-slate-600 dark:text-slate-300">
+                {mail.dkim.probedSelectors.join(', ')}
+              </span>
+            </div>
+          )}
+
+          {mail.dkim.selectors.length > 0 ? (
+            <div className="space-y-2.5">
+              {mail.dkim.selectors.map((sel) => (
+                <DkimSelectorCard
+                  key={sel.qname}
+                  sel={sel}
+                  onJumpToGraphTarget={onJumpToGraphTarget}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 p-4 text-xs text-slate-600 dark:text-slate-400">
+              No active DKIM keys matched common selector names for{' '}
+              <span className="font-mono font-semibold">{snapshot.displayDomain}</span>. Because
+              DKIM selectors are chosen by the sender (and cannot be enumerated in DNS), enter a
+              selector name or paste a <code className="font-mono">DKIM-Signature</code> header
+              above to inspect its public key.
+            </div>
+          )}
+        </div>
       </section>
     </div>
   );

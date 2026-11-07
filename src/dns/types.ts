@@ -500,6 +500,104 @@ export type SpfPolicyVerdict =
   | 'temperror'
   | 'none';
 
+export type DmarcPolicyValue = 'none' | 'quarantine' | 'reject';
+
+export type DmarcVerdict =
+  | 'reject'
+  | 'quarantine'
+  | 'monitor-only'
+  | 'invalid'
+  | 'temperror'
+  | 'none';
+
+export interface DmarcUriDetail {
+  raw: string;
+  uri: string;
+  scheme: string;
+  addressOrHost?: string;
+  reportDomain?: string;
+  maxSizeSpec?: string;
+  syntaxValid: boolean;
+  isExternalDomain: boolean;
+  externalAuthorized?: 'authorized' | 'unauthorized' | 'unchecked';
+  externalVerifyQname?: string;
+  error?: string;
+}
+
+export interface DmarcTagItem {
+  tag: string;
+  value: string;
+  known: boolean;
+  valid: boolean;
+  note?: string;
+}
+
+export interface DmarcAnalysis {
+  present: boolean;
+  verdict: DmarcVerdict;
+  queriedOwner: string;
+  effectiveOwner: string;
+  cnameChain: string[];
+  usedOrgFallback: boolean;
+  orgDomain?: string;
+  dnssecStatus: ValidationStatus;
+  txtRrsetId?: string;
+  negativeNodeId?: string;
+  rawRecord?: string;
+  allDmarcRecords: string[];
+  policy?: DmarcPolicyValue;
+  subdomainPolicy?: DmarcPolicyValue;
+  nonExistentSubdomainPolicy?: DmarcPolicyValue;
+  adkim: 'r' | 's';
+  aspf: 'r' | 's';
+  pct: number;
+  rua: DmarcUriDetail[];
+  ruf: DmarcUriDetail[];
+  fo: string;
+  ri: number;
+  tags: DmarcTagItem[];
+  issues: string[];
+  summary: string;
+}
+
+export type DkimKeyStatus = 'valid' | 'warning' | 'revoked' | 'weak' | 'invalid' | 'missing';
+
+export interface DkimSelectorResult {
+  selector: string;
+  source: 'custom' | 'auto';
+  qname: string;
+  resolvedOwner: string;
+  cnameChain: string[];
+  present: boolean;
+  status: DkimKeyStatus;
+  dnssecStatus: ValidationStatus;
+  txtRrsetId?: string;
+  negativeNodeId?: string;
+  rawRecord?: string;
+  allRecords: string[];
+  version?: string;
+  keyType: string;
+  keyBits?: number;
+  rsaExponent?: number;
+  publicKeyBase64?: string;
+  hashAlgorithms?: string[];
+  serviceTypes?: string[];
+  flags: string[];
+  notesTag?: string;
+  isTestingMode: boolean;
+  isStrictSubdomain: boolean;
+  issues: string[];
+  summary: string;
+}
+
+export interface DkimAnalysis {
+  status: 'verified' | 'warning' | 'broken' | 'not-found';
+  probedSelectors: string[];
+  customSelectors: string[];
+  selectors: DkimSelectorResult[];
+  summary: string;
+}
+
 export interface MailAnalysisResult {
   mxStatus: 'valid' | 'null-mx' | 'implicit-a' | 'warning' | 'broken' | 'none';
   mxDnssecStatus: ValidationStatus;
@@ -531,6 +629,8 @@ export interface MailAnalysisResult {
     rootNode: SpfDomainNode;
     summary: string;
   };
+  dmarc: DmarcAnalysis;
+  dkim: DkimAnalysis;
 }
 
 export interface AnalysisSnapshot {
@@ -540,6 +640,7 @@ export interface AnalysisSnapshot {
   targetName: string; // normalized FQDN e.g. "cloudflare.com."
   displayDomain: string; // clean display e.g. "cloudflare.com" or "."
   queryTypes: string[];
+  customDkimSelectors?: string[];
   dohEndpoint: string;
   capturedAt: number; // ms epoch
   validatedAt: number; // ms epoch used for RRSIG timestamp checks
@@ -566,7 +667,9 @@ export interface AnalysisProgress {
     | 'validating'
     | 'mail-mx'
     | 'mail-dane'
-    | 'mail-spf';
+    | 'mail-spf'
+    | 'mail-dmarc'
+    | 'mail-dkim';
   message: string;
   completedQueries: number;
 }

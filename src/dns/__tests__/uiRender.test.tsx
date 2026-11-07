@@ -157,7 +157,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v12');
+    expect(swCode).toContain('digdeep-shell-v13');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge when navigator.onLine is false
@@ -295,6 +295,21 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     const parsedMail = parseDeepLinkParams('?name=ietf.org&mode=mail&tab=graph');
     expect(parsedMail.mode).toBe('mail');
     expect(parsedMail.tab).toBe('graph');
+
+    // Custom DKIM selectors imply mail mode and round-trip in share URLs
+    const parsedDkim = parseDeepLinkParams('?name=ietf.org&dkim=ietf1,mail');
+    expect(parsedDkim.mode).toBe('mail');
+    expect(parsedDkim.dkimSelectors).toEqual(['ietf1', 'mail']);
+
+    const dkimShare = buildShareUrl('https://digdeep.fyi/', {
+      name: 'ietf.org',
+      mode: 'mail',
+      types: ['MX', 'TXT'],
+      dkimSelectors: ['ietf1', 'mail'],
+      dohEndpoint: 'https://1.1.1.1/dns-query',
+      tab: 'mail',
+    });
+    expect(dkimShare).toBe('https://digdeep.fyi/?name=ietf.org&mode=mail&dkim=ietf1,mail&doh=1.1.1.1');
 
     // Parse preset DoH shortLabel
     const parsedPreset = parseDeepLinkParams(
@@ -443,8 +458,12 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       );
       expect(mailHtml).toContain('SMTP DANE (RFC 7672)');
       expect(mailHtml).toContain('SPF Policy (RFC 7208)');
+      expect(mailHtml).toContain('DKIM Keys (RFC 6376)');
+      expect(mailHtml).toContain('DMARC Policy (RFC 7489)');
       expect(mailHtml).toContain('_25._tcp.');
       expect(mailHtml).toContain('v=spf1');
+      expect(mailHtml).toContain('_dmarc.ietf.org');
+      expect(mailHtml).toContain('mail._domainkey.ietf.org');
 
       const graphHtml = renderToStaticMarkup(
         <ChainGraphView

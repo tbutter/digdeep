@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { reverifySnapshot } from '../analyzer';
 import { RR_TYPES } from '../constants';
-import { concatBytes, hexToBytes } from '../encoding';
+import { bytesToBase64, concatBytes, hexToBytes } from '../encoding';
 import {
   classifyIpAddress,
+  decodeDkimPublicKey,
+  estimateOrganizationalDomain,
   evaluateMailFromSnapshotData,
+  parseDkimSelectorInput,
   parseSpfTerms,
   runMailAnalysis,
 } from '../mailAnalyzer';
@@ -48,12 +51,19 @@ function buildSyntheticResponsePacket(params: {
 
 function encodeTxtRdata(chunks: string[]): Uint8Array {
   const enc = new TextEncoder();
-  return concatBytes(
-    ...chunks.map((c) => {
-      const b = enc.encode(c);
-      return concatBytes(new Uint8Array([b.length]), b);
-    })
-  );
+  const wireParts: Uint8Array[] = [];
+  for (const c of chunks) {
+    const b = enc.encode(c);
+    if (b.length === 0) {
+      wireParts.push(new Uint8Array([0]));
+    } else {
+      for (let off = 0; off < b.length; off += 255) {
+        const sub = b.subarray(off, Math.min(b.length, off + 255));
+        wireParts.push(concatBytes(new Uint8Array([sub.length]), sub));
+      }
+    }
+  }
+  return concatBytes(...wireParts);
 }
 
 function encodeMxRdata(preference: number, exchange: string): Uint8Array {
@@ -297,6 +307,22 @@ describe('RFC 7505, RFC 7672 (SMTP DANE), and RFC 7208 (SPF) Audit Scenarios', (
           answers: [{ name: 'nomail.example.', type: RR_TYPES.TXT, rdata: encodeTxtRdata(['v=spf1 -all']) }],
         })
       ),
+      makeLog(
+        '_dmarc.nomail.example.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: '_dmarc.nomail.example.',
+          qtype: RR_TYPES.TXT,
+          answers: [
+            {
+              name: '_dmarc.nomail.example.',
+              type: RR_TYPES.TXT,
+              rdata: encodeTxtRdata(['v=DMARC1; p=reject;']),
+            },
+          ],
+        })
+      ),
     ];
 
     const signedZone: ZoneAnalysis = {
@@ -411,14 +437,238 @@ describe('RFC 7505, RFC 7672 (SMTP DANE), and RFC 7208 (SPF) Audit Scenarios', (
     expect(loopRes.mailAnalysis.spf.verdict).toBe('permerror');
     expect(loopRes.mailFindings.some((f) => f.code === 'SPF_INCLUDE_REDIRECT_LOOP')).toBe(true);
   });
+
+  it('decodes DKIM RSA/Ed25519 keys, extracts selectors from DKIM-Signature headers, and validates DMARC policies', () => {
+    const derLen = (len: number): Uint8Array => {
+      if (len < 128) return new Uint8Array([len]);
+      if (len < 256) return new Uint8Array([0x81, len]);
+      return new Uint8Array([0x82, (len >> 8) & 0xff, len & 0xff]);
+    };
+    const derTlv = (tag: number, content: Uint8Array): Uint8Array =>
+      concatBytes(new Uint8Array([tag]), derLen(content.length), content);
+
+    const buildSyntheticRsaSpkiBase64 = (bits: number): string => {
+      const modBytes = new Uint8Array(bits / 8 + 1);
+      modBytes[0] = 0x00;
+      modBytes[1] = 0x80; // MSB set -> exact `bits` bit length
+      modBytes[modBytes.length - 1] = 0x01;
+      const modInt = derTlv(0x02, modBytes);
+      const expInt = new Uint8Array([0x02, 0x03, 0x01, 0x00, 0x01]); // e = 65537
+      const rsaSeq = derTlv(0x30, concatBytes(modInt, expInt));
+      const algId = new Uint8Array([
+        0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00,
+      ]);
+      const bitStr = derTlv(0x03, concatBytes(new Uint8Array([0x00]), rsaSeq));
+      return bytesToBase64(derTlv(0x30, concatBytes(algId, bitStr)));
+    };
+
+    // 1. Organizational domain estimation
+    expect(estimateOrganizationalDomain('sub.mail.example.com.')).toBe('example.com.');
+    expect(estimateOrganizationalDomain('a.b.example.co.uk.')).toBe('example.co.uk.');
+
+    // 2. DKIM selector input & DKIM-Signature header extraction
+    expect(
+      parseDkimSelectorInput(
+        'DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=ietf.org; s=ietf1; bh=abc==; b=xyz=='
+      )
+    ).toEqual(['ietf1']);
+    expect(
+      parseDkimSelectorInput('s1._domainkey.cloudflare.com, google, selector2', 'cloudflare.com')
+    ).toEqual(['s1', 'google', 'selector2']);
+
+    // 3. ASN.1 DER RSA & Ed25519 key decoding
+    const rsa2048B64 = buildSyntheticRsaSpkiBase64(2048);
+    const rsa512B64 = buildSyntheticRsaSpkiBase64(512);
+    const k2048 = decodeDkimPublicKey('rsa', rsa2048B64);
+    expect(k2048.valid).toBe(true);
+    expect(k2048.keyBits).toBe(2048);
+    expect(k2048.rsaExponent).toBe(65537);
+
+    const k512 = decodeDkimPublicKey('rsa', rsa512B64);
+    expect(k512.valid).toBe(true);
+    expect(k512.keyBits).toBe(512);
+
+    const kRevoked = decodeDkimPublicKey('rsa', '');
+    expect(kRevoked.revoked).toBe(true);
+    expect(kRevoked.valid).toBe(true);
+
+    const ed25519RawB64 = bytesToBase64(new Uint8Array(32).fill(0x42));
+    const kEd = decodeDkimPublicKey('ed25519', ed25519RawB64);
+    expect(kEd.valid).toBe(true);
+    expect(kEd.keyBits).toBe(256);
+
+    // 4. Synthetic DMARC organizational fallback, unauthorized external rua, RFC 9091 np=, weak DKIM RSA-512, sha1, & revoked key
+    const queries: DohQueryLog[] = [
+      makeLog(
+        'sub.corp.example.',
+        RR_TYPES.MX,
+        'MX',
+        buildSyntheticResponsePacket({
+          qname: 'sub.corp.example.',
+          qtype: RR_TYPES.MX,
+          answers: [{ name: 'sub.corp.example.', type: RR_TYPES.MX, rdata: encodeMxRdata(0, '.') }],
+        })
+      ),
+      makeLog(
+        'sub.corp.example.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: 'sub.corp.example.',
+          qtype: RR_TYPES.TXT,
+          answers: [{ name: 'sub.corp.example.', type: RR_TYPES.TXT, rdata: encodeTxtRdata(['v=spf1 -all']) }],
+        })
+      ),
+      // _dmarc.sub.corp.example has no record -> falls back to _dmarc.corp.example!
+      makeLog(
+        '_dmarc.sub.corp.example.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: '_dmarc.sub.corp.example.',
+          qtype: RR_TYPES.TXT,
+          rcode: 3,
+        })
+      ),
+      makeLog(
+        '_dmarc.corp.example.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: '_dmarc.corp.example.',
+          qtype: RR_TYPES.TXT,
+          answers: [
+            {
+              name: '_dmarc.corp.example.',
+              type: RR_TYPES.TXT,
+              rdata: encodeTxtRdata([
+                'v=DMARC1; p=reject; sp=quarantine; np=reject; adkim=s; aspf=s; pct=50; rua=mailto:dmarc@corp.example!10m,mailto:agg@thirdparty.test',
+              ]),
+            },
+          ],
+        })
+      ),
+      // External report target thirdparty.test lacks _report._dmarc TXT!
+      makeLog(
+        'corp.example._report._dmarc.thirdparty.test.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: 'corp.example._report._dmarc.thirdparty.test.',
+          qtype: RR_TYPES.TXT,
+          rcode: 3,
+        }),
+        false
+      ),
+      // DKIM selectors: strong2048, weak512, sha1only, revokedkey
+      makeLog(
+        'strong2048._domainkey.sub.corp.example.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: 'strong2048._domainkey.sub.corp.example.',
+          qtype: RR_TYPES.TXT,
+          answers: [
+            {
+              name: 'strong2048._domainkey.sub.corp.example.',
+              type: RR_TYPES.TXT,
+              rdata: encodeTxtRdata([`v=DKIM1; k=rsa; p=${rsa2048B64}`]),
+            },
+          ],
+        })
+      ),
+      makeLog(
+        'weak512._domainkey.sub.corp.example.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: 'weak512._domainkey.sub.corp.example.',
+          qtype: RR_TYPES.TXT,
+          answers: [
+            {
+              name: 'weak512._domainkey.sub.corp.example.',
+              type: RR_TYPES.TXT,
+              rdata: encodeTxtRdata([`v=DKIM1; k=rsa; h=sha1; p=${rsa512B64}`]),
+            },
+          ],
+        })
+      ),
+      makeLog(
+        'revoked._domainkey.sub.corp.example.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: 'revoked._domainkey.sub.corp.example.',
+          qtype: RR_TYPES.TXT,
+          answers: [
+            {
+              name: 'revoked._domainkey.sub.corp.example.',
+              type: RR_TYPES.TXT,
+              rdata: encodeTxtRdata(['v=DKIM1; k=rsa; p=']),
+            },
+          ],
+        })
+      ),
+      makeLog(
+        'missingcustom._domainkey.sub.corp.example.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: 'missingcustom._domainkey.sub.corp.example.',
+          qtype: RR_TYPES.TXT,
+          rcode: 3,
+        })
+      ),
+    ];
+
+    const res = evaluateMailFromSnapshotData({
+      targetName: 'sub.corp.example.',
+      queries,
+      zones: [],
+      cnameEdges: [],
+      targetDomainStatus: 'secure',
+      customDkimSelectors: ['strong2048', 'weak512', 'revoked', 'missingcustom'],
+    });
+
+    const dmarc = res.mailAnalysis.dmarc;
+    expect(dmarc.present).toBe(true);
+    expect(dmarc.usedOrgFallback).toBe(true);
+    expect(dmarc.queriedOwner).toBe('_dmarc.corp.example.');
+    expect(dmarc.policy).toBe('reject');
+    expect(dmarc.subdomainPolicy).toBe('quarantine');
+    expect(dmarc.nonExistentSubdomainPolicy).toBe('reject');
+    expect(dmarc.verdict).toBe('quarantine'); // sp=quarantine applies to subdomain!
+    expect(dmarc.adkim).toBe('s');
+    expect(dmarc.aspf).toBe('s');
+    expect(dmarc.pct).toBe(50);
+    expect(dmarc.rua[0].isExternalDomain).toBe(false);
+    expect(dmarc.rua[0].maxSizeSpec).toBe('10m');
+    expect(dmarc.rua[1].isExternalDomain).toBe(true);
+    expect(dmarc.rua[1].externalAuthorized).toBe('unauthorized');
+
+    const codes = res.mailFindings.map((f) => f.code);
+    expect(codes).toContain('DMARC_EXTERNAL_REPORT_UNAUTHORIZED');
+    expect(codes).toContain('DMARC_PARTIAL_PCT');
+    expect(codes).toContain('DKIM_WEAK_RSA_KEY');
+    expect(codes).toContain('DKIM_SHA1_ONLY');
+    expect(codes).toContain('DKIM_KEY_REVOKED');
+    expect(codes).toContain('DKIM_SELECTOR_NOT_FOUND');
+
+    const dkimSels = res.mailAnalysis.dkim.selectors;
+    expect(dkimSels.find((s) => s.selector === 'strong2048')?.status).toBe('valid');
+    expect(dkimSels.find((s) => s.selector === 'weak512')?.keyBits).toBe(512);
+    expect(dkimSels.find((s) => s.selector === 'revoked')?.status).toBe('revoked');
+    expect(dkimSels.find((s) => s.selector === 'missingcustom')?.status).toBe('missing');
+  });
 });
 
-describe('Live DoH Mail + SMTP DANE + SPF End-to-End Verification', () => {
+describe('Live DoH Mail + SMTP DANE + SPF + DKIM + DMARC End-to-End Verification', () => {
   it(
-    'verifies ietf.org MX, DNSSEC-signed _25._tcp DANE TLSA, SPF policy, and offline clock-override re-verification',
+    'verifies ietf.org MX, DANE TLSA, SPF, DMARC (_report._dmarc), auto & custom DKIM selectors, and offline clock override',
     async () => {
-      const snap = await runMailAnalysis('ietf.org');
+      const snap = await runMailAnalysis('ietf.org', { dkimSelectors: ['ietf1'] });
       expect(snap.mode).toBe('mail');
+      expect(snap.customDkimSelectors).toEqual(['ietf1']);
       expect(snap.mailAnalysis).toBeDefined();
       const mail = snap.mailAnalysis!;
 
@@ -437,13 +687,58 @@ describe('Live DoH Mail + SMTP DANE + SPF End-to-End Verification', () => {
       expect(mail.spf.present).toBe(true);
       expect(mail.spf.dnsLookupCount).toBeLessThanOrEqual(10);
 
-      // Offline time-travel re-verification into 2099 invalidates RRSIGs and turns DANE status to BOGUS!
+      // ietf.org publishes DNSSEC-signed _dmarc.ietf.org with authorized external rua (vali.email)
+      expect(mail.dmarc.present).toBe(true);
+      expect(mail.dmarc.dnssecStatus).toBe('secure');
+      expect(mail.dmarc.rua.length).toBeGreaterThanOrEqual(1);
+      const extRua = mail.dmarc.rua.find((u) => u.isExternalDomain);
+      if (extRua) {
+        expect(extRua.externalAuthorized).toBe('authorized');
+      }
+
+      // ietf.org publishes both auto-discovered "mail" and custom "ietf1" DKIM keys signed with DNSSEC
+      const mailSel = mail.dkim.selectors.find((s) => s.selector === 'mail');
+      const ietf1Sel = mail.dkim.selectors.find((s) => s.selector === 'ietf1');
+      expect(mailSel?.present).toBe(true);
+      expect(mailSel?.dnssecStatus).toBe('secure');
+      expect(mailSel?.keyBits).toBeGreaterThanOrEqual(1024);
+      expect(ietf1Sel?.present).toBe(true);
+      expect(ietf1Sel?.source).toBe('custom');
+      expect(ietf1Sel?.dnssecStatus).toBe('secure');
+      expect(ietf1Sel?.keyBits).toBeGreaterThanOrEqual(1024);
+
+      // Offline time-travel re-verification into 2099 invalidates RRSIGs across DANE, DMARC & DKIM!
       const futureSnap = await reverifySnapshot(snap, {
         validationTimeMs: Date.UTC(2099, 0, 1),
       });
       expect(futureSnap.overallStatus).toBe('bogus');
       expect(futureSnap.mailAnalysis?.daneStatus).toBe('bogus');
+      expect(futureSnap.mailAnalysis?.dmarc.dnssecStatus).toBe('bogus');
+      expect(
+        futureSnap.mailAnalysis?.dkim.selectors.find((s) => s.selector === 'ietf1')?.dnssecStatus
+      ).toBe('bogus');
     },
-    25000
+    30000
+  );
+
+  it(
+    'verifies cloudflare.com strict DMARC (p=reject + external _report._dmarc) and cross-zone CNAME DKIM keys',
+    async () => {
+      const cfSnap = await runMailAnalysis('cloudflare.com');
+      const mail = cfSnap.mailAnalysis!;
+      expect(mail.dmarc.present).toBe(true);
+      expect(mail.dmarc.policy).toBe('reject');
+      expect(mail.dmarc.verdict).toBe('reject');
+      expect(mail.dmarc.dnssecStatus).toBe('secure');
+
+      // Auto-discovers SendGrid/Mailchimp/Mandrill DKIM selectors (e.g. s1 CNAME -> 2048-bit RSA)
+      expect(mail.dkim.selectors.length).toBeGreaterThanOrEqual(1);
+      const s1 = mail.dkim.selectors.find((s) => s.selector === 's1');
+      if (s1) {
+        expect(s1.cnameChain.length).toBeGreaterThanOrEqual(1);
+        expect(s1.keyBits).toBe(2048);
+      }
+    },
+    30000
   );
 });

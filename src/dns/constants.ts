@@ -230,10 +230,11 @@ export const ANALYSIS_MODES: readonly AnalysisModeDescriptor[] = [
   },
   {
     id: 'mail',
-    label: 'Mail · MX, DANE & SPF',
-    shortLabel: 'Mail (MX · DANE · SPF)',
+    label: 'Mail · MX, DANE, SPF, DKIM & DMARC',
+    shortLabel: 'Mail (MX · DANE · SPF · DKIM · DMARC)',
     actionLabel: 'Analyze Mail DNS',
-    description: 'MX mail routing, SMTP DANE (_25._tcp TLSA + DNSSEC), and recursive SPF audit',
+    description:
+      'MX routing, SMTP DANE (_25._tcp TLSA), SPF (10-lookup tree), DKIM keys (_domainkey), and DMARC (_dmarc) with WebCrypto DNSSEC',
   },
 ] as const;
 

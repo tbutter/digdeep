@@ -45,10 +45,11 @@ import type {
   ZoneAnalysis,
 } from './types';
 
-export const SNAPSHOT_ENGINE_VERSION = 4;
+export const SNAPSHOT_ENGINE_VERSION = 5;
 
 export interface AnalyzeOptions extends DohClientOptions {
   queryTypes?: string[];
+  dkimSelectors?: string[];
   trustAnchors?: TrustAnchor[];
   validationTimeMs?: number;
   onProgress?: (progress: AnalysisProgress) => void;
@@ -375,6 +376,7 @@ export async function reverifySnapshot(
     mode: snapshot.mode,
     targetName: snapshot.targetName,
     queryTypes: snapshot.queryTypes,
+    customDkimSelectors: snapshot.customDkimSelectors,
     dohEndpoint: snapshot.dohEndpoint,
     capturedAt: snapshot.capturedAt,
     validatedAt: options.validationTimeMs ?? snapshot.validatedAt,
@@ -394,6 +396,7 @@ interface EvaluateInput {
   mode?: AnalysisMode;
   targetName: string;
   queryTypes: string[];
+  customDkimSelectors?: string[];
   dohEndpoint: string;
   capturedAt: number;
   validatedAt: number;
@@ -447,6 +450,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     mode = 'dnssec',
     targetName,
     queryTypes,
+    customDkimSelectors,
     dohEndpoint,
     capturedAt,
     validatedAt,
@@ -457,9 +461,14 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
 
   const validationEpochSec = Math.floor(validatedAt / 1000);
   const enabledAnchors = trustAnchors.filter((ta) => ta.enabled);
-  // Exclude auxiliary out-of-bailiwick nameserver IP and recursive SPF helper lookups from DNSSEC zone reconstruction
+  // Exclude auxiliary out-of-bailiwick nameserver IP, recursive SPF, DMARC report, and speculative DKIM helper lookups from DNSSEC zone reconstruction
   const cdLogs = queries.filter(
-    (q) => q.cd && !q.purpose.startsWith('Nameserver IP') && !q.purpose.startsWith('SPF lookup')
+    (q) =>
+      q.cd &&
+      !q.purpose.startsWith('Nameserver IP') &&
+      !q.purpose.startsWith('SPF lookup') &&
+      !q.purpose.startsWith('DMARC lookup') &&
+      !q.purpose.startsWith('DKIM probe')
   );
 
   // Reconstruct set of discovered zones from DNSKEY queries + SOA records
@@ -1643,6 +1652,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       zones,
       cnameEdges,
       targetDomainStatus: overallStatus,
+      customDkimSelectors,
     });
     mailAnalysis = mailResult.mailAnalysis;
     findings.push(...mailResult.mailFindings);
@@ -1671,6 +1681,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     targetName,
     displayDomain: displayFqdn(targetName),
     queryTypes,
+    ...(customDkimSelectors && customDkimSelectors.length > 0 ? { customDkimSelectors } : {}),
     dohEndpoint,
     capturedAt,
     validatedAt,

@@ -31,7 +31,7 @@ import { STATUS_META, StatusBadge } from './components/StatusBadge';
 import { ZonesPanel } from './components/ZonesPanel';
 import { reverifySnapshot, runDnsvizAnalysis, SNAPSHOT_ENGINE_VERSION } from './dns/analyzer';
 import { ANALYSIS_MODES, formatDohShortLabel, QUERYABLE_RR_TYPES } from './dns/constants';
-import { runMailAnalysis } from './dns/mailAnalyzer';
+import { parseDkimSelectorInput, runMailAnalysis } from './dns/mailAnalyzer';
 import type { AnalysisMode, AnalysisProgress, AnalysisSnapshot } from './dns/types';
 import { usePwaInstall } from './pwa/usePwaInstall';
 import {
@@ -58,7 +58,7 @@ const PRIMARY_TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SOA', 'CAA', 'H
 const EXTRA_TYPES = QUERYABLE_RR_TYPES.filter((t) => !PRIMARY_TYPES.includes(t));
 
 const DEFAULT_PAGE_TITLE =
-  'DigDeep — Client-Side DNSSEC, MX, DANE & SPF Analyzer & DoH Wire Inspector';
+  'DigDeep — Client-Side DNSSEC, MX, DANE, SPF, DKIM & DMARC Analyzer';
 
 const FOOTER_EXAMPLE_TRACES: ReadonlyArray<{
   domain: string;
@@ -68,7 +68,12 @@ const FOOTER_EXAMPLE_TRACES: ReadonlyArray<{
 }> = [
   { domain: 'www.iana.org', types: ['A', 'AAAA'], label: 'www.iana.org (Cross-zone CNAME)' },
   { domain: 'dnssec-failed.org', types: ['A', 'AAAA'], label: 'dnssec-failed.org (Bogus SEP)' },
-  { domain: 'ietf.org', mode: 'mail', types: ['MX', 'TXT'], label: 'ietf.org (MX + DANE + SPF)' },
+  {
+    domain: 'ietf.org',
+    mode: 'mail',
+    types: ['MX', 'TXT'],
+    label: 'ietf.org (MX + DANE + SPF + DKIM + DMARC)',
+  },
   { domain: 'cloudflare.com', types: ['A', 'AAAA'], label: 'cloudflare.com (ECDSA)' },
   { domain: '.', types: ['DNSKEY', 'SOA'], label: '. (Root Zone)' },
 ];
@@ -93,11 +98,15 @@ export function App() {
       deepLink.mode ?? savedSnapshots[0]?.mode ?? 'dnssec';
     const initialDomain = deepLink.name ?? savedSnapshots[0]?.displayDomain ?? 'digdeep.butter.eu';
     const initialTypes = deepLink.types ?? savedSnapshots[0]?.queryTypes ?? ['A', 'AAAA'];
+    const initialDkimSelectors =
+      deepLink.dkimSelectors ?? savedSnapshots[0]?.customDkimSelectors ?? [];
 
     const latestSnap = savedSnapshots[0] ?? null;
     const matchesLatestSnap =
       latestSnap !== null &&
       (latestSnap.mode ?? 'dnssec') === initialMode &&
+      (!deepLink.dkimSelectors ||
+        (latestSnap.customDkimSelectors ?? []).join(',') === deepLink.dkimSelectors.join(',')) &&
       (!deepLink.name ||
         latestSnap.displayDomain.toLowerCase() === deepLink.name.toLowerCase().replace(/\.$/, '') ||
         (deepLink.name === '.' && latestSnap.displayDomain === '.'));
@@ -111,6 +120,7 @@ export function App() {
       analysisMode: initialMode,
       domainInput: initialDomain,
       selectedTypes: initialTypes,
+      customDkimSelectors: initialDkimSelectors,
       hasExtraType: initialTypes.some((t) => (EXTRA_TYPES as readonly string[]).includes(t)),
       activeTab: deepLink.tab ?? defaultTab,
       focusedTarget: deepLink.focus,
@@ -127,6 +137,9 @@ export function App() {
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>(initialBootState.analysisMode);
   const [domainInput, setDomainInput] = useState<string>(initialBootState.domainInput);
   const [selectedTypes, setSelectedTypes] = useState<string[]>(initialBootState.selectedTypes);
+  const [customDkimSelectors, setCustomDkimSelectors] = useState<string[]>(
+    initialBootState.customDkimSelectors
+  );
   const [showExtraTypes, setShowExtraTypes] = useState<boolean>(initialBootState.hasExtraType);
 
   const [activeTab, setActiveTab] = useState<ActiveTab>(initialBootState.activeTab);
@@ -164,7 +177,9 @@ export function App() {
     if (activeSnapshot) {
       const verdict = STATUS_META[activeSnapshot.overallStatus].label;
       const modeLabel =
-        activeSnapshot.mode === 'mail' ? 'Mail · DANE · SPF' : 'DNSSEC Visualizer';
+        activeSnapshot.mode === 'mail'
+          ? 'Mail · DANE · SPF · DKIM · DMARC'
+          : 'DNSSEC Visualizer';
       document.title = `${activeSnapshot.displayDomain} (${verdict}) — DigDeep ${modeLabel}`;
     } else {
       document.title = DEFAULT_PAGE_TITLE;
@@ -201,6 +216,7 @@ export function App() {
       typesToQuery: string[],
       options?: {
         modeOverride?: AnalysisMode;
+        dkimSelectorsOverride?: string[];
         dohEndpointOverride?: string;
         preserveFocus?: boolean;
         pushHistory?: boolean;
@@ -209,6 +225,7 @@ export function App() {
       const cleanDomain = targetDomain.trim() || '.';
       const modeToRun: AnalysisMode = options?.modeOverride ?? analysisMode;
       const cleanTypes = typesToQuery.length > 0 ? typesToQuery : ['A'];
+      const dkimSelsToUse = options?.dkimSelectorsOverride ?? customDkimSelectors;
       const endpointToUse = options?.dohEndpointOverride ?? settings.dohEndpoint;
 
       if (!options?.preserveFocus) {
@@ -221,7 +238,7 @@ export function App() {
         phase: modeToRun === 'mail' ? 'mail-mx' : 'zone-cuts',
         message:
           modeToRun === 'mail'
-            ? `Starting ${formatDohShortLabel(endpointToUse)} Mail, DANE & SPF analysis for ${cleanDomain}…`
+            ? `Starting ${formatDohShortLabel(endpointToUse)} Mail, DANE, SPF, DKIM & DMARC analysis for ${cleanDomain}…`
             : `Starting ${formatDohShortLabel(endpointToUse)} DoH trace for ${cleanDomain}…`,
         completedQueries: 0,
       });
@@ -231,6 +248,7 @@ export function App() {
           modeToRun === 'mail'
             ? await runMailAnalysis(cleanDomain, {
                 endpoint: endpointToUse,
+                dkimSelectors: dkimSelsToUse,
                 trustAnchors: settings.trustAnchors,
                 onProgress: (p) => setProgress(p),
               })
@@ -263,6 +281,7 @@ export function App() {
             name: snap.displayDomain,
             mode: snap.mode,
             types: snap.queryTypes,
+            dkimSelectors: snap.customDkimSelectors,
             dohEndpoint: snap.dohEndpoint,
             tab: nextTab,
             focus: options?.preserveFocus ? focusedGraphTarget : null,
@@ -289,6 +308,7 @@ export function App() {
     [
       analysisMode,
       activeSnapshot?.mode,
+      customDkimSelectors,
       settings.dohEndpoint,
       settings.trustAnchors,
       settings.showSoaAndNs,
@@ -308,6 +328,7 @@ export function App() {
       name: activeSnapshot.displayDomain,
       mode: activeSnapshot.mode,
       types: activeSnapshot.queryTypes,
+      dkimSelectors: activeSnapshot.customDkimSelectors,
       dohEndpoint: activeSnapshot.dohEndpoint,
       tab: activeTab,
       focus: focusedGraphTarget,
@@ -332,7 +353,9 @@ export function App() {
     const onPopState = () => {
       const parsed = parseDeepLinkParams(window.location.search, settings.customDohEndpoints);
       const nextMode: AnalysisMode = parsed.mode ?? 'dnssec';
+      const nextDkimSels = parsed.dkimSelectors ?? [];
       setAnalysisMode(nextMode);
+      setCustomDkimSelectors(nextDkimSels);
       if (parsed.tab) setActiveTab(parsed.tab);
       else setActiveTab(nextMode === 'mail' ? 'mail' : 'graph');
 
@@ -364,7 +387,9 @@ export function App() {
         (s) =>
           (s.mode ?? 'dnssec') === nextMode &&
           s.displayDomain.toLowerCase() === parsed.name!.toLowerCase().replace(/\.$/, '') &&
-          (nextMode === 'mail' || s.queryTypes.join(',') === targetTypes.join(',')) &&
+          (nextMode === 'mail'
+            ? (s.customDkimSelectors ?? []).join(',') === nextDkimSels.join(',')
+            : s.queryTypes.join(',') === targetTypes.join(',')) &&
           s.dohEndpoint === targetDoh
       );
       if (cached) {
@@ -372,6 +397,7 @@ export function App() {
       } else if (!isOffline) {
         void executeAnalysis(parsed.name, targetTypes, {
           modeOverride: nextMode,
+          dkimSelectorsOverride: nextDkimSels,
           dohEndpointOverride: targetDoh,
           preserveFocus: Boolean(parsed.focus),
           pushHistory: false,
@@ -414,15 +440,17 @@ export function App() {
     if (untrustedDohPending) return;
     const { deepLink } = initialBootState;
     if (
-      !isOffline &&
-      (deepLink.name !== null ||
-        deepLink.mode !== null ||
-        deepLink.types !== null ||
-        deepLink.dohEndpoint !== null ||
-        snapshots.length === 0)
+      (!isOffline &&
+        (deepLink.name !== null ||
+          deepLink.mode !== null ||
+          deepLink.types !== null ||
+          deepLink.dkimSelectors !== null ||
+          deepLink.dohEndpoint !== null ||
+          snapshots.length === 0))
     ) {
       void executeAnalysis(domainInput, selectedTypes, {
         modeOverride: initialBootState.analysisMode,
+        dkimSelectorsOverride: initialBootState.customDkimSelectors,
         preserveFocus: Boolean(deepLink.focus),
         pushHistory: false,
       });
@@ -472,6 +500,7 @@ export function App() {
       name: activeSnapshot.displayDomain,
       mode: activeSnapshot.mode,
       types: activeSnapshot.queryTypes,
+      dkimSelectors: activeSnapshot.customDkimSelectors,
       dohEndpoint: activeSnapshot.dohEndpoint,
       tab: activeTab,
       focus: focusedGraphTarget,
@@ -554,7 +583,7 @@ export function App() {
                 </span>
               </div>
               <p className="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">
-                Client-Side DNSSEC, MX, DANE &amp; SPF Analyzer &amp; DoH Wire Inspector
+                Client-Side DNSSEC, MX, DANE, SPF, DKIM &amp; DMARC Analyzer &amp; DoH Wire Inspector
               </p>
             </div>
           </div>
@@ -749,7 +778,13 @@ export function App() {
                   _25._tcp DANE TLSA
                 </span>
                 <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
-                  SPF v=spf1 (10-Lookup Audit)
+                  SPF v=spf1
+                </span>
+                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                  DKIM _domainkey
+                </span>
+                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                  DMARC _dmarc
                 </span>
                 <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   WebCrypto DNSSEC
@@ -826,7 +861,7 @@ export function App() {
                     </span>
                     {activeSnapshot.mode === 'mail' ? (
                       <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 px-2 py-0.5 font-mono text-[11px] font-semibold">
-                        MAIL · MX · DANE · SPF
+                        MAIL · MX · DANE · SPF · DKIM · DMARC
                       </span>
                     ) : (
                       <span className="font-mono text-xs text-slate-500">
@@ -904,7 +939,13 @@ export function App() {
               {(
                 [
                   ...(activeSnapshot.mode === 'mail'
-                    ? [{ id: 'mail' as const, label: 'Mail, DANE & SPF', icon: Mail }]
+                    ? [
+                        {
+                          id: 'mail' as const,
+                          label: 'Mail, DANE, SPF, DKIM & DMARC',
+                          icon: Mail,
+                        },
+                      ]
                     : []),
                   { id: 'graph' as const, label: 'DNSSEC Chain Graph', icon: Network },
                   {
@@ -967,12 +1008,26 @@ export function App() {
             {/* Active View Content */}
             {activeTab === 'mail' && activeSnapshot.mode === 'mail' && (
               <MailAnalysisView
+                key={activeSnapshot.id}
                 snapshot={activeSnapshot}
+                loading={loading}
                 onJumpToGraphTarget={(targetId) => {
                   setFocusedGraphTarget(targetId);
                   setActiveTab('graph');
                 }}
                 onOpenChainGraph={() => setActiveTab('graph')}
+                onProbeDkimSelectors={(rawSelectors) => {
+                  const parsedSels = parseDkimSelectorInput(
+                    rawSelectors,
+                    activeSnapshot.displayDomain
+                  );
+                  setCustomDkimSelectors(parsedSels);
+                  void executeAnalysis(activeSnapshot.displayDomain, activeSnapshot.queryTypes, {
+                    modeOverride: 'mail',
+                    dkimSelectorsOverride: parsedSels,
+                    pushHistory: true,
+                  });
+                }}
               />
             )}
 
@@ -1021,6 +1076,7 @@ export function App() {
                   setActiveSnapshot(snap);
                   setAnalysisMode(snapMode);
                   setDomainInput(snap.displayDomain);
+                  setCustomDkimSelectors(snap.customDkimSelectors ?? []);
                   if (snapMode === 'dnssec') {
                     setSelectedTypes(snap.queryTypes);
                   }
@@ -1101,8 +1157,8 @@ export function App() {
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
           <div>
             <span className="font-semibold text-slate-700 dark:text-slate-300">DigDeep</span> ·
-            100% client-side DNSSEC, MX, SMTP DANE &amp; SPF analyzer verified in-browser via
-            WebCrypto &amp; RFC 8484 DoH.
+            100% client-side DNSSEC, MX, SMTP DANE, SPF, DKIM &amp; DMARC analyzer verified
+            in-browser via WebCrypto &amp; RFC 8484 DoH.
           </div>
           <nav aria-label="Example DNSSEC traces" className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <span className="text-slate-400 dark:text-slate-500">Examples:</span>
