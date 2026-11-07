@@ -6,6 +6,7 @@ import { ChainGraphView, prepareExportSvgElement } from '../../components/ChainG
 import { HistoryPanel } from '../../components/HistoryPanel';
 import { MailAnalysisView } from '../../components/MailAnalysisView';
 import { ResponsesPanel } from '../../components/ResponsesPanel';
+import { ReverseDnsCard } from '../../components/ReverseDnsCard';
 import { SettingsModal } from '../../components/SettingsModal';
 import { ZonesPanel } from '../../components/ZonesPanel';
 import { buildChainGraph } from '../../graph/layout';
@@ -479,6 +480,21 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       );
       expect(graphHtml).toContain('<svg');
       expect(graphHtml).toContain('TLSA');
+
+      const rdnsSnap = await runDnsvizAnalysis('1.1.1.1');
+      expect(rdnsSnap.reverseDns).toBeDefined();
+      const rdnsHtml = renderToStaticMarkup(
+        <ReverseDnsCard
+          reverseDns={rdnsSnap.reverseDns!}
+          onJumpToGraphTarget={() => {}}
+          onTraceHostname={() => {}}
+        />
+      );
+      expect(rdnsHtml).toContain('1.1.1.1.in-addr.arpa');
+      expect(rdnsHtml).toContain('one.one.one.one');
+      expect(rdnsHtml).toContain('FCrDNS VERIFIED ✓');
+      expect(rdnsHtml).toContain('AS13335');
+      expect(rdnsHtml).toContain('1.1.1.0/24');
     },
     25000
   );

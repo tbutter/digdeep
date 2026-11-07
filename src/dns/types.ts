@@ -744,12 +744,59 @@ export interface MailAnalysisResult {
   };
 }
 
+export interface ReversePtrTargetEntry {
+  hostname: string;
+  displayHostname: string;
+  forwardStatus: 'match' | 'mismatch' | 'nxdomain' | 'nodata' | 'temperror' | 'unchecked';
+  forwardIpv4: string[];
+  forwardIpv6: string[];
+  forwardDnssecStatus: ValidationStatus;
+}
+
+export interface BgpAsnOrganization {
+  asn: number;
+  asName?: string;
+  country?: string;
+  rir?: string;
+  allocatedDate?: string;
+}
+
+export interface ReverseIpBgpInfo {
+  originQueryName: string;
+  bgpPrefix?: string;
+  country?: string;
+  rir?: string;
+  allocatedDate?: string;
+  asns: BgpAsnOrganization[];
+  rawOriginTxt?: string;
+}
+
+export interface ReverseDnsAnalysis {
+  ip: string;
+  family: 4 | 6;
+  arpaFqdn: string;
+  displayArpa: string;
+  isPublic: boolean;
+  specialRangeNote?: string;
+  ptrStatus: 'resolved' | 'nxdomain' | 'nodata' | 'servfail';
+  ptrDnssecStatus: ValidationStatus;
+  ptrRrsetId?: string;
+  ptrNegativeNodeId?: string;
+  cnameChain: string[];
+  isRfc2317ClasslessDelegation: boolean;
+  targets: ReversePtrTargetEntry[];
+  fcrdnsStatus: 'valid' | 'partial' | 'ptr-mismatch' | 'no-ptr' | 'temperror' | 'not-applicable';
+  fcrdnsSummary: string;
+  bgp?: ReverseIpBgpInfo;
+}
+
 export interface AnalysisSnapshot {
   id: string;
   version: number;
   mode?: AnalysisMode;
   targetName: string; // normalized FQDN e.g. "cloudflare.com."
   displayDomain: string; // clean display e.g. "cloudflare.com" or "."
+  queriedIp?: string; // canonical IP when reverse-DNS trace was initiated for an IPv4/IPv6 address
   queryTypes: string[];
   customDkimSelectors?: string[];
   mtaStsPolicyFetch?: MtaStsPolicyFetchResult;
@@ -766,6 +813,7 @@ export interface AnalysisSnapshot {
   queries: DohQueryLog[];
   trustAnchorsUsed: TrustAnchor[];
   mailAnalysis?: MailAnalysisResult;
+  reverseDns?: ReverseDnsAnalysis;
   pinned?: boolean;
   note?: string;
 }

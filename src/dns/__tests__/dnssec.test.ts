@@ -14,6 +14,13 @@ import {
   concatBytes,
   normalizeFqdn,
 } from '../encoding';
+import {
+  ipToCymruOriginQname,
+  parseCymruAsnTxt,
+  parseCymruOriginTxt,
+  parseReverseIpInput,
+  reverseArpaToIp,
+} from '../ipUtils';
 import { buildDnsQuery, decodeDnsName, encodeDnsName, parseDnsPacket } from '../wire';
 
 describe('DNS Wireformat & RFC Primitives', () => {
@@ -251,5 +258,82 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
       }
     },
     25000
+  );
+
+  it(
+    'automatically detects IPv4/IPv6 input, validates .arpa DNSSEC chain, verifies FCrDNS, and looks up BGP ASN',
+    async () => {
+      // 1. Unit checks for IPv4 / IPv6 <-> .arpa round-tripping and Cymru TXT parsing
+      const v4Parsed = parseReverseIpInput('1.1.1.1');
+      expect(v4Parsed?.wasRawIpInput).toBe(true);
+      expect(v4Parsed?.arpaFqdn).toBe('1.1.1.1.in-addr.arpa.');
+      expect(v4Parsed?.cymruOriginQname).toBe('1.1.1.1.origin.asn.cymru.com.');
+
+      const v6Parsed = parseReverseIpInput('2606:4700:4700::1111');
+      expect(v6Parsed?.wasRawIpInput).toBe(true);
+      expect(v6Parsed?.ip).toBe('2606:4700:4700::1111');
+      expect(v6Parsed?.arpaFqdn).toBe(
+        '1.1.1.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.7.4.0.0.7.4.6.0.6.2.ip6.arpa.'
+      );
+      expect(reverseArpaToIp(v6Parsed!.arpaFqdn)).toEqual({
+        ip: '2606:4700:4700::1111',
+        family: 6,
+      });
+      expect(ipToCymruOriginQname('2606:4700:4700::1111')).toBe(
+        '1.1.1.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.7.4.0.0.7.4.6.0.6.2.origin6.asn.cymru.com.'
+      );
+
+      const origins = parseCymruOriginTxt(['13335 | 1.1.1.0/24 | AU | apnic | 2011-08-11']);
+      expect(origins[0].asns).toEqual([13335]);
+      expect(origins[0].bgpPrefix).toBe('1.1.1.0/24');
+      expect(origins[0].rir).toBe('apnic');
+
+      const asnInfo = parseCymruAsnTxt([
+        '13335 | US | arin | 2010-07-14 | CLOUDFLARENET - Cloudflare, Inc., US',
+      ]);
+      expect(asnInfo?.asn).toBe(13335);
+      expect(asnInfo?.asName).toContain('CLOUDFLARENET');
+
+      // 2. Live DNSSEC-signed IPv4 reverse DNS trace on '9.9.9.9' (Quad9: signed all the way to 9.9.9.in-addr.arpa. PTR)
+      const quad9Snap = await runDnsvizAnalysis('9.9.9.9');
+      expect(quad9Snap.targetName).toBe('9.9.9.9.in-addr.arpa.');
+      expect(quad9Snap.queriedIp).toBe('9.9.9.9');
+      expect(quad9Snap.queryTypes).toEqual(['PTR']);
+      expect(quad9Snap.overallStatus).toBe('secure');
+      expect(quad9Snap.zones.map((z) => z.zoneName)).toEqual([
+        '.',
+        'arpa.',
+        'in-addr.arpa.',
+        '9.in-addr.arpa.',
+        '9.9.9.in-addr.arpa.',
+      ]);
+      expect(quad9Snap.reverseDns?.ptrStatus).toBe('resolved');
+      expect(quad9Snap.reverseDns?.ptrDnssecStatus).toBe('secure');
+      expect(quad9Snap.reverseDns?.targets.map((t) => t.hostname)).toContain('dns9.quad9.net.');
+      expect(quad9Snap.reverseDns?.fcrdnsStatus).toBe('valid');
+      expect(quad9Snap.reverseDns?.bgp?.asns.some((a) => a.asn === 19281)).toBe(true);
+
+      // 3. Live IPv4 & IPv6 reverse DNS traces on '1.1.1.1' and '2606:4700:4700::1111' (signed RIR parent + unsigned leaf zone)
+      const v4Snap = await runDnsvizAnalysis('1.1.1.1');
+      expect(v4Snap.targetName).toBe('1.1.1.1.in-addr.arpa.');
+      expect(v4Snap.queriedIp).toBe('1.1.1.1');
+      expect(v4Snap.queryTypes).toEqual(['PTR']);
+      expect(v4Snap.overallStatus).toBe('insecure');
+      expect(v4Snap.zones.find((z) => z.zoneName === '1.in-addr.arpa.')?.status).toBe('secure');
+      expect(v4Snap.reverseDns?.targets.map((t) => t.hostname)).toContain('one.one.one.one.');
+      expect(v4Snap.reverseDns?.fcrdnsStatus).toBe('valid');
+      expect(v4Snap.reverseDns?.bgp?.bgpPrefix).toBe('1.1.1.0/24');
+      expect(v4Snap.reverseDns?.bgp?.asns.some((a) => a.asn === 13335)).toBe(true);
+
+      const v6Snap = await runDnsvizAnalysis('2606:4700:4700::1111');
+      expect(v6Snap.queriedIp).toBe('2606:4700:4700::1111');
+      expect(v6Snap.queryTypes).toEqual(['PTR']);
+      expect(v6Snap.overallStatus).toBe('insecure');
+      expect(v6Snap.zones.find((z) => z.zoneName === '0.6.2.ip6.arpa.')?.status).toBe('secure');
+      expect(v6Snap.reverseDns?.fcrdnsStatus).toBe('valid');
+      expect(v6Snap.reverseDns?.targets.map((t) => t.hostname)).toContain('one.one.one.one.');
+      expect(v6Snap.reverseDns?.bgp?.asns.some((a) => a.asn === 13335)).toBe(true);
+    },
+    30000
   );
 });

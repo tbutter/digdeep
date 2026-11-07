@@ -26,11 +26,13 @@ import { DohChooser } from './components/DohChooser';
 import { HistoryPanel } from './components/HistoryPanel';
 import { MailAnalysisView } from './components/MailAnalysisView';
 import { ResponsesPanel } from './components/ResponsesPanel';
+import { ReverseDnsCard } from './components/ReverseDnsCard';
 import { SettingsModal } from './components/SettingsModal';
 import { STATUS_META, StatusBadge } from './components/StatusBadge';
 import { ZonesPanel } from './components/ZonesPanel';
 import { reverifySnapshot, runDnsvizAnalysis, SNAPSHOT_ENGINE_VERSION } from './dns/analyzer';
 import { ANALYSIS_MODES, formatDohShortLabel, QUERYABLE_RR_TYPES } from './dns/constants';
+import { parseReverseIpInput } from './dns/ipUtils';
 import { parseDkimSelectorInput, runMailAnalysis } from './dns/mailAnalyzer';
 import type { AnalysisMode, AnalysisProgress, AnalysisSnapshot } from './dns/types';
 import { usePwaInstall } from './pwa/usePwaInstall';
@@ -74,6 +76,7 @@ const FOOTER_EXAMPLE_TRACES: ReadonlyArray<{
     types: ['MX', 'TXT'],
     label: 'ietf.org (MX + DANE + SPF + DKIM + DMARC)',
   },
+  { domain: '9.9.9.9', types: ['PTR'], label: '9.9.9.9 (rDNS PTR + FCrDNS + BGP ASN)' },
   { domain: 'cloudflare.com', types: ['A', 'AAAA'], label: 'cloudflare.com (ECDSA)' },
   { domain: '.', types: ['DNSKEY', 'SOA'], label: '. (Root Zone)' },
 ];
@@ -97,7 +100,10 @@ export function App() {
     const initialMode: AnalysisMode =
       deepLink.mode ?? savedSnapshots[0]?.mode ?? 'dnssec';
     const initialDomain = deepLink.name ?? savedSnapshots[0]?.displayDomain ?? 'digdeep.butter.eu';
-    const initialTypes = deepLink.types ?? savedSnapshots[0]?.queryTypes ?? ['A', 'AAAA'];
+    const initialIpParsed = parseReverseIpInput(initialDomain);
+    const initialTypes =
+      deepLink.types ??
+      (initialIpParsed?.wasRawIpInput ? ['PTR'] : savedSnapshots[0]?.queryTypes ?? ['A', 'AAAA']);
     const initialDkimSelectors =
       deepLink.dkimSelectors ?? savedSnapshots[0]?.customDkimSelectors ?? [];
 
@@ -109,6 +115,8 @@ export function App() {
         (latestSnap.customDkimSelectors ?? []).join(',') === deepLink.dkimSelectors.join(',')) &&
       (!deepLink.name ||
         latestSnap.displayDomain.toLowerCase() === deepLink.name.toLowerCase().replace(/\.$/, '') ||
+        (initialIpParsed &&
+          latestSnap.displayDomain.toLowerCase() === initialIpParsed.displayArpa.toLowerCase()) ||
         (deepLink.name === '.' && latestSnap.displayDomain === '.'));
 
     const defaultTab: ActiveTab = initialMode === 'mail' ? 'mail' : 'graph';
@@ -223,10 +231,27 @@ export function App() {
       }
     ) => {
       const cleanDomain = targetDomain.trim() || '.';
-      const modeToRun: AnalysisMode = options?.modeOverride ?? analysisMode;
-      const cleanTypes = typesToQuery.length > 0 ? typesToQuery : ['A'];
+      const parsedIp = parseReverseIpInput(cleanDomain);
+      const modeToRun: AnalysisMode =
+        parsedIp?.wasRawIpInput && !options?.modeOverride
+          ? 'dnssec'
+          : (options?.modeOverride ?? analysisMode);
+      const rawTypes = typesToQuery.length > 0 ? typesToQuery : ['A'];
+      const cleanTypes =
+        parsedIp?.wasRawIpInput &&
+        rawTypes.every((t) => t.toUpperCase() === 'A' || t.toUpperCase() === 'AAAA')
+          ? ['PTR']
+          : rawTypes;
       const dkimSelsToUse = options?.dkimSelectorsOverride ?? customDkimSelectors;
       const endpointToUse = options?.dohEndpointOverride ?? settings.dohEndpoint;
+
+      if (parsedIp?.wasRawIpInput) {
+        if (modeToRun !== analysisMode) setAnalysisMode(modeToRun);
+        if (cleanTypes.includes('PTR') && !selectedTypes.includes('PTR')) {
+          setSelectedTypes(['PTR']);
+          setShowExtraTypes(true);
+        }
+      }
 
       if (!options?.preserveFocus) {
         setFocusedGraphTarget(null);
@@ -655,7 +680,7 @@ export function App() {
                 type="text"
                 value={domainInput}
                 onChange={(e) => setDomainInput(e.target.value)}
-                placeholder="Enter domain name (e.g. digdeep.butter.eu, dnssec-failed.org, www.iana.org, .) — press / to focus"
+                placeholder="Enter domain or IPv4/IPv6 address (e.g. digdeep.butter.eu, 1.1.1.1, 2606:4700:4700::1111, .) — press / to focus"
                 className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 pl-10 pr-10 py-2.5 font-mono text-sm text-slate-900 dark:text-slate-100 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20"
               />
               <kbd className="hidden sm:inline-block absolute right-3 top-1/2 -translate-y-1/2 rounded border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-400">
@@ -792,6 +817,30 @@ export function App() {
               </div>
             )}
           </div>
+
+          {(() => {
+            const liveIp = parseReverseIpInput(domainInput);
+            if (!liveIp) return null;
+            return (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-1.5 text-xs">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="font-semibold text-cyan-800 dark:text-cyan-200">
+                    IPv{liveIp.family} Reverse DNS Detected:
+                  </span>
+                  <code className="font-mono font-bold text-slate-900 dark:text-slate-100">
+                    {liveIp.ip}
+                  </code>
+                  <span className="text-slate-400">→</span>
+                  <code className="font-mono text-cyan-700 dark:text-cyan-300 break-all">
+                    {liveIp.displayArpa}
+                  </code>
+                </div>
+                <span className="font-mono text-[11px] text-cyan-700 dark:text-cyan-300">
+                  PTR · .arpa DNSSEC Chain · FCrDNS · BGP ASN
+                </span>
+              </div>
+            );
+          })()}
         </div>
       </header>
 
@@ -856,7 +905,15 @@ export function App() {
                 <StatusBadge status={activeSnapshot.overallStatus} size="md" />
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono font-bold text-base text-slate-900 dark:text-slate-100">
+                    {activeSnapshot.queriedIp && (
+                      <>
+                        <span className="font-mono font-bold text-base text-cyan-700 dark:text-cyan-300">
+                          {activeSnapshot.queriedIp}
+                        </span>
+                        <span className="text-slate-400">→</span>
+                      </>
+                    )}
+                    <span className="font-mono font-bold text-base text-slate-900 dark:text-slate-100 break-all">
                       {activeSnapshot.displayDomain}
                     </span>
                     {activeSnapshot.mode === 'mail' ? (
@@ -933,6 +990,25 @@ export function App() {
                 </div>
               </div>
             </div>
+
+            {activeSnapshot.reverseDns && (
+              <ReverseDnsCard
+                reverseDns={activeSnapshot.reverseDns}
+                onJumpToGraphTarget={(targetId) => {
+                  setFocusedGraphTarget(targetId);
+                  setActiveTab('graph');
+                }}
+                onTraceHostname={(hostname) => {
+                  setAnalysisMode('dnssec');
+                  setDomainInput(hostname);
+                  setSelectedTypes(['A', 'AAAA']);
+                  void executeAnalysis(hostname, ['A', 'AAAA'], {
+                    modeOverride: 'dnssec',
+                    pushHistory: true,
+                  });
+                }}
+              />
+            )}
 
             {/* Navigation Tabs */}
             <div className="flex items-center gap-1.5 overflow-x-auto border-b border-slate-200 dark:border-slate-800 pb-2">

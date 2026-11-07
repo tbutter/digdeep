@@ -24,6 +24,15 @@ import {
   isSubdomainOrEqual,
   normalizeFqdn,
 } from './encoding';
+import {
+  formatCanonicalIpv6,
+  parseCymruAsnTxt,
+  parseCymruOriginTxt,
+  parseIpv4Octets,
+  parseIpv6Groups,
+  parseReverseIpInput,
+  type ParsedReverseIpTarget,
+} from './ipUtils';
 import { evaluateMailFromSnapshotData } from './mailAnalyzer';
 import type {
   AnalysisMode,
@@ -32,6 +41,7 @@ import type {
   AnalyzedDnskey,
   AnalyzedRrset,
   AuditFinding,
+  BgpAsnOrganization,
   CnameEdge,
   DnsRecord,
   DnskeyRdata,
@@ -40,13 +50,16 @@ import type {
   MtaStsPolicyFetchResult,
   NameserverEntry,
   ResolverVerdict,
+  ReverseDnsAnalysis,
+  ReverseIpBgpInfo,
+  ReversePtrTargetEntry,
   RrsigVerification,
   SoaRdata,
   ValidationStatus,
   ZoneAnalysis,
 } from './types';
 
-export const SNAPSHOT_ENGINE_VERSION = 6;
+export const SNAPSHOT_ENGINE_VERSION = 7;
 
 export interface AnalyzeOptions extends DohClientOptions {
   queryTypes?: string[];
@@ -135,7 +148,35 @@ export async function discoverZoneCutsForName(
 ): Promise<void> {
   discoveredZones.add('.');
   const hierarchy = getDomainHierarchy(fqdn);
-  const candidates = hierarchy.slice(1).filter((c) => !checkedCandidates.has(c));
+
+  // Optimization for 32-nibble .ip6.arpa. reverse names (which have 35 hierarchy levels):
+  // Probe the leaf SOA first so the Authority SOA owner reveals the deepest delegated prefix zone,
+  // avoiding redundant SOA/DS queries for every single host nibble below the delegated zone apex.
+  let filteredHierarchy = hierarchy.slice(1);
+  if (fqdn.endsWith('.ip6.arpa.') && hierarchy.length > 14) {
+    checkedCandidates.add(fqdn);
+    const leafSoaLog = await session
+      .query(fqdn, RR_TYPES.SOA, {
+        cd: true,
+        doBit: true,
+        purpose: `Zone-cut probe (${fqdn} SOA)`,
+      })
+      .catch(() => undefined);
+    const leafAuthSoa = [
+      ...(leafSoaLog?.packet.answers ?? []),
+      ...(leafSoaLog?.packet.authorities ?? []),
+    ].find((r) => r.type === RR_TYPES.SOA);
+    if (leafAuthSoa) {
+      const leafZone = normalizeFqdn(leafAuthSoa.name);
+      discoveredZones.add(leafZone);
+      const leafIdx = hierarchy.indexOf(leafZone);
+      if (leafIdx > 0) {
+        filteredHierarchy = hierarchy.slice(1, leafIdx + 1);
+      }
+    }
+  }
+
+  const candidates = filteredHierarchy.filter((c) => !checkedCandidates.has(c));
   if (candidates.length === 0) return;
 
   for (const c of candidates) checkedCandidates.add(c);
@@ -159,18 +200,29 @@ export async function discoverZoneCutsForName(
 
 /**
  * Runs a full live client-side DNSViz trace & cryptographic analysis via 1.1.1.1 DoH.
+ * Automatically detects raw IPv4 / IPv6 address inputs and converts them to `.in-addr.arpa.` / `.ip6.arpa.`
+ * `PTR` traces with Forward-Confirmed Reverse DNS (FCrDNS) and BGP ASN lookup.
  */
 export async function runDnsvizAnalysis(
   rawDomain: string,
   options: AnalyzeOptions = {}
 ): Promise<AnalysisSnapshot> {
   const startedAt = Date.now();
-  const targetName = normalizeFqdn(rawDomain);
+  const reverseIpTarget = parseReverseIpInput(rawDomain);
+  const targetName = reverseIpTarget ? reverseIpTarget.arpaFqdn : normalizeFqdn(rawDomain);
   const displayDomain = displayFqdn(targetName);
-  const queryTypes =
+  const requestedTypes =
     options.queryTypes && options.queryTypes.length > 0
       ? Array.from(new Set(options.queryTypes.map((t) => t.toUpperCase())))
       : ['A', 'AAAA'];
+  const queryTypes =
+    reverseIpTarget &&
+    (!options.queryTypes ||
+      options.queryTypes.length === 0 ||
+      (reverseIpTarget.wasRawIpInput &&
+        requestedTypes.every((t) => t === 'A' || t === 'AAAA')))
+      ? ['PTR']
+      : requestedTypes;
   const trustAnchors = options.trustAnchors ?? IANA_ROOT_TRUST_ANCHORS;
   const endpoint = options.endpoint ?? DEFAULT_DOH_ENDPOINT;
 
@@ -338,6 +390,84 @@ export async function runDnsvizAnalysis(
     );
   }
 
+  // Phase 4b: Reverse DNS Forward-Confirmed rDNS (FCrDNS) & Team Cymru BGP ASN Lookup
+  if (reverseIpTarget) {
+    const ptrTargets = new Set<string>();
+    const logsNow = session.getLogs();
+    for (const log of logsNow) {
+      if (log.qtype === RR_TYPES.PTR) {
+        for (const ans of log.packet.answers) {
+          if (ans.type === RR_TYPES.PTR && ans.parsed.kind === 'GENERIC' && ans.parsed.target) {
+            ptrTargets.add(normalizeFqdn(ans.parsed.target));
+          }
+        }
+      }
+    }
+
+    const rdnsTasks: Promise<unknown>[] = [];
+    for (const ptrHost of Array.from(ptrTargets).slice(0, 8)) {
+      rdnsTasks.push(
+        session
+          .query(ptrHost, RR_TYPES.A, {
+            cd: false,
+            doBit: true,
+            purpose: `Reverse FCrDNS lookup (${ptrHost} A)`,
+          })
+          .catch(() => undefined),
+        session
+          .query(ptrHost, RR_TYPES.AAAA, {
+            cd: false,
+            doBit: true,
+            purpose: `Reverse FCrDNS lookup (${ptrHost} AAAA)`,
+          })
+          .catch(() => undefined)
+      );
+    }
+
+    if (reverseIpTarget.isPublic && reverseIpTarget.cymruOriginQname) {
+      const originQname = reverseIpTarget.cymruOriginQname;
+      rdnsTasks.push(
+        session
+          .query(originQname, RR_TYPES.TXT, {
+            cd: false,
+            doBit: true,
+            purpose: `BGP ASN lookup (${originQname} TXT)`,
+          })
+          .then(async (originLog) => {
+            const txtStrings: string[] = [];
+            for (const ans of originLog.packet.answers) {
+              if (ans.type === RR_TYPES.TXT && ans.parsed.kind === 'TXT') {
+                txtStrings.push(ans.parsed.joinedText);
+              }
+            }
+            const parsedOrigins = parseCymruOriginTxt(txtStrings);
+            const uniqueAsns = Array.from(
+              new Set(parsedOrigins.flatMap((o) => o.asns))
+            ).slice(0, 4);
+            if (uniqueAsns.length > 0) {
+              await Promise.all(
+                uniqueAsns.map((asn) => {
+                  const asnQname = `as${asn}.asn.cymru.com.`;
+                  return session
+                    .query(asnQname, RR_TYPES.TXT, {
+                      cd: false,
+                      doBit: true,
+                      purpose: `BGP ASN lookup (${asnQname} TXT)`,
+                    })
+                    .catch(() => undefined);
+                })
+              );
+            }
+          })
+          .catch(() => undefined)
+      );
+    }
+
+    if (rdnsTasks.length > 0) {
+      await Promise.all(rdnsTasks);
+    }
+  }
+
   // Phase 5: Cryptographic validation & graph synthesis
   currentPhase = 'validating';
   options.onProgress?.({
@@ -353,6 +483,7 @@ export async function runDnsvizAnalysis(
   return evaluateSnapshotFromLogs({
     id: `snap-${capturedAt}-${Math.random().toString(36).slice(2, 8)}`,
     targetName,
+    queriedIp: reverseIpTarget?.ip,
     queryTypes,
     dohEndpoint: endpoint,
     capturedAt,
@@ -376,6 +507,7 @@ export async function reverifySnapshot(
     id: snapshot.id,
     mode: snapshot.mode,
     targetName: snapshot.targetName,
+    queriedIp: snapshot.queriedIp,
     queryTypes: snapshot.queryTypes,
     customDkimSelectors: snapshot.customDkimSelectors,
     mtaStsPolicyFetch: snapshot.mtaStsPolicyFetch,
@@ -397,6 +529,7 @@ interface EvaluateInput {
   id: string;
   mode?: AnalysisMode;
   targetName: string;
+  queriedIp?: string;
   queryTypes: string[];
   customDkimSelectors?: string[];
   mtaStsPolicyFetch?: MtaStsPolicyFetchResult;
@@ -452,6 +585,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     id,
     mode = 'dnssec',
     targetName,
+    queriedIp,
     queryTypes,
     customDkimSelectors,
     mtaStsPolicyFetch,
@@ -465,7 +599,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
 
   const validationEpochSec = Math.floor(validatedAt / 1000);
   const enabledAnchors = trustAnchors.filter((ta) => ta.enabled);
-  // Exclude auxiliary out-of-bailiwick nameserver IP, recursive SPF, DMARC report, MX rDNS, and speculative DKIM/Mail helper lookups from DNSSEC zone reconstruction
+  // Exclude auxiliary out-of-bailiwick nameserver IP, recursive SPF, DMARC report, MX rDNS, Reverse FCrDNS, BGP ASN, and speculative DKIM/Mail helper lookups from DNSSEC zone reconstruction
   const cdLogs = queries.filter(
     (q) =>
       q.cd &&
@@ -474,7 +608,9 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       !q.purpose.startsWith('DMARC lookup') &&
       !q.purpose.startsWith('DKIM probe') &&
       !q.purpose.startsWith('Mail probe') &&
-      !q.purpose.startsWith('MX rDNS lookup')
+      !q.purpose.startsWith('MX rDNS lookup') &&
+      !q.purpose.startsWith('Reverse FCrDNS lookup') &&
+      !q.purpose.startsWith('BGP ASN lookup')
   );
 
   // Reconstruct set of discovered zones from DNSKEY queries + SOA records
@@ -1530,7 +1666,13 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
 
   // 7. Packet Size / UDP Fragmentation & Extended DNS Error (RFC 8914) Audit Checks
   for (const log of queries) {
-    if (log.purpose.startsWith('Nameserver IP')) continue;
+    if (
+      log.purpose.startsWith('Nameserver IP') ||
+      log.purpose.startsWith('Reverse FCrDNS lookup') ||
+      log.purpose.startsWith('BGP ASN lookup')
+    ) {
+      continue;
+    }
     if (log.packet.wireSize > 1232) {
       findings.push({
         id: `warn-size-${log.id}`,
@@ -1563,7 +1705,13 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
   // 8. Extract 1.1.1.1 CD=0 Resolver Verdict
   const valQuery =
     queries.find((q) => !q.cd && q.purpose.includes('validating check')) ??
-    queries.find((q) => !q.cd && !q.purpose.startsWith('SPF lookup'));
+    queries.find(
+      (q) =>
+        !q.cd &&
+        !q.purpose.startsWith('SPF lookup') &&
+        !q.purpose.startsWith('Reverse FCrDNS lookup') &&
+        !q.purpose.startsWith('BGP ASN lookup')
+    );
   const resolverVerdict: ResolverVerdict | undefined = valQuery
     ? {
         qname: valQuery.qname,
@@ -1667,6 +1815,20 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     overallSummary = mailResult.overallSummary;
   }
 
+  let reverseDns: ReverseDnsAnalysis | undefined;
+  const reverseIpTarget = mode !== 'mail' ? parseReverseIpInput(queriedIp ?? targetName) : null;
+  if (reverseIpTarget) {
+    const rdnsEval = evaluateReverseDnsFromSnapshotData({
+      reverseIpTarget,
+      queries,
+      zones,
+      cnameEdges,
+      overallStatus,
+    });
+    reverseDns = rdnsEval.reverseDns;
+    findings.push(...rdnsEval.findings);
+  }
+
   // Deduplicate findings & sort errors -> warnings -> info
   const severityOrder: Record<AuditFinding['severity'], number> = {
     error: 0,
@@ -1687,6 +1849,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     ...(mode !== 'dnssec' ? { mode } : {}),
     targetName,
     displayDomain: displayFqdn(targetName),
+    ...(reverseIpTarget ? { queriedIp: reverseIpTarget.ip } : {}),
     queryTypes,
     ...(customDkimSelectors && customDkimSelectors.length > 0 ? { customDkimSelectors } : {}),
     ...(mtaStsPolicyFetch ? { mtaStsPolicyFetch } : {}),
@@ -1703,5 +1866,307 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     queries,
     trustAnchorsUsed: trustAnchors,
     ...(mailAnalysis ? { mailAnalysis } : {}),
+    ...(reverseDns ? { reverseDns } : {}),
+  };
+}
+
+function evaluateReverseDnsFromSnapshotData(params: {
+  reverseIpTarget: ParsedReverseIpTarget;
+  queries: DohQueryLog[];
+  zones: ZoneAnalysis[];
+  cnameEdges: CnameEdge[];
+  overallStatus: ValidationStatus;
+}): { reverseDns: ReverseDnsAnalysis; findings: AuditFinding[] } {
+  const { reverseIpTarget, queries, zones, cnameEdges, overallStatus } = params;
+  const findings: AuditFinding[] = [];
+
+  // 1. Walk any CNAME chain from reverseIpTarget.arpaFqdn to terminal PTR owner (e.g. RFC 2317 classless delegation)
+  const cnameChain: string[] = [];
+  let resolvedOwner = reverseIpTarget.arpaFqdn;
+  const seenCname = new Set<string>([resolvedOwner]);
+  for (let hop = 0; hop < 8; hop++) {
+    const edge = cnameEdges.find((e) => e.fromName === resolvedOwner && e.qtypeName === 'PTR');
+    if (edge) {
+      cnameChain.push(edge.toName);
+      resolvedOwner = edge.toName;
+      if (seenCname.has(resolvedOwner)) break;
+      seenCname.add(resolvedOwner);
+      continue;
+    }
+    const log = queries.find((q) => q.qname === resolvedOwner && q.qtype === RR_TYPES.PTR && q.cd);
+    const cnameAns = log?.packet.answers.find(
+      (r) => r.name === resolvedOwner && r.type === RR_TYPES.CNAME
+    );
+    if (cnameAns && cnameAns.parsed.kind === 'GENERIC' && cnameAns.parsed.target) {
+      const next = normalizeFqdn(cnameAns.parsed.target);
+      if (seenCname.has(next)) break;
+      cnameChain.push(next);
+      resolvedOwner = next;
+      seenCname.add(next);
+    } else {
+      break;
+    }
+  }
+
+  const isRfc2317ClasslessDelegation =
+    cnameChain.length > 0 && reverseIpTarget.arpaFqdn.endsWith('.in-addr.arpa.');
+  if (isRfc2317ClasslessDelegation) {
+    findings.push({
+      id: `info-rfc2317-${reverseIpTarget.arpaFqdn}`,
+      severity: 'info',
+      code: 'RFC2317_CLASSLESS_RDNS',
+      title: `RFC 2317 classless IN-ADDR.ARPA CNAME delegation (${reverseIpTarget.displayArpa})`,
+      detail: `${reverseIpTarget.displayArpa} delegates reverse DNS via CNAME chain (${cnameChain.map(displayFqdn).join(' -> ')}) per RFC 2317.`,
+      rfc: 'RFC 2317',
+    });
+  }
+
+  // Locate PTR RRset or negativeNode across analyzed zones
+  let ptrRrset: AnalyzedRrset | undefined;
+  let ptrNegNode: ZoneAnalysis['negativeNodes'][number] | undefined;
+  for (const z of zones) {
+    const rr = z.rrsets.find((r) => r.name === resolvedOwner && r.type === RR_TYPES.PTR);
+    if (rr) ptrRrset = rr;
+    const neg = z.negativeNodes.find(
+      (n) => (n.qname === resolvedOwner || n.qname === reverseIpTarget.arpaFqdn) && n.qtypeName === 'PTR'
+    );
+    if (neg) ptrNegNode = neg;
+  }
+
+  const ptrLog =
+    queries.find((q) => q.qname === resolvedOwner && q.qtype === RR_TYPES.PTR && q.cd) ??
+    queries.find((q) => q.qname === reverseIpTarget.arpaFqdn && q.qtype === RR_TYPES.PTR);
+
+  const ptrNames: string[] = [];
+  for (const ans of ptrRrset?.records ?? ptrLog?.packet.answers ?? []) {
+    if (ans.type === RR_TYPES.PTR && ans.parsed.kind === 'GENERIC' && ans.parsed.target) {
+      const target = normalizeFqdn(ans.parsed.target);
+      if (!ptrNames.includes(target)) ptrNames.push(target);
+    }
+  }
+
+  let ptrStatus: ReverseDnsAnalysis['ptrStatus'] = 'resolved';
+  if (ptrNames.length > 0) {
+    ptrStatus = 'resolved';
+  } else if (ptrLog?.packet.flags.rcode === 3 || ptrNegNode?.kind === 'NXDOMAIN') {
+    ptrStatus = 'nxdomain';
+  } else if (ptrLog && ptrLog.packet.flags.rcode !== 0) {
+    ptrStatus = 'servfail';
+  } else {
+    ptrStatus = 'nodata';
+  }
+
+  const ptrDnssecStatus: ValidationStatus =
+    ptrRrset?.status ?? ptrNegNode?.status ?? overallStatus;
+
+  // 2. Evaluate Forward-Confirmed Reverse DNS (FCrDNS) for each PTR target hostname
+  const canonicalTargetIp =
+    reverseIpTarget.family === 4
+      ? parseIpv4Octets(reverseIpTarget.ip)?.join('.') ?? reverseIpTarget.ip
+      : (() => {
+          const g = parseIpv6Groups(reverseIpTarget.ip);
+          return g ? formatCanonicalIpv6(g) : reverseIpTarget.ip.toLowerCase();
+        })();
+
+  const targets: ReversePtrTargetEntry[] = ptrNames.map((hostname) => {
+    const aLog =
+      queries.find((q) => q.qname === hostname && q.qtype === RR_TYPES.A && !q.cd) ??
+      queries.find((q) => q.qname === hostname && q.qtype === RR_TYPES.A);
+    const aaaaLog =
+      queries.find((q) => q.qname === hostname && q.qtype === RR_TYPES.AAAA && !q.cd) ??
+      queries.find((q) => q.qname === hostname && q.qtype === RR_TYPES.AAAA);
+
+    const forwardIpv4: string[] = [];
+    const forwardIpv6: string[] = [];
+
+    for (const ans of aLog?.packet.answers ?? []) {
+      if (ans.type === RR_TYPES.A && ans.rdataText) {
+        const octs = parseIpv4Octets(ans.rdataText);
+        const normV4 = octs ? octs.join('.') : ans.rdataText.trim();
+        if (!forwardIpv4.includes(normV4)) forwardIpv4.push(normV4);
+      }
+    }
+    for (const ans of aaaaLog?.packet.answers ?? []) {
+      if (ans.type === RR_TYPES.AAAA && ans.rdataText) {
+        const grps = parseIpv6Groups(ans.rdataText);
+        const normV6 = grps ? formatCanonicalIpv6(grps) : ans.rdataText.trim().toLowerCase();
+        if (!forwardIpv6.includes(normV6)) forwardIpv6.push(normV6);
+      }
+    }
+
+    let forwardStatus: ReversePtrTargetEntry['forwardStatus'] = 'unchecked';
+    if (!aLog && !aaaaLog) {
+      forwardStatus = 'unchecked';
+    } else {
+      const relevantList = reverseIpTarget.family === 4 ? forwardIpv4 : forwardIpv6;
+      if (relevantList.includes(canonicalTargetIp)) {
+        forwardStatus = 'match';
+      } else if (forwardIpv4.length > 0 || forwardIpv6.length > 0) {
+        forwardStatus = 'mismatch';
+      } else if (
+        (aLog && aLog.packet.flags.rcode === 3) ||
+        (aaaaLog && aaaaLog.packet.flags.rcode === 3)
+      ) {
+        forwardStatus = 'nxdomain';
+      } else if (
+        (aLog && aLog.packet.flags.rcode !== 0) ||
+        (aaaaLog && aaaaLog.packet.flags.rcode !== 0)
+      ) {
+        forwardStatus = 'temperror';
+      } else {
+        forwardStatus = 'nodata';
+      }
+    }
+
+    const relevantForwardLog = reverseIpTarget.family === 4 ? aLog : aaaaLog;
+    const forwardDnssecStatus: ValidationStatus = relevantForwardLog
+      ? relevantForwardLog.packet.flags.rcode !== 0 && relevantForwardLog.packet.flags.rcode !== 3
+        ? 'bogus'
+        : relevantForwardLog.packet.flags.ad
+          ? 'secure'
+          : 'insecure'
+      : 'indeterminate';
+
+    return {
+      hostname,
+      displayHostname: displayFqdn(hostname),
+      forwardStatus,
+      forwardIpv4,
+      forwardIpv6,
+      forwardDnssecStatus,
+    };
+  });
+
+  let fcrdnsStatus: ReverseDnsAnalysis['fcrdnsStatus'] = 'not-applicable';
+  let fcrdnsSummary = '';
+  if (ptrStatus !== 'resolved' || targets.length === 0) {
+    fcrdnsStatus = ptrStatus === 'servfail' ? 'temperror' : 'no-ptr';
+    fcrdnsSummary =
+      ptrStatus === 'nxdomain'
+        ? `No PTR record published for ${reverseIpTarget.ip} (${reverseIpTarget.displayArpa} returned NXDOMAIN).`
+        : ptrStatus === 'servfail'
+          ? `Reverse DNS PTR query for ${reverseIpTarget.ip} failed (SERVFAIL).`
+          : `No PTR record published at ${reverseIpTarget.displayArpa} (NODATA).`;
+
+    if (ptrStatus === 'nxdomain' || ptrStatus === 'nodata') {
+      findings.push({
+        id: `info-rdns-no-ptr-${reverseIpTarget.ip}`,
+        severity: 'info',
+        code: 'RDNS_PTR_MISSING',
+        title: `No PTR record published for ${reverseIpTarget.ip} (${reverseIpTarget.displayArpa})`,
+        detail: fcrdnsSummary,
+        rfc: 'RFC 1912 §2.1',
+        targetId: ptrNegNode?.id,
+      });
+    }
+  } else {
+    const checkedTargets = targets.filter((t) => t.forwardStatus !== 'unchecked');
+    const matchedTargets = targets.filter((t) => t.forwardStatus === 'match');
+    if (checkedTargets.length === 0) {
+      fcrdnsStatus = 'not-applicable';
+      fcrdnsSummary = `PTR resolves to ${targets.map((t) => t.displayHostname).join(', ')}.`;
+    } else if (matchedTargets.length === targets.length) {
+      fcrdnsStatus = 'valid';
+      fcrdnsSummary = `Forward-Confirmed Reverse DNS (FCrDNS) verified: ${targets.map((t) => t.displayHostname).join(', ')} resolves back to ${reverseIpTarget.ip}.`;
+    } else if (matchedTargets.length > 0) {
+      fcrdnsStatus = 'partial';
+      fcrdnsSummary = `Partial FCrDNS match (${matchedTargets.length}/${targets.length} PTR hostnames resolve back to ${reverseIpTarget.ip}).`;
+      findings.push({
+        id: `warn-rdns-fcrdns-partial-${reverseIpTarget.ip}`,
+        severity: 'warning',
+        code: 'RDNS_FCRDNS_MISMATCH',
+        title: `Partial Forward-Confirmed Reverse DNS (FCrDNS) mismatch for ${reverseIpTarget.ip}`,
+        detail: fcrdnsSummary,
+        rfc: 'RFC 1912 §2.1',
+        targetId: ptrRrset?.id,
+      });
+    } else {
+      fcrdnsStatus = 'ptr-mismatch';
+      const detailParts = targets.map((t) => {
+        const ips = [...t.forwardIpv4, ...t.forwardIpv6];
+        return `${t.displayHostname} (${ips.length > 0 ? ips.join(', ') : t.forwardStatus.toUpperCase()})`;
+      });
+      fcrdnsSummary = `FCrDNS mismatch: PTR target ${detailParts.join('; ')} does not resolve back to ${reverseIpTarget.ip}.`;
+      findings.push({
+        id: `warn-rdns-fcrdns-mismatch-${reverseIpTarget.ip}`,
+        severity: 'warning',
+        code: 'RDNS_FCRDNS_MISMATCH',
+        title: `Forward-Confirmed Reverse DNS (FCrDNS) mismatch for ${reverseIpTarget.ip}`,
+        detail: fcrdnsSummary,
+        rfc: 'RFC 1912 §2.1',
+        targetId: ptrRrset?.id,
+      });
+    }
+  }
+
+  // 3. Parse BGP ASN & Prefix Ownership from Team Cymru DNS TXT logs
+  let bgp: ReverseIpBgpInfo | undefined;
+  if (reverseIpTarget.cymruOriginQname) {
+    const originLog = queries.find(
+      (q) => q.qname === reverseIpTarget.cymruOriginQname && q.qtype === RR_TYPES.TXT
+    );
+    if (originLog) {
+      const originTxts: string[] = [];
+      for (const ans of originLog.packet.answers) {
+        if (ans.type === RR_TYPES.TXT && ans.parsed.kind === 'TXT') {
+          originTxts.push(ans.parsed.joinedText);
+        }
+      }
+      const parsedOrigins = parseCymruOriginTxt(originTxts);
+      if (parsedOrigins.length > 0) {
+        const primaryOrigin = parsedOrigins[0];
+        const uniqueAsns = Array.from(new Set(parsedOrigins.flatMap((o) => o.asns)));
+        const asns: BgpAsnOrganization[] = uniqueAsns.map((asn) => {
+          const asnQname = `as${asn}.asn.cymru.com.`;
+          const asnLog = queries.find((q) => q.qname === asnQname && q.qtype === RR_TYPES.TXT);
+          const asnTxts: string[] = [];
+          for (const ans of asnLog?.packet.answers ?? []) {
+            if (ans.type === RR_TYPES.TXT && ans.parsed.kind === 'TXT') {
+              asnTxts.push(ans.parsed.joinedText);
+            }
+          }
+          const parsedAsn = parseCymruAsnTxt(asnTxts);
+          return {
+            asn,
+            asName: parsedAsn?.asName,
+            country: parsedAsn?.country ?? primaryOrigin.country,
+            rir: parsedAsn?.rir ?? primaryOrigin.rir,
+            allocatedDate: parsedAsn?.allocatedDate ?? primaryOrigin.allocatedDate,
+          };
+        });
+
+        bgp = {
+          originQueryName: reverseIpTarget.cymruOriginQname,
+          bgpPrefix: primaryOrigin.bgpPrefix,
+          country: primaryOrigin.country,
+          rir: primaryOrigin.rir,
+          allocatedDate: primaryOrigin.allocatedDate,
+          asns,
+          rawOriginTxt: primaryOrigin.raw,
+        };
+      }
+    }
+  }
+
+  return {
+    reverseDns: {
+      ip: reverseIpTarget.ip,
+      family: reverseIpTarget.family,
+      arpaFqdn: reverseIpTarget.arpaFqdn,
+      displayArpa: reverseIpTarget.displayArpa,
+      isPublic: reverseIpTarget.isPublic,
+      specialRangeNote: reverseIpTarget.specialRangeNote,
+      ptrStatus,
+      ptrDnssecStatus,
+      ptrRrsetId: ptrRrset?.id,
+      ptrNegativeNodeId: ptrNegNode?.id,
+      cnameChain,
+      isRfc2317ClasslessDelegation,
+      targets,
+      fcrdnsStatus,
+      fcrdnsSummary,
+      ...(bgp ? { bgp } : {}),
+    },
+    findings,
   };
 }
