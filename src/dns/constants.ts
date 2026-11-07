@@ -216,7 +216,7 @@ export const TLSA_MATCHING_TYPES: Record<
  * Extensible Analysis Mode Registry
  */
 export interface AnalysisModeDescriptor {
-  id: 'dnssec' | 'mail' | 'web';
+  id: 'dnssec' | 'mail' | 'web' | 'consensus';
   label: string;
   shortLabel: string;
   actionLabel: string;
@@ -246,6 +246,14 @@ export const ANALYSIS_MODES: readonly AnalysisModeDescriptor[] = [
     actionLabel: 'Analyze Web & TLS DNS',
     description:
       'HTTPS/SVCB (RFC 9460 ALPN, IP hints, TLS ECH), tree-walking CAA (RFC 8659/8657), Web DANE (_443._tcp TLSA), and SSHFP with WebCrypto DNSSEC',
+  },
+  {
+    id: 'consensus',
+    label: 'Multi-Resolver · Consensus, EDE & Filtering',
+    shortLabel: 'Consensus (Multi-DoH · EDE · Filtering)',
+    actionLabel: 'Compare DoH Resolvers',
+    description:
+      'Parallel multi-resolver DoH matrix (1.1.1.1, 8.8.8.8, Quad9, DNS.SB, DNS4EU) checking SOA serial skew, DNSSEC AD consensus, RFC 8914 EDE, and protective filtering',
   },
 ] as const;
 
@@ -376,11 +384,15 @@ export const IANA_ROOT_TRUST_ANCHORS: TrustAnchor[] = [
 
 export const DEFAULT_DOH_ENDPOINT = 'https://1.1.1.1/dns-query';
 
+export type DohResolverRole = 'unfiltered' | 'protective' | 'family-adblock';
+
 export interface DohServerPreset {
   url: string;
   shortLabel: string;
   provider: string;
   description: string;
+  role: DohResolverRole;
+  isAlias?: boolean;
 }
 
 /**
@@ -393,68 +405,100 @@ export const DOH_SERVER_PRESETS: DohServerPreset[] = [
     shortLabel: '1.1.1.1',
     provider: 'Cloudflare',
     description: 'Cloudflare 1.1.1.1 (Default, RFC 8914 EDE)',
+    role: 'unfiltered',
+  },
+  {
+    url: 'https://1.1.1.2/dns-query',
+    shortLabel: '1.1.1.2',
+    provider: 'Cloudflare Protective',
+    description: 'Cloudflare 1.1.1.2 Malware Blocking (RFC 8914 EDE)',
+    role: 'protective',
+  },
+  {
+    url: 'https://1.1.1.3/dns-query',
+    shortLabel: '1.1.1.3',
+    provider: 'Cloudflare Family',
+    description: 'Cloudflare 1.1.1.3 Malware & Adult Content Filter (RFC 8914 EDE)',
+    role: 'family-adblock',
   },
   {
     url: 'https://8.8.8.8/dns-query',
     shortLabel: '8.8.8.8',
     provider: 'Google',
     description: 'Google Public DNS (8.8.8.8)',
+    role: 'unfiltered',
   },
   {
     url: 'https://9.9.9.9/dns-query',
     shortLabel: '9.9.9.9',
-    provider: 'Quad9',
-    description: 'Quad9 Secure Anycast (9.9.9.9)',
+    provider: 'Quad9 Protective',
+    description: 'Quad9 Threat-Blocking Anycast (9.9.9.9)',
+    role: 'protective',
   },
   {
     url: 'https://9.9.9.10/dns-query',
     shortLabel: '9.9.9.10',
     provider: 'Quad9 Unfiltered',
-    description: 'Quad9 Unsecured / No Threat Blocking (9.9.9.10)',
+    description: 'Quad9 Unfiltered / No Threat Blocking (9.9.9.10)',
+    role: 'unfiltered',
   },
   {
     url: 'https://doh.dns.sb/dns-query',
     shortLabel: 'doh.dns.sb',
     provider: 'DNS.SB',
     description: 'DNS.SB Privacy Anycast DoH',
+    role: 'unfiltered',
   },
   {
     url: 'https://cloudflare-dns.com/dns-query',
     shortLabel: 'cloudflare-dns.com',
     provider: 'Cloudflare Host',
     description: 'Cloudflare hostname DoH endpoint',
+    role: 'unfiltered',
+    isAlias: true,
   },
   {
     url: 'https://dns.google/dns-query',
     shortLabel: 'dns.google',
     provider: 'Google Host',
     description: 'Google Public DNS hostname endpoint',
+    role: 'unfiltered',
+    isAlias: true,
   },
   {
     url: 'https://dns.quad9.net/dns-query',
     shortLabel: 'dns.quad9.net',
     provider: 'Quad9 Host',
     description: 'Quad9 hostname DoH endpoint',
+    role: 'protective',
+    isAlias: true,
   },
   {
     url: 'https://unfiltered.joindns4.eu/dns-query',
     shortLabel: 'unfiltered.joindns4.eu',
-    provider: 'DNS4EU',
+    provider: 'DNS4EU Unfiltered',
     description: 'DNS4EU Unfiltered European Resolver',
-  },
-  {
-    url: 'https://child-noads.joindns4.eu/dns-query',
-    shortLabel: 'child-noads.joindns4.eu',
-    provider: 'DNS4EU Child + NoAds',
-    description: 'DNS4EU Child Protection & Ad-Blocking Resolver',
+    role: 'unfiltered',
   },
   {
     url: 'https://protective.joindns4.eu/dns-query',
     shortLabel: 'protective.joindns4.eu',
     provider: 'DNS4EU Protective',
     description: 'DNS4EU Protective Threat-Blocking Resolver',
+    role: 'protective',
+  },
+  {
+    url: 'https://child-noads.joindns4.eu/dns-query',
+    shortLabel: 'child-noads.joindns4.eu',
+    provider: 'DNS4EU Child + NoAds',
+    description: 'DNS4EU Child Protection & Ad-Blocking Resolver',
+    role: 'family-adblock',
   },
 ];
+
+export const CONSENSUS_DOH_RESOLVERS: readonly DohServerPreset[] = DOH_SERVER_PRESETS.filter(
+  (p) => !p.isAlias
+);
 
 /**
  * Normalizes user-entered DoH server input (accepts full https:// URLs or bare IP/hostnames

@@ -34,6 +34,7 @@ import {
   parseReverseIpInput,
   type ParsedReverseIpTarget,
 } from './ipUtils';
+import { evaluateConsensusFromSnapshotData } from './consensusAnalyzer';
 import { evaluateMailFromSnapshotData } from './mailAnalyzer';
 import { evaluateWebFromSnapshotData } from './webAnalyzer';
 import type {
@@ -695,7 +696,8 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       !q.purpose.startsWith('Mail probe') &&
       !q.purpose.startsWith('MX rDNS lookup') &&
       !q.purpose.startsWith('Reverse FCrDNS lookup') &&
-      !q.purpose.startsWith('BGP ASN lookup')
+      !q.purpose.startsWith('BGP ASN lookup') &&
+      !q.purpose.startsWith('Consensus probe')
   );
 
   // Reconstruct set of discovered zones from DNSKEY queries + SOA records
@@ -2280,7 +2282,8 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     if (
       log.purpose.startsWith('Nameserver IP') ||
       log.purpose.startsWith('Reverse FCrDNS lookup') ||
-      log.purpose.startsWith('BGP ASN lookup')
+      log.purpose.startsWith('BGP ASN lookup') ||
+      log.purpose.startsWith('Consensus probe')
     ) {
       continue;
     }
@@ -2442,9 +2445,26 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     overallSummary = webResult.overallSummary;
   }
 
+  let consensusAnalysis: AnalysisSnapshot['consensusAnalysis'];
+  if (mode === 'consensus') {
+    const consensusResult = evaluateConsensusFromSnapshotData({
+      targetName,
+      primaryEndpoint: dohEndpoint,
+      queries,
+      zones,
+      targetDomainStatus: overallStatus,
+    });
+    consensusAnalysis = consensusResult.consensusAnalysis;
+    findings.push(...consensusResult.consensusFindings);
+    overallStatus = consensusResult.overallStatus;
+    overallSummary = consensusResult.overallSummary;
+  }
+
   let reverseDns: ReverseDnsAnalysis | undefined;
   const reverseIpTarget =
-    mode !== 'mail' && mode !== 'web' ? parseReverseIpInput(queriedIp ?? targetName) : null;
+    mode !== 'mail' && mode !== 'web' && mode !== 'consensus'
+      ? parseReverseIpInput(queriedIp ?? targetName)
+      : null;
   if (reverseIpTarget) {
     const rdnsEval = evaluateReverseDnsFromSnapshotData({
       reverseIpTarget,
@@ -2495,6 +2515,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     trustAnchorsUsed: trustAnchors,
     ...(mailAnalysis ? { mailAnalysis } : {}),
     ...(webAnalysis ? { webAnalysis } : {}),
+    ...(consensusAnalysis ? { consensusAnalysis } : {}),
     ...(reverseDns ? { reverseDns } : {}),
   };
 }

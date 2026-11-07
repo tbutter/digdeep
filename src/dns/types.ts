@@ -1,8 +1,8 @@
-import type { TrustAnchor } from './constants';
+import type { DohResolverRole, TrustAnchor } from './constants';
 
 export type ValidationStatus = 'secure' | 'insecure' | 'bogus' | 'warning' | 'indeterminate';
 
-export type AnalysisMode = 'dnssec' | 'mail' | 'web';
+export type AnalysisMode = 'dnssec' | 'mail' | 'web' | 'consensus';
 
 export interface DnsHeaderFlags {
   qr: boolean;
@@ -1041,6 +1041,74 @@ export interface WebAnalysisResult {
   };
 }
 
+export type ConsensusResolverClassification =
+  | 'resolved-secure'
+  | 'resolved-insecure'
+  | 'nxdomain'
+  | 'nodata'
+  | 'dnssec-bogus'
+  | 'policy-blocked'
+  | 'upstream-error'
+  | 'unreachable';
+
+export interface ConsensusResolverRow {
+  endpoint: string;
+  shortLabel: string;
+  provider: string;
+  role: DohResolverRole;
+  reachable: boolean;
+  error?: string;
+  latencyMs: number;
+  rcode: number;
+  rcodeName: string;
+  adBit: boolean;
+  ipv4Answers: string[];
+  ipv6Answers: string[];
+  cnameChain: string[];
+  soaSerial?: number;
+  soaZone?: string;
+  dsKeyTags: number[];
+  dnskeyKeyTags: number[];
+  ede: EdeEntry[];
+  isSinkholed: boolean;
+  classification: ConsensusResolverClassification;
+  summary: string;
+}
+
+export interface ConsensusAnalysisResult {
+  targetDomain: string;
+  displayDomain: string;
+  soaZone: string;
+  resolvers: ConsensusResolverRow[];
+  reachableCount: number;
+  unfilteredResolvedCount: number;
+  protectiveBlockedResolvers: string[];
+  dnssecBogusResolvers: string[];
+  upstreamErrorResolvers: string[];
+  adBitConsensus: 'all-ad' | 'all-unsigned' | 'mixed-ad' | 'all-failed';
+  rcodeConsensus: 'unanimous' | 'protective-filtered' | 'divergent';
+  answerConsensus: 'identical' | 'geodns-anycast' | 'protective-sinkhole' | 'divergent' | 'no-answers';
+  soaSerialConsensus: 'synchronized' | 'skew-detected' | 'unavailable';
+  uniqueSoaSerials: { serial: number; resolvers: string[] }[];
+  keyTagConsensus: 'synchronized' | 'rollover-skew' | 'unsigned';
+  edeHighlights: {
+    resolverLabel: string;
+    infoCode: number;
+    name: string;
+    category: 'dnssec-bogus' | 'policy-blocked' | 'upstream-reachability' | 'other';
+    extraText?: string;
+  }[];
+  overallVerdict:
+    | 'unanimous-secure'
+    | 'unanimous-unsigned'
+    | 'geodns-consistent'
+    | 'protective-blocked'
+    | 'propagation-skew'
+    | 'dnssec-bogus'
+    | 'split-horizon-divergent';
+  summary: string;
+}
+
 export interface AnalysisSnapshot {
   id: string;
   version: number;
@@ -1065,6 +1133,7 @@ export interface AnalysisSnapshot {
   trustAnchorsUsed: TrustAnchor[];
   mailAnalysis?: MailAnalysisResult;
   webAnalysis?: WebAnalysisResult;
+  consensusAnalysis?: ConsensusAnalysisResult;
   reverseDns?: ReverseDnsAnalysis;
   pinned?: boolean;
   note?: string;
@@ -1085,7 +1154,8 @@ export interface AnalysisProgress {
     | 'mail-transport'
     | 'web-https'
     | 'web-caa'
-    | 'web-dane';
+    | 'web-dane'
+    | 'consensus-probes';
   message: string;
   completedQueries: number;
 }

@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { evaluateSnapshotFromLogs, reverifySnapshot, runDnsvizAnalysis } from '../analyzer';
 import {
+  CONSENSUS_DOH_RESOLVERS,
   DOH_SERVER_PRESETS,
   IANA_ROOT_TRUST_ANCHORS,
   normalizeDohEndpoint,
   RR_TYPES,
 } from '../constants';
+import {
+  categorizeEdeCode,
+  isSinkholeIpAddress,
+  runConsensusAnalysis,
+} from '../consensusAnalyzer';
 import { computeDsDigest, computeNsec3Hash } from '../crypto';
 import {
   base64ToBytes,
@@ -643,5 +649,109 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
       expect(driftedSnap.findings.some((f) => f.code === 'HTTPS_IP_HINT_DRIFT')).toBe(true);
     },
     25000
+  );
+
+  it(
+    'runs Multi-Resolver DoH Consensus across public & protective resolvers and detects Protective Blocking (RFC 8914 EDE), SOA Serial Skew, and Key-Tag Skew',
+    async () => {
+      // 1. Unit tests for RFC 8914 EDE categorization & sinkhole IP detection
+      expect(CONSENSUS_DOH_RESOLVERS.length).toBeGreaterThanOrEqual(8);
+      expect(categorizeEdeCode(6)).toBe('dnssec-bogus');
+      expect(categorizeEdeCode(15)).toBe('policy-blocked');
+      expect(categorizeEdeCode(17)).toBe('policy-blocked');
+      expect(categorizeEdeCode(22)).toBe('upstream-reachability');
+      expect(isSinkholeIpAddress('0.0.0.0')).toBe(true);
+      expect(isSinkholeIpAddress('127.0.0.1')).toBe(true);
+      expect(isSinkholeIpAddress('::')).toBe(true);
+      expect(isSinkholeIpAddress('93.184.215.14')).toBe(false);
+
+      // 2. Live Multi-Resolver DoH Consensus probe on iana.org
+      const consensusSnap = await runConsensusAnalysis('iana.org');
+      expect(consensusSnap.mode).toBe('consensus');
+      expect(consensusSnap.consensusAnalysis).toBeDefined();
+      const ca = consensusSnap.consensusAnalysis!;
+      expect(ca.resolvers).toHaveLength(CONSENSUS_DOH_RESOLVERS.length);
+      expect(ca.reachableCount).toBeGreaterThanOrEqual(4);
+      expect(ca.uniqueSoaSerials.length).toBeGreaterThanOrEqual(1);
+      expect(ca.keyTagConsensus).toBe('synchronized');
+
+      // 3. Synthetic mutation: simulate protective blocking (0.0.0.0 + EDE 15) on 1.1.1.2 (Cloudflare Protective)
+      //    plus SOA serial skew on 8.8.8.8
+      const mutatedQueries = consensusSnap.queries.map((q) => {
+        if (q.endpoint === 'https://1.1.1.2/dns-query' && q.qtype === RR_TYPES.A) {
+          return {
+            ...q,
+            packet: {
+              ...q.packet,
+              edns: q.packet.edns
+                ? {
+                    ...q.packet.edns,
+                    ede: [
+                      {
+                        infoCode: 15,
+                        name: 'Blocked',
+                        extraText: 'Blocked by Threat Intelligence feed',
+                      },
+                    ],
+                  }
+                : undefined,
+              answers: q.packet.answers.map((ans) =>
+                ans.type === RR_TYPES.A
+                  ? { ...ans, rdataText: '0.0.0.0' }
+                  : ans
+              ),
+            },
+          };
+        }
+        if (q.endpoint === 'https://8.8.8.8/dns-query' && q.qtype === RR_TYPES.SOA) {
+          return {
+            ...q,
+            packet: {
+              ...q.packet,
+              answers: q.packet.answers.map((ans) =>
+                ans.type === RR_TYPES.SOA && ans.parsed.kind === 'SOA'
+                  ? {
+                      ...ans,
+                      parsed: {
+                        ...ans.parsed,
+                        serial: ans.parsed.serial + 42,
+                      },
+                    }
+                  : ans
+              ),
+            },
+          };
+        }
+        return q;
+      });
+
+      const skewedSnap = await evaluateSnapshotFromLogs({
+        id: 'test-consensus-skew-block',
+        mode: 'consensus',
+        targetName: consensusSnap.targetName,
+        queryTypes: consensusSnap.queryTypes,
+        dohEndpoint: consensusSnap.dohEndpoint,
+        capturedAt: consensusSnap.capturedAt,
+        validatedAt: consensusSnap.validatedAt,
+        durationMs: consensusSnap.durationMs,
+        queries: mutatedQueries,
+        trustAnchors: consensusSnap.trustAnchorsUsed,
+      });
+
+      const skewedCa = skewedSnap.consensusAnalysis!;
+      expect(skewedCa.protectiveBlockedResolvers.length).toBeGreaterThanOrEqual(1);
+      const cfProtRow = skewedCa.resolvers.find((r) => r.shortLabel === '1.1.1.2');
+      expect(cfProtRow?.classification).toBe('policy-blocked');
+      expect(cfProtRow?.isSinkholed).toBe(true);
+      expect(cfProtRow?.ede.some((e) => e.infoCode === 15)).toBe(true);
+      expect(skewedCa.soaSerialConsensus).toBe('skew-detected');
+      expect(
+        skewedSnap.findings.some((f) => f.code === 'CONSENSUS_PROTECTIVE_BLOCKED')
+      ).toBe(true);
+      expect(
+        skewedSnap.findings.some((f) => f.code === 'CONSENSUS_SOA_SERIAL_SKEW')
+      ).toBe(true);
+    },
+    30000
   );
 });

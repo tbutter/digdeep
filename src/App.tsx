@@ -10,6 +10,7 @@ import {
   Moon,
   Network,
   Play,
+  Radio,
   RefreshCw,
   Search,
   Settings,
@@ -22,6 +23,7 @@ import {
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { AuditPanel } from './components/AuditPanel';
 import { ChainGraphView } from './components/ChainGraphView';
+import { ConsensusView } from './components/ConsensusView';
 import { DohChooser } from './components/DohChooser';
 import { HistoryPanel } from './components/HistoryPanel';
 import { MailAnalysisView } from './components/MailAnalysisView';
@@ -32,6 +34,7 @@ import { StatusBadge, STATUS_META } from './components/StatusBadge';
 import { WebAnalysisView } from './components/WebAnalysisView';
 import { ZonesPanel } from './components/ZonesPanel';
 import { reverifySnapshot, runDnsvizAnalysis, SNAPSHOT_ENGINE_VERSION } from './dns/analyzer';
+import { runConsensusAnalysis } from './dns/consensusAnalyzer';
 import { ANALYSIS_MODES, formatDohShortLabel, QUERYABLE_RR_TYPES } from './dns/constants';
 import { parseReverseIpInput } from './dns/ipUtils';
 import { parseDkimSelectorInput, runMailAnalysis } from './dns/mailAnalyzer';
@@ -84,6 +87,12 @@ const FOOTER_EXAMPLE_TRACES: ReadonlyArray<{
     types: ['A', 'AAAA', 'HTTPS', 'CAA'],
     label: 'cloudflare.com (HTTPS + ECH + CAA)',
   },
+  {
+    domain: 'dnssec-failed.org',
+    mode: 'consensus',
+    types: ['A', 'AAAA', 'SOA', 'DNSKEY', 'DS'],
+    label: 'dnssec-failed.org (Multi-DoH EDE Consensus)',
+  },
   { domain: '9.9.9.9', types: ['PTR'], label: '9.9.9.9 (rDNS PTR + FCrDNS + BGP ASN)' },
   { domain: 'cloudflare.com', types: ['A', 'AAAA'], label: 'cloudflare.com (ECDSA)' },
   { domain: '.', types: ['DNSKEY', 'SOA'], label: '. (Root Zone)' },
@@ -128,7 +137,13 @@ export function App() {
         (deepLink.name === '.' && latestSnap.displayDomain === '.'));
 
     const defaultTab: ActiveTab =
-      initialMode === 'mail' ? 'mail' : initialMode === 'web' ? 'web' : 'graph';
+      initialMode === 'mail'
+        ? 'mail'
+        : initialMode === 'web'
+          ? 'web'
+          : initialMode === 'consensus'
+            ? 'consensus'
+            : 'graph';
 
     return {
       settings: effectiveSettings,
@@ -198,7 +213,9 @@ export function App() {
           ? 'Mail · DANE · SPF · DKIM · DMARC'
           : activeSnapshot.mode === 'web'
             ? 'Web · HTTPS/SVCB · ECH · CAA · DANE'
-            : 'DNSSEC Visualizer';
+            : activeSnapshot.mode === 'consensus'
+              ? 'Multi-Resolver DoH Consensus & EDE'
+              : 'DNSSEC Visualizer';
       document.title = `${activeSnapshot.displayDomain} (${verdict}) — DigDeep ${modeLabel}`;
     } else {
       document.title = DEFAULT_PAGE_TITLE;
@@ -276,13 +293,17 @@ export function App() {
             ? 'mail-mx'
             : modeToRun === 'web'
               ? 'web-https'
-              : 'zone-cuts',
+              : modeToRun === 'consensus'
+                ? 'consensus-probes'
+                : 'zone-cuts',
         message:
           modeToRun === 'mail'
             ? `Starting ${formatDohShortLabel(endpointToUse)} Mail, DANE, SPF, DKIM & DMARC analysis for ${cleanDomain}…`
             : modeToRun === 'web'
               ? `Starting ${formatDohShortLabel(endpointToUse)} Web, HTTPS/SVCB, ECH, CAA & DANE analysis for ${cleanDomain}…`
-              : `Starting ${formatDohShortLabel(endpointToUse)} DoH trace for ${cleanDomain}…`,
+              : modeToRun === 'consensus'
+                ? `Starting Multi-Resolver DoH Consensus & RFC 8914 EDE probe across 8 resolvers for ${cleanDomain}…`
+                : `Starting ${formatDohShortLabel(endpointToUse)} DoH trace for ${cleanDomain}…`,
         completedQueries: 0,
       });
 
@@ -301,12 +322,18 @@ export function App() {
                   trustAnchors: settings.trustAnchors,
                   onProgress: (p) => setProgress(p),
                 })
-              : await runDnsvizAnalysis(cleanDomain, {
-                  endpoint: endpointToUse,
-                  queryTypes: cleanTypes,
-                  trustAnchors: settings.trustAnchors,
-                  onProgress: (p) => setProgress(p),
-                });
+              : modeToRun === 'consensus'
+                ? await runConsensusAnalysis(cleanDomain, {
+                    endpoint: endpointToUse,
+                    trustAnchors: settings.trustAnchors,
+                    onProgress: (p) => setProgress(p),
+                  })
+                : await runDnsvizAnalysis(cleanDomain, {
+                    endpoint: endpointToUse,
+                    queryTypes: cleanTypes,
+                    trustAnchors: settings.trustAnchors,
+                    onProgress: (p) => setProgress(p),
+                  });
 
         const updatedList = saveSnapshot(snap);
         setSnapshots(updatedList);
@@ -323,7 +350,17 @@ export function App() {
             nextTab = 'web';
             setActiveTab('web');
           }
-        } else if (activeTab === 'history' || activeTab === 'mail' || activeTab === 'web') {
+        } else if (modeToRun === 'consensus') {
+          if (activeTab === 'history' || (activeSnapshot?.mode ?? 'dnssec') !== 'consensus') {
+            nextTab = 'consensus';
+            setActiveTab('consensus');
+          }
+        } else if (
+          activeTab === 'history' ||
+          activeTab === 'mail' ||
+          activeTab === 'web' ||
+          activeTab === 'consensus'
+        ) {
           nextTab = 'graph';
           setActiveTab('graph');
         }
@@ -411,7 +448,16 @@ export function App() {
       setAnalysisMode(nextMode);
       setCustomDkimSelectors(nextDkimSels);
       if (parsed.tab) setActiveTab(parsed.tab);
-      else setActiveTab(nextMode === 'mail' ? 'mail' : nextMode === 'web' ? 'web' : 'graph');
+      else
+        setActiveTab(
+          nextMode === 'mail'
+            ? 'mail'
+            : nextMode === 'web'
+              ? 'web'
+              : nextMode === 'consensus'
+                ? 'consensus'
+                : 'graph'
+        );
 
       setFocusedGraphTarget(parsed.focus);
 
@@ -431,7 +477,9 @@ export function App() {
           ? ['MX', 'TXT']
           : nextMode === 'web'
             ? ['A', 'AAAA', 'HTTPS', 'SVCB', 'CAA', 'TLSA', 'SSHFP']
-            : ['A', 'AAAA']);
+            : nextMode === 'consensus'
+              ? ['A', 'AAAA', 'SOA', 'DNSKEY', 'DS']
+              : ['A', 'AAAA']);
       const targetDoh = parsed.dohEndpoint ?? settings.dohEndpoint;
       setDomainInput(parsed.name);
       if (nextMode === 'dnssec') {
@@ -449,7 +497,7 @@ export function App() {
           s.displayDomain.toLowerCase() === parsed.name!.toLowerCase().replace(/\.$/, '') &&
           (nextMode === 'mail'
             ? (s.customDkimSelectors ?? []).join(',') === nextDkimSels.join(',')
-            : nextMode === 'web'
+            : nextMode === 'web' || nextMode === 'consensus'
               ? true
               : s.queryTypes.join(',') === targetTypes.join(',')) &&
           s.dohEndpoint === targetDoh
@@ -544,7 +592,15 @@ export function App() {
     if (isOffline) {
       if (matchingSaved) {
         setActiveSnapshot(matchingSaved);
-        setActiveTab(nextMode === 'mail' ? 'mail' : nextMode === 'web' ? 'web' : 'graph');
+        setActiveTab(
+          nextMode === 'mail'
+            ? 'mail'
+            : nextMode === 'web'
+              ? 'web'
+              : nextMode === 'consensus'
+                ? 'consensus'
+                : 'graph'
+        );
       }
       return;
     }
@@ -761,7 +817,14 @@ export function App() {
             >
               {ANALYSIS_MODES.map((m) => {
                 const active = analysisMode === m.id;
-                const ModeIcon = m.id === 'mail' ? Mail : m.id === 'web' ? Globe : Network;
+                const ModeIcon =
+                  m.id === 'mail'
+                    ? Mail
+                    : m.id === 'web'
+                      ? Globe
+                      : m.id === 'consensus'
+                        ? Radio
+                        : Network;
                 return (
                   <button
                     key={m.id}
@@ -852,7 +915,7 @@ export function App() {
                   WebCrypto DNSSEC
                 </span>
               </div>
-            ) : (
+            ) : analysisMode === 'web' ? (
               <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
                 <span className="font-medium">Checks:</span>
                 <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
@@ -869,6 +932,25 @@ export function App() {
                 </span>
                 <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   _443._tcp DANE &amp; SSHFP
+                </span>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                <span className="font-medium">Probes:</span>
+                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                  8 Public DoH Resolvers
+                </span>
+                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                  RFC 8914 EDE Codes
+                </span>
+                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                  Protective Threat / Family Block
+                </span>
+                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                  SOA Serial &amp; Key-Tag Skew
+                </span>
+                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                  GeoDNS / Anycast Steering
                 </span>
               </div>
             )}
@@ -979,6 +1061,10 @@ export function App() {
                     ) : activeSnapshot.mode === 'web' ? (
                       <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 px-2 py-0.5 font-mono text-[11px] font-semibold">
                         WEB · HTTPS/SVCB · ECH · CAA · DANE
+                      </span>
+                    ) : activeSnapshot.mode === 'consensus' ? (
+                      <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 px-2 py-0.5 font-mono text-[11px] font-semibold">
+                        MULTI-DOH · 8 RESOLVERS · RFC 8914 EDE · SKEW
                       </span>
                     ) : (
                       <span className="font-mono text-xs text-slate-500">
@@ -1092,6 +1178,15 @@ export function App() {
                         },
                       ]
                     : []),
+                  ...(activeSnapshot.mode === 'consensus'
+                    ? [
+                        {
+                          id: 'consensus' as const,
+                          label: 'Multi-Resolver DoH Consensus & EDE',
+                          icon: Radio,
+                        },
+                      ]
+                    : []),
                   { id: 'graph' as const, label: 'DNSSEC Chain Graph', icon: Network },
                   {
                     id: 'audit' as const,
@@ -1188,9 +1283,19 @@ export function App() {
               />
             )}
 
+            {activeTab === 'consensus' && activeSnapshot.mode === 'consensus' && (
+              <ConsensusView
+                key={activeSnapshot.id}
+                snapshot={activeSnapshot}
+                onOpenChainGraph={() => setActiveTab('graph')}
+                onOpenWireResponses={() => setActiveTab('responses')}
+              />
+            )}
+
             {(activeTab === 'graph' ||
               (activeTab === 'mail' && activeSnapshot.mode !== 'mail') ||
-              (activeTab === 'web' && activeSnapshot.mode !== 'web')) && (
+              (activeTab === 'web' && activeSnapshot.mode !== 'web') ||
+              (activeTab === 'consensus' && activeSnapshot.mode !== 'consensus')) && (
               <ChainGraphView
                 snapshot={activeSnapshot}
                 theme={theme}
@@ -1239,7 +1344,13 @@ export function App() {
                     setSelectedTypes(snap.queryTypes);
                   }
                   setActiveTab(
-                    snapMode === 'mail' ? 'mail' : snapMode === 'web' ? 'web' : 'graph'
+                    snapMode === 'mail'
+                      ? 'mail'
+                      : snapMode === 'web'
+                        ? 'web'
+                        : snapMode === 'consensus'
+                          ? 'consensus'
+                          : 'graph'
                   );
                 }}
                 onReprobe={(dom, types, mode) => {
@@ -1291,7 +1402,13 @@ export function App() {
               setAnalysisMode(snapMode);
               setActiveSnapshot(snap);
               setActiveTab(
-                snapMode === 'mail' ? 'mail' : snapMode === 'web' ? 'web' : 'graph'
+                snapMode === 'mail'
+                  ? 'mail'
+                  : snapMode === 'web'
+                    ? 'web'
+                    : snapMode === 'consensus'
+                      ? 'consensus'
+                      : 'graph'
               );
             }}
             onReprobe={(dom, types, mode) => {
@@ -1331,7 +1448,9 @@ export function App() {
                   ? `?name=${encodeURIComponent(ex.domain)}&mode=mail`
                   : exMode === 'web'
                     ? `?name=${encodeURIComponent(ex.domain)}&mode=web`
-                    : `?name=${encodeURIComponent(ex.domain)}&types=${ex.types.join(',')}`;
+                    : exMode === 'consensus'
+                      ? `?name=${encodeURIComponent(ex.domain)}&mode=consensus`
+                      : `?name=${encodeURIComponent(ex.domain)}&types=${ex.types.join(',')}`;
               return (
                 <a
                   key={`${ex.domain}-${exMode}`}

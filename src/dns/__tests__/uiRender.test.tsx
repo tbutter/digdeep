@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { App } from '../../App';
 import { AuditPanel } from '../../components/AuditPanel';
 import { ChainGraphView, prepareExportSvgElement } from '../../components/ChainGraphView';
+import { ConsensusView } from '../../components/ConsensusView';
 import { HistoryPanel } from '../../components/HistoryPanel';
 import { MailAnalysisView } from '../../components/MailAnalysisView';
 import { ResponsesPanel } from '../../components/ResponsesPanel';
@@ -18,6 +19,7 @@ import {
   parseDeepLinkParams,
 } from '../../urlState';
 import { runDnsvizAnalysis } from '../analyzer';
+import { runConsensusAnalysis } from '../consensusAnalyzer';
 import { runMailAnalysis } from '../mailAnalyzer';
 import { runWebAnalysis } from '../webAnalyzer';
 
@@ -316,6 +318,20 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(parsedWeb.mode).toBe('web');
     expect(parsedWeb.tab).toBe('web');
 
+    // Consensus mode deep links round-trip cleanly
+    const consensusBarDefault = buildDeepLinkSearch({
+      name: 'dnssec-failed.org',
+      mode: 'consensus',
+      types: ['A', 'AAAA', 'SOA', 'DNSKEY', 'DS'],
+      dohEndpoint: 'https://1.1.1.1/dns-query',
+      tab: 'consensus',
+    });
+    expect(consensusBarDefault).toBe('?name=dnssec-failed.org&mode=consensus');
+
+    const parsedConsensus = parseDeepLinkParams('?name=dnssec-failed.org&tab=consensus');
+    expect(parsedConsensus.mode).toBe('consensus');
+    expect(parsedConsensus.tab).toBe('consensus');
+
     // Custom DKIM selectors imply mail mode and round-trip in share URLs
     const parsedDkim = parseDeepLinkParams('?name=ietf.org&dkim=ietf1,mail');
     expect(parsedDkim.mode).toBe('mail');
@@ -531,7 +547,25 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(webHtml).toContain('SSHFP (RFC 4255)');
       expect(webHtml).toContain('HTTPS Priority 1');
       expect(webHtml).toContain('h3');
+
+      const consensusSnap = await runConsensusAnalysis('iana.org');
+      expect(consensusSnap.mode).toBe('consensus');
+      expect(consensusSnap.consensusAnalysis).toBeDefined();
+      const consensusHtml = renderToStaticMarkup(
+        <ConsensusView
+          snapshot={consensusSnap}
+          onOpenChainGraph={() => {}}
+          onOpenWireResponses={() => {}}
+        />
+      );
+      expect(consensusHtml).toContain('Multi-Resolver DoH Matrix for');
+      expect(consensusHtml).toContain('Protective Filtering &amp; EDE');
+      expect(consensusHtml).toContain('SOA Serial Propagation');
+      expect(consensusHtml).toContain('DNSKEY &amp; Answer Sync');
+      expect(consensusHtml).toContain('1.1.1.1');
+      expect(consensusHtml).toContain('8.8.8.8');
+      expect(consensusHtml).toContain('9.9.9.9');
     },
-    25000
+    35000
   );
 });
