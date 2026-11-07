@@ -25,6 +25,7 @@ import {
   normalizeFqdn,
 } from './encoding';
 import {
+  evaluateDnsblAuditForIp,
   formatCanonicalIpv6,
   ipToCymruOriginQname,
   parseCymruAsnTxt,
@@ -32,6 +33,7 @@ import {
   parseIpv4Octets,
   parseIpv6Groups,
   parseReverseIpInput,
+  queryDnsblForIp,
   type ParsedReverseIpTarget,
 } from './ipUtils';
 import { evaluateConsensusFromSnapshotData } from './consensusAnalyzer';
@@ -66,9 +68,11 @@ import type {
   SoaTimerIssue,
   ValidationStatus,
   ZoneAnalysis,
+  ZonemdAuditSummary,
+  ZonemdRecordDetail,
 } from './types';
 
-export const SNAPSHOT_ENGINE_VERSION = 9;
+export const SNAPSHOT_ENGINE_VERSION = 10;
 
 export interface AnalyzeOptions extends DohClientOptions {
   queryTypes?: string[];
@@ -385,6 +389,15 @@ export async function runDnsvizAnalysis(
   }
 
   await Promise.all([
+    ...zoneList.map((z) =>
+      session
+        .query(z, RR_TYPES.ZONEMD, {
+          cd: true,
+          doBit: true,
+          purpose: `Zone ZONEMD (${z})`,
+        })
+        .catch(() => undefined)
+    ),
     ...nonRootLeafZones.flatMap((lz) => [
       session
         .query(lz, RR_TYPES.CDS, {
@@ -549,6 +562,13 @@ export async function runDnsvizAnalysis(
       );
     }
 
+    if (
+      reverseIpTarget.family === 4 &&
+      (reverseIpTarget.isPublic || reverseIpTarget.ip === '127.0.0.2')
+    ) {
+      rdnsTasks.push(queryDnsblForIp(session, reverseIpTarget.ip));
+    }
+
     if (rdnsTasks.length > 0) {
       await Promise.all(rdnsTasks);
     }
@@ -685,7 +705,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
 
   const validationEpochSec = Math.floor(validatedAt / 1000);
   const enabledAnchors = trustAnchors.filter((ta) => ta.enabled);
-  // Exclude auxiliary out-of-bailiwick nameserver IP, recursive SPF, DMARC report, MX rDNS, Reverse FCrDNS, BGP ASN, and speculative DKIM/Mail helper lookups from DNSSEC zone reconstruction
+  // Exclude auxiliary out-of-bailiwick nameserver IP, recursive SPF, DMARC report, MX rDNS, Reverse FCrDNS, BGP ASN, DNSBL, and speculative DKIM/Mail helper lookups from DNSSEC zone reconstruction
   const cdLogs = queries.filter(
     (q) =>
       q.cd &&
@@ -694,9 +714,14 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       !q.purpose.startsWith('DMARC lookup') &&
       !q.purpose.startsWith('DKIM probe') &&
       !q.purpose.startsWith('Mail probe') &&
+      !(
+        q.purpose.startsWith('Mail SRV probe') &&
+        !q.packet.answers.some((r) => r.type === RR_TYPES.SRV)
+      ) &&
       !q.purpose.startsWith('MX rDNS lookup') &&
       !q.purpose.startsWith('Reverse FCrDNS lookup') &&
       !q.purpose.startsWith('BGP ASN lookup') &&
+      !q.purpose.startsWith('DNSBL reputation lookup') &&
       !q.purpose.startsWith('Consensus probe')
   );
 
@@ -884,7 +909,12 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       log.purpose.startsWith('Mail target') ||
       log.purpose.startsWith('Web target');
     addSectionRecords(log.packet.answers, 'answer', isTarget);
-    addSectionRecords(log.packet.authorities, 'authority', false);
+    if (
+      (!log.purpose.startsWith('Zone ZONEMD') && !log.purpose.startsWith('Mail SRV probe')) ||
+      (log.qname === targetName && queryTypes.includes(log.qtypeName))
+    ) {
+      addSectionRecords(log.packet.authorities, 'authority', false);
+    }
   }
 
   const findings: AuditFinding[] = [];
@@ -2008,6 +2038,117 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       };
     }
 
+    // Evaluate Zone Digest (ZONEMD — RFC 8976)
+    let zonemd: ZonemdAuditSummary | undefined;
+    const zonemdRrset = analyzedRrsets.find(
+      (r) => r.name === zoneName && r.type === RR_TYPES.ZONEMD
+    );
+    const zonemdLog = findLog(cdLogs, zoneName, RR_TYPES.ZONEMD, true);
+    if (zonemdRrset || zonemdLog) {
+      const zonemdRecords: ZonemdRecordDetail[] = [];
+      for (const rec of zonemdRrset?.records ?? []) {
+        if (rec.parsed.kind !== 'ZONEMD') continue;
+        zonemdRecords.push({
+          serial: rec.parsed.serial,
+          scheme: rec.parsed.scheme,
+          schemeName: rec.parsed.schemeName,
+          hashAlgorithm: rec.parsed.hashAlgorithm,
+          hashAlgorithmName: rec.parsed.hashAlgorithmName,
+          digestHex: rec.parsed.digestHex,
+          digestByteLength: rec.parsed.digestByteLength,
+          digestLengthValid: rec.parsed.digestLengthValid,
+          serialMatchesSoa: soa !== undefined ? rec.parsed.serial === soa.serial : true,
+        });
+      }
+
+      if (zonemdRecords.length > 0) {
+        const anyInvalidDigest = zonemdRecords.some(
+          (z) => !z.digestLengthValid || (z.scheme !== 1 && (z.scheme < 240 || z.scheme > 254))
+        );
+        const anySerialMatch = zonemdRecords.some((z) => z.serialMatchesSoa);
+        const isSignedValid =
+          zonemdRrset?.status === 'secure' || zonemdRrset?.status === 'warning';
+
+        let zmdStatus: ZonemdAuditSummary['status'] = 'valid-sync';
+        let zmdSummary = '';
+
+        if (anyInvalidDigest) {
+          zmdStatus = 'invalid-digest';
+          zmdSummary = `ZONEMD record in ${zoneName} has an invalid digest length or unrecognized scheme/algorithm per RFC 8976 §2.2.`;
+          findings.push({
+            id: `err-zonemd-digest-${zoneName}`,
+            severity: 'error',
+            code: 'ZONEMD_INVALID_DIGEST',
+            title: `Invalid ZONEMD digest parameters in ${zoneName}`,
+            detail: zmdSummary,
+            rfc: 'RFC 8976 §2.2',
+            zone: zoneName,
+            targetId: zonemdRrset?.id,
+          });
+        } else if (soa && !anySerialMatch) {
+          zmdStatus = 'serial-mismatch';
+          const zmdSerials = zonemdRecords.map((z) => z.serial).join(', ');
+          zmdSummary = `ZONEMD serial (${zmdSerials}) at ${zoneName} does not match authoritative SOA serial (${soa.serial}) — zone digest is out of sync with the served SOA.`;
+          findings.push({
+            id: `warn-zonemd-serial-${zoneName}`,
+            severity: 'warning',
+            code: 'ZONEMD_SERIAL_MISMATCH',
+            title: `ZONEMD serial (${zmdSerials}) out of sync with SOA serial (${soa.serial}) in ${zoneName}`,
+            detail: zmdSummary,
+            rfc: 'RFC 8976 §4.2',
+            zone: zoneName,
+            targetId: zonemdRrset?.id,
+          });
+        } else if (!isSignedValid) {
+          zmdStatus = 'unsigned-warning';
+          zmdSummary = `ZONEMD record published at ${zoneName}, but RFC 8976 §4 requires a valid DNSSEC signature to authenticate the zone digest.`;
+          findings.push({
+            id: `warn-zonemd-unsigned-${zoneName}`,
+            severity: 'warning',
+            code: 'ZONEMD_UNSIGNED',
+            title: `ZONEMD published without valid DNSSEC signature in ${zoneName}`,
+            detail: zmdSummary,
+            rfc: 'RFC 8976 §4',
+            zone: zoneName,
+            targetId: zonemdRrset?.id,
+          });
+        } else {
+          zmdStatus = 'valid-sync';
+          const schemes = Array.from(
+            new Set(zonemdRecords.map((z) => `${z.schemeName}/${z.hashAlgorithmName}`))
+          ).join(', ');
+          zmdSummary = `RFC 8976 ZONEMD (${schemes}) is DNSSEC-authenticated and synchronized with ${zoneName} SOA serial ${soa?.serial ?? zonemdRecords[0].serial}.`;
+          findings.push({
+            id: `info-zonemd-sync-${zoneName}`,
+            severity: 'info',
+            code: 'ZONEMD_SERIAL_SYNC',
+            title: `RFC 8976 ZONEMD zone digest verified in sync at ${zoneName} (serial ${soa?.serial ?? zonemdRecords[0].serial})`,
+            detail: zmdSummary,
+            rfc: 'RFC 8976',
+            zone: zoneName,
+            targetId: zonemdRrset?.id,
+          });
+        }
+
+        zonemd = {
+          present: true,
+          status: zmdStatus,
+          dnssecStatus: zonemdRrset?.status,
+          soaSerial: soa?.serial,
+          records: zonemdRecords,
+          summary: zmdSummary,
+        };
+      } else if (isLeafDelegatedZone) {
+        zonemd = {
+          present: false,
+          status: 'not-published',
+          soaSerial: soa?.serial,
+          records: [],
+          summary: `No ZONEMD zone digest record published at ${zoneName} (RFC 8976).`,
+        };
+      }
+    }
+
     zonesByName.set(zoneName, {
       zoneName,
       parentZone,
@@ -2027,6 +2168,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       ...(soaAudit ? { soaAudit } : {}),
       ...(cdsRollover ? { cdsRollover } : {}),
       ...(nsDiversity ? { nsDiversity } : {}),
+      ...(zonemd ? { zonemd } : {}),
     });
   }
 
@@ -2283,6 +2425,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       log.purpose.startsWith('Nameserver IP') ||
       log.purpose.startsWith('Reverse FCrDNS lookup') ||
       log.purpose.startsWith('BGP ASN lookup') ||
+      log.purpose.startsWith('DNSBL reputation lookup') ||
       log.purpose.startsWith('Consensus probe')
     ) {
       continue;
@@ -2324,7 +2467,8 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
         !q.cd &&
         !q.purpose.startsWith('SPF lookup') &&
         !q.purpose.startsWith('Reverse FCrDNS lookup') &&
-        !q.purpose.startsWith('BGP ASN lookup')
+        !q.purpose.startsWith('BGP ASN lookup') &&
+        !q.purpose.startsWith('DNSBL reputation lookup')
     );
   const resolverVerdict: ResolverVerdict | undefined = valQuery
     ? {
@@ -2798,6 +2942,31 @@ function evaluateReverseDnsFromSnapshotData(params: {
     }
   }
 
+  // 4. Evaluate DNSBL IP Reputation (RFC 5782)
+  const dnsbl = evaluateDnsblAuditForIp(
+    reverseIpTarget.ip,
+    reverseIpTarget.family,
+    reverseIpTarget.isPublic,
+    queries
+  );
+  if (dnsbl.status === 'listed') {
+    const listedDetails = dnsbl.providers
+      .filter((p) => p.status === 'listed')
+      .map(
+        (p) =>
+          `${p.label} [${p.returnCodes.join(', ')}${p.reasons.length > 0 ? `: "${p.reasons[0]}"` : ''}]`
+      )
+      .join('; ');
+    findings.push({
+      id: `warn-rdns-dnsbl-${reverseIpTarget.ip}`,
+      severity: 'warning',
+      code: 'DNSBL_IP_LISTED',
+      title: `IP ${reverseIpTarget.ip} is listed on ${dnsbl.listedCount} DNSBL blocklist${dnsbl.listedCount === 1 ? '' : 's'}`,
+      detail: `${dnsbl.summary} Details: ${listedDetails}.`,
+      rfc: 'RFC 5782',
+    });
+  }
+
   return {
     reverseDns: {
       ip: reverseIpTarget.ip,
@@ -2816,6 +2985,7 @@ function evaluateReverseDnsFromSnapshotData(params: {
       fcrdnsStatus,
       fcrdnsSummary,
       ...(bgp ? { bgp } : {}),
+      ...(dnsbl.status !== 'unchecked' ? { dnsbl } : {}),
     },
     findings,
   };

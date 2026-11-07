@@ -6,6 +6,8 @@ import {
   Globe,
   Network,
   Server,
+  ShieldAlert,
+  ShieldCheck,
   ShieldOff,
 } from 'lucide-react';
 import { displayFqdn } from '../dns/encoding';
@@ -94,6 +96,27 @@ export function ReverseDnsCard({
             >
               {fcrdnsMeta.label}
             </span>
+            {reverseDns.dnsbl && reverseDns.dnsbl.checkedCount > 0 && (
+              <span
+                className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 font-mono text-[10px] font-semibold border ${
+                  reverseDns.dnsbl.status === 'listed'
+                    ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/35'
+                    : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/35'
+                }`}
+              >
+                {reverseDns.dnsbl.status === 'listed' ? (
+                  <>
+                    <ShieldAlert className="w-3 h-3" />
+                    DNSBL: {reverseDns.dnsbl.listedCount}/{reverseDns.dnsbl.checkedCount} LISTED
+                  </>
+                ) : (
+                  <>
+                    <ShieldCheck className="w-3 h-3" />
+                    DNSBL: 0/{reverseDns.dnsbl.checkedCount} CLEAN ✓
+                  </>
+                )}
+              </span>
+            )}
             {reverseDns.isRfc2317ClasslessDelegation && (
               <span className="rounded-md bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30 px-2 py-0.5 font-mono text-[10px] font-semibold">
                 RFC 2317 Classless CNAME ({reverseDns.cnameChain.map(displayFqdn).join(' → ')})
@@ -297,6 +320,63 @@ export function ReverseDnsCard({
           )}
         </div>
       </div>
+
+      {/* DNSBL IP Reputation Bar (RFC 5782) */}
+      {reverseDns.dnsbl && reverseDns.dnsbl.checkedCount > 0 && (
+        <div className="rounded-lg border border-slate-200/90 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-3 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <span className="font-semibold uppercase tracking-wider text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
+              {reverseDns.dnsbl.status === 'listed' ? (
+                <ShieldAlert className="w-3.5 h-3.5 text-rose-500" />
+              ) : (
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
+              )}
+              <span>DNSBL IP Reputation &amp; Blocklist Check (RFC 5782)</span>
+            </span>
+            <span className="text-[11px] text-slate-500 dark:text-slate-400">
+              {reverseDns.dnsbl.summary}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+            {reverseDns.dnsbl.providers.map((prov) => (
+              <div
+                key={prov.id}
+                className={`rounded border px-2.5 py-1.5 text-xs ${
+                  prov.status === 'listed'
+                    ? 'border-rose-500/40 bg-rose-500/10 text-rose-800 dark:text-rose-200'
+                    : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 text-slate-700 dark:text-slate-200'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <span className="font-semibold truncate">{prov.label}</span>
+                  <span
+                    className={`font-mono text-[10px] font-bold shrink-0 ${
+                      prov.status === 'listed'
+                        ? 'text-rose-600 dark:text-rose-400'
+                        : 'text-emerald-600 dark:text-emerald-400'
+                    }`}
+                  >
+                    {prov.status === 'listed'
+                      ? prov.returnCodes[0] ?? 'LISTED'
+                      : prov.status === 'admin-blocked'
+                        ? 'REFUSED'
+                        : 'CLEAN'}
+                  </span>
+                </div>
+                <div className="font-mono text-[10px] text-slate-400 truncate">{prov.zone}</div>
+                {prov.reasons.length > 0 && (
+                  <div
+                    className="font-mono text-[10px] text-rose-600 dark:text-rose-300 truncate mt-0.5"
+                    title={prov.reasons.join(' | ')}
+                  >
+                    {prov.reasons[0]}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </section>
   );
 }

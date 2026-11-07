@@ -413,6 +413,20 @@ function MxHostCard({
                       FCrDNS MISMATCH
                     </span>
                   )}
+                  {addr.dnsbl && addr.dnsbl.checkedCount > 0 && (
+                    <span
+                      className={`rounded px-1 py-0.2 text-[9px] font-bold ${
+                        addr.dnsbl.status === 'listed'
+                          ? 'bg-rose-500/25 text-rose-800 dark:text-rose-200'
+                          : 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-300'
+                      }`}
+                      title={addr.dnsbl.summary}
+                    >
+                      {addr.dnsbl.status === 'listed'
+                        ? `DNSBL LISTED (${addr.dnsbl.listedCount}/${addr.dnsbl.checkedCount})`
+                        : `DNSBL 0/${addr.dnsbl.checkedCount} ✓`}
+                    </span>
+                  )}
                 </span>
               ))
             )}
@@ -1752,6 +1766,104 @@ export function MailAnalysisView({
                   )}
                 </div>
               )}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* Section 6: Service Discovery (SRV — RFC 6186 / RFC 8314 / RFC 6764 / Matrix / XMPP) */}
+      {mail.srvDiscovery && (
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                <Server className="w-4 h-4 text-cyan-500" />
+                <span>
+                  Service Discovery (SRV — Autodiscover, Submission/IMAPS/POP3S, CalDAV/CardDAV,
+                  Matrix &amp; XMPP)
+                </span>
+              </h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Probes RFC 6186 / RFC 8314 MUA auto-configuration, RFC 6764 CalDAV/CardDAV, Matrix
+                federation, and RFC 6120 XMPP <code className="font-mono">SRV</code> endpoints.
+              </p>
+            </div>
+            <span
+              className={`rounded-full px-2.5 py-0.5 font-mono text-[10px] font-semibold border ${
+                mail.srvDiscovery.activeCount > 0
+                  ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+                  : 'bg-slate-500/15 text-slate-600 dark:text-slate-400 border-slate-500/25'
+              }`}
+            >
+              {mail.srvDiscovery.activeCount} ACTIVE · {mail.srvDiscovery.disabledCount} DISABLED ·{' '}
+              {mail.srvDiscovery.probedCount} PROBED
+            </span>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-3">
+            <p className="text-xs text-slate-600 dark:text-slate-300">
+              {mail.srvDiscovery.summary}
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
+              {mail.srvDiscovery.services.map((svc) => (
+                <div
+                  key={svc.qname}
+                  className={`rounded-lg border p-3 space-y-1.5 text-xs ${
+                    svc.status === 'active'
+                      ? 'border-emerald-500/35 bg-emerald-500/5'
+                      : svc.status === 'disabled-explicitly'
+                        ? 'border-cyan-500/30 bg-cyan-500/5'
+                        : 'border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-950/50 opacity-80'
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-1.5">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="font-mono font-bold text-slate-900 dark:text-slate-100 truncate">
+                        {svc.prefix}
+                      </span>
+                      {svc.present && <StatusBadge status={svc.dnssecStatus} size="xs" />}
+                    </div>
+                    <span
+                      className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold shrink-0 ${
+                        svc.status === 'active'
+                          ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                          : svc.status === 'disabled-explicitly'
+                            ? 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300'
+                            : 'bg-slate-200 dark:bg-slate-800 text-slate-500 dark:text-slate-400'
+                      }`}
+                    >
+                      {svc.status === 'active'
+                        ? 'ACTIVE'
+                        : svc.status === 'disabled-explicitly'
+                          ? 'DISABLED (0 .)'
+                          : 'NONE'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                    <span>{svc.label}</span>
+                    <span className="font-mono text-[10px] shrink-0">{svc.rfc}</span>
+                  </div>
+                  {svc.records.length > 0 && (
+                    <div className="space-y-1 pt-1 border-t border-slate-200/60 dark:border-slate-800/80 font-mono text-[11px]">
+                      {svc.records.map((rec, idx) => (
+                        <div
+                          key={`${svc.qname}-rec-${idx}`}
+                          className="flex items-center justify-between gap-1.5 text-slate-800 dark:text-slate-200"
+                        >
+                          <span className="truncate">
+                            {rec.isNullService
+                              ? '. (Service Not Available)'
+                              : `${displayFqdn(rec.target)}:${rec.port}`}
+                          </span>
+                          <span className="text-[10px] text-slate-500 shrink-0">
+                            prio={rec.priority} w={rec.weight}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
           </div>
         </section>

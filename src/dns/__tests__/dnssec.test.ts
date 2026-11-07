@@ -21,7 +21,9 @@ import {
   normalizeFqdn,
 } from '../encoding';
 import {
+  classifyDnsblReturnIp,
   ipToCymruOriginQname,
+  ipToDnsblQname,
   parseCymruAsnTxt,
   parseCymruOriginTxt,
   parseReverseIpInput,
@@ -751,6 +753,126 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
       expect(
         skewedSnap.findings.some((f) => f.code === 'CONSENSUS_SOA_SERIAL_SKEW')
       ).toBe(true);
+    },
+    30000
+  );
+
+  it(
+    'decodes ZONEMD (RFC 8976), SMIMEA (RFC 8162), and OPENPGPKEY (RFC 7929) wire RDATA and validates Root Zone (.) ZONEMD & DNSBL IP reputation (RFC 5782)',
+    async () => {
+      // 1. DNSBL helper unit checks (RFC 5782 §5 test point & administrative block differentiation)
+      expect(ipToDnsblQname('192.0.2.42', 'bl.spamcop.net')).toBe(
+        '42.2.0.192.bl.spamcop.net.'
+      );
+      expect(ipToDnsblQname('2001:db8::1', 'bl.spamcop.net')).toBe(
+        '1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.bl.spamcop.net.'
+      );
+      expect(ipToDnsblQname('invalid-ip', 'bl.spamcop.net')).toBeNull();
+      expect(classifyDnsblReturnIp('127.0.0.2')).toBe('listed');
+      expect(classifyDnsblReturnIp('127.0.1.5')).toBe('listed');
+      expect(classifyDnsblReturnIp('127.255.255.254')).toBe('admin-blocked');
+      expect(classifyDnsblReturnIp('127.255.255.255')).toBe('admin-blocked');
+      expect(classifyDnsblReturnIp('1.1.1.1')).toBe('ignore');
+
+      // 2. Wire decoding for ZONEMD (TYPE63), SMIMEA (TYPE53), and OPENPGPKEY (TYPE61)
+      const qWire = buildDnsQuery('.', RR_TYPES.ZONEMD, { id: 0x7788 });
+      const header = new Uint8Array(qWire.slice(0, 12));
+      const hv = new DataView(header.buffer);
+      hv.setUint16(2, 0x8180, false);
+      hv.setUint16(4, 1, false); // QDCOUNT = 1
+      hv.setUint16(6, 3, false); // ANCOUNT = 3 (ZONEMD + SMIMEA + OPENPGPKEY)
+      hv.setUint16(10, 0, false); // ARCOUNT = 0
+
+      const questionSection = qWire.slice(12, 17); // root (1 byte) + qtype (2) + qclass (2)
+
+      // ZONEMD RDATA: serial=2026110700 (0x78C3FEEC), scheme=1 (SIMPLE), hashAlgorithm=1 (SHA-384, 48 bytes)
+      const zonemdDigest = new Uint8Array(48);
+      zonemdDigest.fill(0xab);
+      const zonemdRdata = concatBytes(
+        new Uint8Array([0x78, 0xc3, 0xfe, 0xec, 1, 1]),
+        zonemdDigest
+      );
+      const zonemdMeta = new Uint8Array(10);
+      const zmv = new DataView(zonemdMeta.buffer);
+      zmv.setUint16(0, RR_TYPES.ZONEMD, false);
+      zmv.setUint16(2, 1, false);
+      zmv.setUint32(4, 86400, false);
+      zmv.setUint16(8, zonemdRdata.length, false);
+      const zonemdRr = concatBytes(new Uint8Array([0]), zonemdMeta, zonemdRdata);
+
+      // SMIMEA RDATA: usage=3 (DANE-EE), selector=1 (SPKI), matchingType=1 (SHA-256, 32 bytes)
+      const smimeaHash = new Uint8Array(32);
+      smimeaHash.fill(0xcd);
+      const smimeaRdata = concatBytes(new Uint8Array([3, 1, 1]), smimeaHash);
+      const smimeaMeta = new Uint8Array(10);
+      const smv = new DataView(smimeaMeta.buffer);
+      smv.setUint16(0, RR_TYPES.SMIMEA, false);
+      smv.setUint16(2, 1, false);
+      smv.setUint32(4, 3600, false);
+      smv.setUint16(8, smimeaRdata.length, false);
+      const smimeaRr = concatBytes(new Uint8Array([0]), smimeaMeta, smimeaRdata);
+
+      // OPENPGPKEY RDATA: arbitrary public key bytes
+      const openpgpRdata = new Uint8Array([0x99, 0x01, 0x0d, 0x04, 0x55, 0x66, 0x77, 0x88]);
+      const openpgpMeta = new Uint8Array(10);
+      const opv = new DataView(openpgpMeta.buffer);
+      opv.setUint16(0, RR_TYPES.OPENPGPKEY, false);
+      opv.setUint16(2, 1, false);
+      opv.setUint32(4, 3600, false);
+      opv.setUint16(8, openpgpRdata.length, false);
+      const openpgpRr = concatBytes(new Uint8Array([0]), openpgpMeta, openpgpRdata);
+
+      const parsedPkt = parseDnsPacket(
+        concatBytes(header, questionSection, zonemdRr, smimeaRr, openpgpRr)
+      );
+      expect(parsedPkt.answers).toHaveLength(3);
+
+      const zAns = parsedPkt.answers[0];
+      expect(zAns.typeName).toBe('ZONEMD');
+      expect(zAns.parsed.kind).toBe('ZONEMD');
+      if (zAns.parsed.kind === 'ZONEMD') {
+        expect(zAns.parsed.serial).toBe(2026110700);
+        expect(zAns.parsed.scheme).toBe(1);
+        expect(zAns.parsed.hashAlgorithm).toBe(1);
+        expect(zAns.parsed.digestHex).toBe('AB'.repeat(48));
+      }
+
+      const sAns = parsedPkt.answers[1];
+      expect(sAns.typeName).toBe('SMIMEA');
+      expect(sAns.parsed.kind).toBe('TLSA');
+      if (sAns.parsed.kind === 'TLSA') {
+        expect(sAns.parsed.usage).toBe(3);
+        expect(sAns.parsed.selector).toBe(1);
+        expect(sAns.parsed.matchingType).toBe(1);
+        expect(sAns.parsed.certAssociationHex).toBe('CD'.repeat(32));
+      }
+
+      const oAns = parsedPkt.answers[2];
+      expect(oAns.typeName).toBe('OPENPGPKEY');
+      expect(oAns.parsed.kind).toBe('OPENPGPKEY');
+      if (oAns.parsed.kind === 'OPENPGPKEY') {
+        expect(oAns.parsed.byteLength).toBe(8);
+      }
+
+      // 3. Live Root Zone (.) ZONEMD verification & Reverse IP + DNSBL audit on 1.1.1.1
+      const revSnap = await runDnsvizAnalysis('1.1.1.1');
+      const rootZone = revSnap.zones.find((z) => z.zoneName === '.');
+      expect(rootZone?.zonemd).toBeDefined();
+      expect(rootZone?.zonemd?.present).toBe(true);
+      expect(rootZone?.zonemd?.status).toBe('valid-sync');
+      expect(rootZone?.zonemd?.dnssecStatus).toBe('secure');
+      expect(rootZone?.zonemd?.records[0]?.scheme).toBe(1);
+      expect(rootZone?.zonemd?.records[0]?.hashAlgorithm).toBe(1);
+      expect(rootZone?.zonemd?.records[0]?.digestLengthValid).toBe(true);
+      expect(rootZone?.zonemd?.records[0]?.serialMatchesSoa).toBe(true);
+      expect(
+        revSnap.findings.some((f) => f.code === 'ZONEMD_SERIAL_SYNC' && f.zone === '.')
+      ).toBe(true);
+
+      // 1.1.1.1 Reverse DNS includes DNSBL reputation check across 6 DNSBL zones
+      expect(revSnap.reverseDns?.dnsbl).toBeDefined();
+      expect(revSnap.reverseDns?.dnsbl?.checkedCount).toBe(6);
+      expect(revSnap.reverseDns?.dnsbl?.providers).toHaveLength(6);
     },
     30000
   );

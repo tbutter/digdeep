@@ -86,8 +86,11 @@ export const QUERYABLE_RR_TYPES = [
   'CDS',
   'CDNSKEY',
   'CSYNC',
+  'ZONEMD',
   'SRV',
   'TLSA',
+  'SMIMEA',
+  'OPENPGPKEY',
   'PTR',
   'SSHFP',
   'NAPTR',
@@ -534,3 +537,156 @@ export function formatDohShortLabel(endpointUrl: string): string {
     return endpointUrl;
   }
 }
+
+/**
+ * RFC 8976 §5.2 ZONEMD Schemes
+ */
+export const ZONEMD_SCHEMES: Record<number, string> = {
+  1: 'SIMPLE',
+};
+
+export function formatZonemdScheme(scheme: number): string {
+  if (ZONEMD_SCHEMES[scheme]) return ZONEMD_SCHEMES[scheme];
+  if (scheme >= 240 && scheme <= 254) return `PRIVATE-${scheme}`;
+  return `SCHEME-${scheme}`;
+}
+
+/**
+ * RFC 8976 §5.3 ZONEMD Hash Algorithms
+ */
+export const ZONEMD_HASH_ALGORITHMS: Record<
+  number,
+  { name: string; expectedByteLength: number }
+> = {
+  1: { name: 'SHA-384', expectedByteLength: 48 },
+  2: { name: 'SHA-512', expectedByteLength: 64 },
+};
+
+export function formatZonemdHashAlgorithm(alg: number): string {
+  if (ZONEMD_HASH_ALGORITHMS[alg]) return ZONEMD_HASH_ALGORITHMS[alg].name;
+  if (alg >= 240 && alg <= 254) return `PRIVATE-${alg}`;
+  return `ALG-${alg}`;
+}
+
+export interface DnsblProviderDescriptor {
+  zone: string;
+  label: string;
+  category: 'spam' | 'exploit' | 'reputation' | 'tor';
+  description: string;
+}
+
+/**
+ * Public DNS-based Blocklists (DNSBLs — RFC 5782) verified to answer accurately via public DoH resolvers
+ * without open-resolver refusal false positives.
+ */
+export const DNSBL_PROVIDERS: readonly DnsblProviderDescriptor[] = [
+  {
+    zone: 'bl.spamcop.net',
+    label: 'SpamCop',
+    category: 'spam',
+    description: 'SpamCop Blocking List (bl.spamcop.net)',
+  },
+  {
+    zone: 'psbl.surriel.com',
+    label: 'PSBL',
+    category: 'spam',
+    description: 'Passive Spam Block List (psbl.surriel.com)',
+  },
+  {
+    zone: 'b.barracudacentral.org',
+    label: 'Barracuda BRBL',
+    category: 'reputation',
+    description: 'Barracuda Reputation Block List (b.barracudacentral.org)',
+  },
+  {
+    zone: 'dnsbl.dronebl.org',
+    label: 'DroneBL',
+    category: 'exploit',
+    description: 'DroneBL Abused / Botnet IP List (dnsbl.dronebl.org)',
+  },
+  {
+    zone: 'bl.0spam.org',
+    label: '0spam',
+    category: 'spam',
+    description: '0spam Project Main Blocklist (bl.0spam.org)',
+  },
+  {
+    zone: 'tor.dan.me.uk',
+    label: 'DAN Tor List',
+    category: 'tor',
+    description: 'DAN.ME.UK Tor Node List (tor.dan.me.uk)',
+  },
+];
+
+export interface SrvDiscoveryProbeDescriptor {
+  prefix: string;
+  label: string;
+  category: 'mail-groupware' | 'federation-chat';
+  rfc: string;
+}
+
+/**
+ * Standard SRV Service Discovery prefixes (RFC 2782 / RFC 6186 / RFC 8314 / RFC 6764 / RFC 6120 / Matrix).
+ */
+export const SRV_DISCOVERY_PROBES: readonly SrvDiscoveryProbeDescriptor[] = [
+  {
+    prefix: '_autodiscover._tcp',
+    label: 'Mail Autodiscover',
+    category: 'mail-groupware',
+    rfc: 'MS-OXDSCLI / Mail',
+  },
+  {
+    prefix: '_submissions._tcp',
+    label: 'SMTP Submission (Implicit TLS 465)',
+    category: 'mail-groupware',
+    rfc: 'RFC 8314 §3.3',
+  },
+  {
+    prefix: '_submission._tcp',
+    label: 'SMTP Submission (STARTTLS 587)',
+    category: 'mail-groupware',
+    rfc: 'RFC 6186 §3.1',
+  },
+  {
+    prefix: '_imaps._tcp',
+    label: 'IMAP over TLS (993)',
+    category: 'mail-groupware',
+    rfc: 'RFC 6186 §3.2',
+  },
+  {
+    prefix: '_pop3s._tcp',
+    label: 'POP3 over TLS (995)',
+    category: 'mail-groupware',
+    rfc: 'RFC 6186 §3.3',
+  },
+  {
+    prefix: '_caldavs._tcp',
+    label: 'CalDAV over TLS',
+    category: 'mail-groupware',
+    rfc: 'RFC 6764 §6',
+  },
+  {
+    prefix: '_carddavs._tcp',
+    label: 'CardDAV over TLS',
+    category: 'mail-groupware',
+    rfc: 'RFC 6764 §6',
+  },
+  {
+    prefix: '_matrix._tcp',
+    label: 'Matrix Federation',
+    category: 'federation-chat',
+    rfc: 'Matrix Spec',
+  },
+  {
+    prefix: '_xmpp-client._tcp',
+    label: 'XMPP Client (5222)',
+    category: 'federation-chat',
+    rfc: 'RFC 6120 §3.2',
+  },
+  {
+    prefix: '_xmpp-server._tcp',
+    label: 'XMPP Server Federation (5269)',
+    category: 'federation-chat',
+    rfc: 'RFC 6120 §3.2',
+  },
+];

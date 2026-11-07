@@ -1,4 +1,7 @@
+import { DNSBL_PROVIDERS, RR_TYPES } from './constants';
+import type { DohSession } from './doh';
 import { displayFqdn, normalizeFqdn } from './encoding';
+import type { DnsblAuditSummary, DnsblProviderResult, DohQueryLog } from './types';
 
 export interface IpClassification {
   isPublic: boolean;
@@ -388,4 +391,198 @@ export function parseCymruAsnTxt(txtStrings: string[]): CymruAsnEntry | null {
     };
   }
   return null;
+}
+
+/**
+ * Builds an RFC 5782 DNSBL query name for an IPv4 address (`d.c.b.a.<dnsblZone>.`)
+ * or IPv6 address (32 reversed nibbles + `.<dnsblZone>.`).
+ */
+export function ipToDnsblQname(rawIp: string, dnsblZone: string): string | null {
+  const cleanZone = normalizeFqdn(dnsblZone);
+  if (!cleanZone || cleanZone === '.') return null;
+
+  const v4 = parseIpv4Octets(rawIp);
+  if (v4) {
+    return `${[...v4].reverse().join('.')}.${cleanZone}`;
+  }
+  const v6 = parseIpv6Groups(rawIp);
+  if (v6) {
+    const fullHex = v6.map((g) => g.toString(16).padStart(4, '0')).join('');
+    if (fullHex.length !== 32) return null;
+    return `${fullHex.split('').reverse().join('.')}.${cleanZone}`;
+  }
+  return null;
+}
+
+/**
+ * Classifies an A record returned by a DNSBL query per RFC 5782:
+ * - `127.255.255.x` (`127.255.255.252`–`127.255.255.255`) are administrative / open-resolver refusal codes, NOT listings.
+ * - `127.0.0.1`..`127.255.254.255` are genuine blocklist return codes (`'listed'`).
+ * - Any non-127.0.0.0/8 address is ignored (`'ignore'`).
+ */
+export function classifyDnsblReturnIp(ip: string): 'listed' | 'admin-blocked' | 'ignore' {
+  const octets = parseIpv4Octets(ip);
+  if (!octets || octets[0] !== 127) return 'ignore';
+  if (octets[1] === 255 && octets[2] === 255) {
+    return 'admin-blocked';
+  }
+  return 'listed';
+}
+
+/**
+ * Queries all configured DoH-compatible `DNSBL_PROVIDERS` for an IPv4 address (`A`, plus `TXT` if listed).
+ */
+export async function queryDnsblForIp(session: DohSession, ip: string): Promise<void> {
+  await Promise.all(
+    DNSBL_PROVIDERS.map(async (prov) => {
+      const qname = ipToDnsblQname(ip, prov.zone);
+      if (!qname) return;
+      try {
+        const aLog = await session.query(qname, RR_TYPES.A, {
+          cd: false,
+          doBit: false,
+          purpose: `DNSBL reputation lookup (${prov.zone} A)`,
+        });
+        const isListed = aLog.packet.answers.some(
+          (r) =>
+            r.type === RR_TYPES.A &&
+            normalizeFqdn(r.name) === qname &&
+            classifyDnsblReturnIp(r.rdataText.trim()) === 'listed'
+        );
+        if (isListed) {
+          await session
+            .query(qname, RR_TYPES.TXT, {
+              cd: false,
+              doBit: false,
+              purpose: `DNSBL reputation lookup (${prov.zone} TXT)`,
+            })
+            .catch(() => undefined);
+        }
+      } catch {
+        // Ignore individual DNSBL timeout or network error
+      }
+    })
+  );
+}
+
+/**
+ * Evaluates DNSBL reputation results for an IP address from captured DoH query logs.
+ */
+export function evaluateDnsblAuditForIp(
+  ip: string,
+  family: 4 | 6,
+  isPublic: boolean,
+  logs: DohQueryLog[]
+): DnsblAuditSummary {
+  const isRfc5782TestIp = ip === '127.0.0.2' || ip === '127.0.0.1';
+  if (!isPublic && !isRfc5782TestIp) {
+    return {
+      ip,
+      checkedCount: 0,
+      listedCount: 0,
+      status: 'not-applicable',
+      providers: [],
+      summary: 'Special-use / non-public IP address; DNSBL reputation checks do not apply.',
+    };
+  }
+  if (family !== 4) {
+    return {
+      ip,
+      checkedCount: 0,
+      listedCount: 0,
+      status: 'not-applicable',
+      providers: [],
+      summary: 'Public DoH-accessible DNSBL providers primarily index IPv4 (/32) addresses.',
+    };
+  }
+
+  const providers: DnsblProviderResult[] = [];
+  for (const prov of DNSBL_PROVIDERS) {
+    const qname = ipToDnsblQname(ip, prov.zone);
+    if (!qname) continue;
+    const aLog = logs.find(
+      (l) => normalizeFqdn(l.qname) === qname && l.qtype === RR_TYPES.A
+    );
+    if (!aLog) continue;
+
+    const aAnswers = aLog.packet.answers.filter(
+      (r) => r.type === RR_TYPES.A && normalizeFqdn(r.name) === qname
+    );
+    const listedCodes: string[] = [];
+    const adminCodes: string[] = [];
+    for (const ans of aAnswers) {
+      const code = ans.rdataText.trim();
+      const cls = classifyDnsblReturnIp(code);
+      if (cls === 'listed') listedCodes.push(code);
+      else if (cls === 'admin-blocked') adminCodes.push(code);
+    }
+
+    const txtLog = logs.find(
+      (l) => normalizeFqdn(l.qname) === qname && l.qtype === RR_TYPES.TXT
+    );
+    const reasons: string[] = [];
+    if (txtLog) {
+      for (const ans of txtLog.packet.answers) {
+        if (ans.type === RR_TYPES.TXT) {
+          const text = ans.parsed.kind === 'TXT' ? ans.parsed.joinedText.trim() : ans.rdataText.trim();
+          if (text && !reasons.includes(text)) reasons.push(text);
+        }
+      }
+    }
+
+    let status: DnsblProviderResult['status'] = 'clean';
+    if (listedCodes.length > 0) {
+      status = 'listed';
+    } else if (adminCodes.length > 0) {
+      status = 'admin-blocked';
+    } else if (aLog.packet.flags.rcode !== 0 && aLog.packet.flags.rcode !== 3) {
+      status = 'error';
+    }
+
+    providers.push({
+      id: prov.zone,
+      label: prov.label,
+      zone: prov.zone,
+      category: prov.category,
+      qname,
+      status,
+      returnCodes: listedCodes.length > 0 ? listedCodes : adminCodes,
+      reasons,
+    });
+  }
+
+  if (providers.length === 0) {
+    return {
+      ip,
+      checkedCount: 0,
+      listedCount: 0,
+      status: 'unchecked',
+      providers: [],
+      summary: 'DNSBL reputation queries were not captured in this snapshot.',
+    };
+  }
+
+  const listedProviders = providers.filter((p) => p.status === 'listed');
+  const cleanCount = providers.filter((p) => p.status === 'clean').length;
+
+  if (listedProviders.length > 0) {
+    const names = listedProviders.map((p) => p.label).join(', ');
+    return {
+      ip,
+      checkedCount: providers.length,
+      listedCount: listedProviders.length,
+      status: 'listed',
+      providers,
+      summary: `Listed on ${listedProviders.length} of ${providers.length} checked DNSBL blocklists (${names}).`,
+    };
+  }
+
+  return {
+    ip,
+    checkedCount: providers.length,
+    listedCount: 0,
+    status: 'all-clean',
+    providers,
+    summary: `Clean across all ${cleanCount} responsive DoH DNSBL providers (RFC 5782).`,
+  };
 }

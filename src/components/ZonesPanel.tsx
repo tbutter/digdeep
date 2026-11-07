@@ -1,4 +1,12 @@
-import { AlertTriangle, CheckCircle2, Globe, KeyRound, RefreshCw, Server } from 'lucide-react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Fingerprint,
+  Globe,
+  KeyRound,
+  RefreshCw,
+  Server,
+} from 'lucide-react';
 import { formatAlgorithm, formatDigestType } from '../dns/constants';
 import { displayFqdn } from '../dns/encoding';
 import type { AnalysisSnapshot } from '../dns/types';
@@ -307,6 +315,79 @@ export function ZonesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
                           : ck.matchesChildDnskey
                             ? 'Matches Active DNSKEY ✓'
                             : 'Unmatched Key'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ZONEMD Zone Digest (RFC 8976) */}
+            {zone.zonemd?.present && (
+              <div className="rounded-lg border border-slate-200 dark:border-slate-800 p-3.5 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-slate-500">
+                    <Fingerprint className="w-3.5 h-3.5 text-cyan-500" />
+                    Message Digest for DNS Zones (ZONEMD · RFC 8976)
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {zone.zonemd.dnssecStatus && (
+                      <StatusBadge status={zone.zonemd.dnssecStatus} size="xs" />
+                    )}
+                    <span
+                      className={`rounded px-2 py-0.5 font-mono text-[10px] font-semibold border ${
+                        zone.zonemd.status === 'valid-sync'
+                          ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25'
+                          : zone.zonemd.status === 'serial-mismatch' ||
+                              zone.zonemd.status === 'unsigned-warning'
+                            ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/25'
+                            : 'bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/25'
+                      }`}
+                    >
+                      {zone.zonemd.status === 'valid-sync'
+                        ? 'SOA SERIAL IN SYNC ✓'
+                        : zone.zonemd.status === 'serial-mismatch'
+                          ? 'SOA SERIAL MISMATCH'
+                          : zone.zonemd.status === 'unsigned-warning'
+                            ? 'UNSIGNED ZONEMD'
+                            : 'INVALID DIGEST'}
+                    </span>
+                  </div>
+                </div>
+                <p className="text-xs text-slate-600 dark:text-slate-300">
+                  {zone.zonemd.summary}
+                </p>
+                <div className="space-y-1.5">
+                  {zone.zonemd.records.map((zmd, idx) => (
+                    <div
+                      key={`zonemd-${zmd.serial}-${zmd.scheme}-${zmd.hashAlgorithm}-${idx}`}
+                      className="rounded border border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2 text-xs font-mono"
+                    >
+                      <div className="min-w-0 break-all">
+                        <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 px-1.5 py-0.5 text-[10px] font-bold mr-2">
+                          ZONEMD
+                        </span>
+                        <span className="font-semibold text-slate-800 dark:text-slate-200">
+                          serial={zmd.serial}
+                        </span>{' '}
+                        · {zmd.schemeName} ({zmd.scheme}) · {zmd.hashAlgorithmName} (
+                        {zmd.hashAlgorithm}, {zmd.digestByteLength}B) ·{' '}
+                        <span className="text-slate-500 text-[11px]">{zmd.digestHex}</span>
+                      </div>
+                      <span
+                        className={`text-[10px] font-semibold ${
+                          !zmd.digestLengthValid
+                            ? 'text-rose-600 dark:text-rose-400'
+                            : zmd.serialMatchesSoa
+                              ? 'text-emerald-600 dark:text-emerald-400'
+                              : 'text-amber-600 dark:text-amber-400'
+                        }`}
+                      >
+                        {!zmd.digestLengthValid
+                          ? 'Invalid Digest Length'
+                          : zmd.serialMatchesSoa
+                            ? 'Matches SOA Serial ✓'
+                            : `SOA Serial=${zone.zonemd?.soaSerial ?? '—'}`}
                       </span>
                     </div>
                   ))}

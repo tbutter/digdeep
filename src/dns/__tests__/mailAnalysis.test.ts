@@ -908,6 +908,78 @@ describe('RFC 7505, RFC 7672 (SMTP DANE), and RFC 7208 (SPF) Audit Scenarios', (
           ],
         })
       ),
+      // DNSBL reputation: 93.184.216.10 is listed on bl.spamcop.net (127.0.0.2) with TXT explanation
+      makeLog(
+        '10.216.184.93.bl.spamcop.net.',
+        RR_TYPES.A,
+        'A',
+        buildSyntheticResponsePacket({
+          qname: '10.216.184.93.bl.spamcop.net.',
+          qtype: RR_TYPES.A,
+          answers: [
+            {
+              name: '10.216.184.93.bl.spamcop.net.',
+              type: RR_TYPES.A,
+              rdata: new Uint8Array([127, 0, 0, 2]),
+            },
+          ],
+        }),
+        false
+      ),
+      makeLog(
+        '10.216.184.93.bl.spamcop.net.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: '10.216.184.93.bl.spamcop.net.',
+          qtype: RR_TYPES.TXT,
+          answers: [
+            {
+              name: '10.216.184.93.bl.spamcop.net.',
+              type: RR_TYPES.TXT,
+              rdata: encodeTxtRdata(['Blocked - see https://www.spamcop.net/bl.shtml?93.184.216.10']),
+            },
+          ],
+        }),
+        false
+      ),
+      // SRV Service Discovery: _imaps._tcp.transport.example. active (priority=0, weight=1, port=993, target=imap.transport.example.)
+      makeLog(
+        '_imaps._tcp.transport.example.',
+        RR_TYPES.SRV,
+        'SRV',
+        buildSyntheticResponsePacket({
+          qname: '_imaps._tcp.transport.example.',
+          qtype: RR_TYPES.SRV,
+          answers: [
+            {
+              name: '_imaps._tcp.transport.example.',
+              type: RR_TYPES.SRV,
+              rdata: concatBytes(
+                new Uint8Array([0, 0, 0, 1, 0x03, 0xe1]),
+                encodeDnsName('imap.transport.example.')
+              ),
+            },
+          ],
+        })
+      ),
+      // SRV Service Discovery: _pop3s._tcp.transport.example. explicitly disabled via target "." (RFC 6186 / RFC 2782)
+      makeLog(
+        '_pop3s._tcp.transport.example.',
+        RR_TYPES.SRV,
+        'SRV',
+        buildSyntheticResponsePacket({
+          qname: '_pop3s._tcp.transport.example.',
+          qtype: RR_TYPES.SRV,
+          answers: [
+            {
+              name: '_pop3s._tcp.transport.example.',
+              type: RR_TYPES.SRV,
+              rdata: concatBytes(new Uint8Array([0, 0, 0, 0, 0, 0]), new Uint8Array([0])),
+            },
+          ],
+        })
+      ),
     ];
 
     const res = evaluateMailFromSnapshotData({
@@ -966,9 +1038,31 @@ describe('RFC 7505, RFC 7672 (SMTP DANE), and RFC 7208 (SPF) Audit Scenarios', (
     const codes = res.mailFindings.map((f) => f.code);
     expect(codes).toContain('MX_PTR_MISSING');
     expect(codes).toContain('MX_FCRDNS_MISMATCH');
+    expect(codes).toContain('MX_DNSBL_LISTED');
     expect(codes).toContain('MTA_STS_MX_MISMATCH');
     expect(codes).toContain('TLSRPT_URI_WARNING');
     expect(codes).toContain('BIMI_DMARC_PREREQUISITE_NOT_MET');
+    expect(codes).toContain('MAIL_SRV_DISCOVERED');
+
+    // DNSBL check on 93.184.216.10
+    expect(mail.mxHosts[0].addresses[0].dnsbl?.status).toBe('listed');
+    expect(mail.mxHosts[0].addresses[0].dnsbl?.listedCount).toBe(1);
+    expect(mail.mxHosts[0].addresses[0].dnsbl?.providers[0]?.zone).toBe('bl.spamcop.net');
+    expect(mail.mxHosts[0].addresses[0].dnsbl?.providers[0]?.returnCodes).toEqual(['127.0.0.2']);
+    expect(mail.mxHosts[0].addresses[0].dnsbl?.providers[0]?.reasons[0]).toContain('spamcop.net');
+
+    // SRV Service Discovery check
+    expect(mail.srvDiscovery).toBeDefined();
+    expect(mail.srvDiscovery?.probedCount).toBe(2);
+    expect(mail.srvDiscovery?.activeCount).toBe(1);
+    expect(mail.srvDiscovery?.disabledCount).toBe(1);
+    const imapsSrv = mail.srvDiscovery?.services.find((s) => s.prefix === '_imaps._tcp');
+    expect(imapsSrv?.status).toBe('active');
+    expect(imapsSrv?.records[0]?.port).toBe(993);
+    expect(imapsSrv?.records[0]?.target).toBe('imap.transport.example.');
+    const pop3sSrv = mail.srvDiscovery?.services.find((s) => s.prefix === '_pop3s._tcp');
+    expect(pop3sSrv?.status).toBe('disabled-explicitly');
+    expect(pop3sSrv?.records[0]?.isNullService).toBe(true);
   });
 });
 
@@ -1024,6 +1118,11 @@ describe('Live DoH Mail + SMTP DANE + SPF + DKIM + DMARC End-to-End Verification
       expect(mail.mtaSts.qname).toBe('_mta-sts.ietf.org.');
       expect(mail.tlsRpt.qname).toBe('_smtp._tls.ietf.org.');
       expect(mail.bimi.qname).toBe('default._bimi.ietf.org.');
+      expect(mail.srvDiscovery?.probedCount).toBe(10);
+      const ipv4MxAddr = mail.mxHosts[0].addresses.find((a) => a.family === 4);
+      if (ipv4MxAddr) {
+        expect(ipv4MxAddr.dnsbl?.checkedCount).toBe(6);
+      }
 
       // Offline time-travel re-verification into 2099 invalidates RRSIGs across DANE, DMARC & DKIM!
       const futureSnap = await reverifySnapshot(snap, {

@@ -2,6 +2,7 @@ import {
   DEFAULT_DOH_ENDPOINT,
   IANA_ROOT_TRUST_ANCHORS,
   RR_TYPES,
+  SRV_DISCOVERY_PROBES,
   TLSA_MATCHING_TYPES,
   TLSA_SELECTORS,
   TLSA_USAGES,
@@ -20,6 +21,7 @@ import {
   normalizeFqdn,
   splitPresentationLabels,
 } from './encoding';
+import { evaluateDnsblAuditForIp, queryDnsblForIp } from './ipUtils';
 import type {
   AnalysisProgress,
   AnalysisSnapshot,
@@ -47,6 +49,9 @@ import type {
   SpfPolicyVerdict,
   SpfQualifier,
   SpfTerm,
+  SrvDiscoveredService,
+  SrvDiscoveryAnalysis,
+  SrvServiceRecordEntry,
   TlsaRecordDetail,
   TlsRptAnalysis,
   TlsRptUriDetail,
@@ -2516,6 +2521,29 @@ function evaluateSingleMxAddressPtr(params: {
     return;
   }
 
+  // Evaluate DNSBL reputation for this MX IP (RFC 5782)
+  const dnsbl = evaluateDnsblAuditForIp(addr.ip, addr.family, addr.isPublic, queries);
+  if (dnsbl.status !== 'unchecked') {
+    addr.dnsbl = dnsbl;
+  }
+  if (dnsbl.status === 'listed') {
+    const listedDetails = dnsbl.providers
+      .filter((p) => p.status === 'listed')
+      .map(
+        (p) =>
+          `${p.label} [${p.returnCodes.join(', ')}${p.reasons.length > 0 ? `: "${p.reasons[0]}"` : ''}]`
+      )
+      .join('; ');
+    mailFindings.push({
+      id: `mail-warn-mx-dnsbl-${mxExchange}-${addr.ip}`,
+      severity: 'warning',
+      code: 'MX_DNSBL_LISTED',
+      title: `MX IP ${addr.ip} (${displayFqdn(mxExchange)}) is listed on ${dnsbl.listedCount} DNSBL blocklist${dnsbl.listedCount === 1 ? '' : 's'}`,
+      detail: `${dnsbl.summary} Details: ${listedDetails}.`,
+      rfc: 'RFC 5782',
+    });
+  }
+
   const ptrRes = resolveCnameChainInLogs(queries, ptrQname, RR_TYPES.PTR);
   const ptrLog =
     findAnyLog(queries, ptrRes.finalOwner, RR_TYPES.PTR) ??
@@ -3406,6 +3434,135 @@ function evaluateBimiFromLogs(params: {
   base.status = base.issues.length > 0 ? 'warning' : 'valid';
   base.summary = `Verified BIMI brand logo & VMC/CMC authority certificate at ${dispQname}.`;
   return base;
+}
+
+function evaluateSrvDiscoveryFromLogs(params: {
+  effectiveMailDomain: string;
+  queries: DohQueryLog[];
+  zones: ZoneAnalysis[];
+  mailFindings: AuditFinding[];
+}): SrvDiscoveryAnalysis | undefined {
+  const { effectiveMailDomain, queries, zones, mailFindings } = params;
+  const dispDom = displayFqdn(effectiveMailDomain);
+  const services: SrvDiscoveredService[] = [];
+  let anyProbed = false;
+
+  for (const probe of SRV_DISCOVERY_PROBES) {
+    const qname = normalizeFqdn(`${probe.prefix}.${effectiveMailDomain}`);
+    const cnameRes = resolveCnameChainInLogs(queries, qname, RR_TYPES.SRV);
+    const resolvedOwner = cnameRes.finalOwner;
+    const srvLog =
+      findAnyLog(queries, resolvedOwner, RR_TYPES.SRV) ?? findAnyLog(queries, qname, RR_TYPES.SRV);
+    if (!srvLog) continue;
+    anyProbed = true;
+
+    const rawSrvAnswers = srvLog.packet.answers.filter(
+      (r) => r.name === resolvedOwner && r.type === RR_TYPES.SRV && r.parsed.kind === 'SRV'
+    );
+    const records: SrvServiceRecordEntry[] = rawSrvAnswers
+      .map((r) => {
+        const p = r.parsed as {
+          kind: 'SRV';
+          priority: number;
+          weight: number;
+          port: number;
+          target: string;
+        };
+        const target = normalizeFqdn(p.target);
+        return {
+          priority: p.priority,
+          weight: p.weight,
+          port: p.port,
+          target,
+          isNullService: target === '.',
+        };
+      })
+      .sort((a, b) =>
+        a.priority !== b.priority
+          ? a.priority - b.priority
+          : a.weight !== b.weight
+            ? b.weight - a.weight
+            : a.target.localeCompare(b.target)
+      );
+
+    const dnssec = findEffectiveDnssecStatusForQuery(
+      zones,
+      qname,
+      cnameRes.cnameChain,
+      resolvedOwner,
+      RR_TYPES.SRV,
+      'SRV'
+    );
+    const effectiveDnssecStatus: ValidationStatus =
+      dnssec.rrset || dnssec.negativeNode
+        ? dnssec.status
+        : srvLog.packet.flags.rcode === 2
+          ? 'bogus'
+          : srvLog.packet.flags.ad
+            ? 'secure'
+            : dnssec.status !== 'indeterminate'
+              ? dnssec.status
+              : 'insecure';
+
+    let status: SrvDiscoveredService['status'] = 'not-published';
+    if (records.length > 0) {
+      status = records.every((r) => r.isNullService) ? 'disabled-explicitly' : 'active';
+    }
+
+    services.push({
+      prefix: probe.prefix,
+      qname,
+      label: probe.label,
+      category: probe.category,
+      rfc: probe.rfc,
+      present: records.length > 0,
+      status,
+      dnssecStatus: effectiveDnssecStatus,
+      rrsetId: dnssec.rrset?.id,
+      records,
+    });
+  }
+
+  if (!anyProbed) return undefined;
+
+  const activeServices = services.filter((s) => s.status === 'active');
+  const disabledServices = services.filter((s) => s.status === 'disabled-explicitly');
+
+  let summary = `No SRV service discovery records published across ${services.length} probed mail/messaging prefixes.`;
+  if (activeServices.length > 0 || disabledServices.length > 0) {
+    const activeLabels = activeServices.map((s) => {
+      const firstRec = s.records.find((r) => !r.isNullService) ?? s.records[0];
+      return `${s.prefix} (${displayFqdn(firstRec.target)}:${firstRec.port})`;
+    });
+    const parts: string[] = [];
+    if (activeServices.length > 0) {
+      parts.push(
+        `${activeServices.length} active SRV service${activeServices.length === 1 ? '' : 's'}: ${activeLabels.join(', ')}`
+      );
+    }
+    if (disabledServices.length > 0) {
+      parts.push(
+        `${disabledServices.length} explicitly disabled ("0 0 0 ."): ${disabledServices.map((s) => s.prefix).join(', ')}`
+      );
+    }
+    summary = `${parts.join('; ')}.`;
+    mailFindings.push({
+      id: `mail-info-srv-discovery-${effectiveMailDomain}`,
+      severity: 'info',
+      code: 'MAIL_SRV_DISCOVERED',
+      title: `Service discovery (SRV) published at ${dispDom} (${activeServices.length} active${disabledServices.length > 0 ? `, ${disabledServices.length} disabled` : ''})`,
+      detail: summary,
+      rfc: 'RFC 2782 / RFC 6186 / RFC 6764',
+    });
+  }
+
+  return {
+    probedCount: services.length,
+    activeCount: activeServices.length,
+    disabledCount: disabledServices.length,
+    services,
+    summary,
+  };
 }
 
 /**
@@ -4599,6 +4756,14 @@ export function evaluateMailFromSnapshotData(params: {
     mailFindings,
   });
 
+  // 8b. Service Discovery (SRV — RFC 6186 / RFC 8314 / RFC 6764 / Matrix / XMPP)
+  const srvDiscovery = evaluateSrvDiscoveryFromLogs({
+    effectiveMailDomain,
+    queries,
+    zones,
+    mailFindings,
+  });
+
   // 9. Aggregate MX Reverse DNS (PTR & FCrDNS) summary across all public MX IPs
   const allPublicMxAddrs: MxAddressEntry[] = [];
   for (const h of nonNullHosts) {
@@ -4671,6 +4836,7 @@ export function evaluateMailFromSnapshotData(params: {
       status: fcrdnsOverallStatus,
       summary: fcrdnsText,
     },
+    ...(srvDiscovery ? { srvDiscovery } : {}),
   };
 
   // Compute unified top-level status & summary for Mail Mode
@@ -5127,18 +5293,22 @@ export async function runMailAnalysis(
 
     const cappedMxIps = publicMxIps.slice(0, MAX_PROBED_MX_IPS_FOR_PTR);
     if (cappedMxIps.length > 0) {
-      const ptrLogs = await Promise.all(
-        cappedMxIps.map((item) =>
-          session
-            .query(item.ptrQname, RR_TYPES.PTR, {
-              cd: false,
-              doBit: true,
-              purpose: `MX rDNS lookup (${item.ptrQname} PTR)`,
-            })
-            .then((log) => ({ item, log }))
-            .catch(() => ({ item, log: undefined }))
-        )
-      );
+      const dnsblCandidateIps = cappedMxIps.filter((i) => i.family === 4).slice(0, 4);
+      const [ptrLogs] = await Promise.all([
+        Promise.all(
+          cappedMxIps.map((item) =>
+            session
+              .query(item.ptrQname, RR_TYPES.PTR, {
+                cd: false,
+                doBit: true,
+                purpose: `MX rDNS lookup (${item.ptrQname} PTR)`,
+              })
+              .then((log) => ({ item, log }))
+              .catch(() => ({ item, log: undefined }))
+          )
+        ),
+        Promise.all(dnsblCandidateIps.map((item) => queryDnsblForIp(session, item.ip))),
+      ]);
 
       // Verify Forward-Confirmed Reverse DNS (FCrDNS): query A/AAAA for any PTR target hostname not already in logs
       const fcrdnsForwardTasks: Promise<unknown>[] = [];
@@ -5472,18 +5642,32 @@ export async function runMailAnalysis(
     transportProbeOwners.push(normalizeFqdn(`default._bimi.${orgDomain}`));
   }
 
-  const transportProbeLogs = await Promise.all(
-    transportProbeOwners.map(async (qn) => {
-      const log = await session
-        .query(qn, RR_TYPES.TXT, {
-          cd: false,
-          doBit: true,
-          purpose: `Mail probe (${qn} TXT)`,
-        })
-        .catch(() => undefined);
-      return { qn, log };
-    })
-  );
+  const [transportProbeLogs] = await Promise.all([
+    Promise.all(
+      transportProbeOwners.map(async (qn) => {
+        const log = await session
+          .query(qn, RR_TYPES.TXT, {
+            cd: false,
+            doBit: true,
+            purpose: `Mail probe (${qn} TXT)`,
+          })
+          .catch(() => undefined);
+        return { qn, log };
+      })
+    ),
+    Promise.all(
+      SRV_DISCOVERY_PROBES.map(async (probe) => {
+        const qn = normalizeFqdn(`${probe.prefix}.${effectiveMailDomain}`);
+        await session
+          .query(qn, RR_TYPES.SRV, {
+            cd: true,
+            doBit: true,
+            purpose: `Mail SRV probe (${qn} SRV)`,
+          })
+          .catch(() => undefined);
+      })
+    ),
+  ]);
 
   // Upgrade any MTA-STS / TLS-RPT / BIMI owners that returned TXT/CNAME answers or SERVFAIL to full CD=1 Mail targets
   const matchedTransportOwners = transportProbeLogs
@@ -5583,7 +5767,10 @@ export async function runMailAnalysis(
       log.purpose.startsWith('DMARC lookup') ||
       log.purpose.startsWith('DKIM probe') ||
       log.purpose.startsWith('Mail probe') ||
+      (log.purpose.startsWith('Mail SRV probe') &&
+        !log.packet.answers.some((r) => r.type === RR_TYPES.SRV)) ||
       log.purpose.startsWith('MX rDNS lookup') ||
+      log.purpose.startsWith('DNSBL reputation lookup') ||
       log.purpose.startsWith('Nameserver IP')
     ) {
       continue;

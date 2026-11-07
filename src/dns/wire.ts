@@ -6,6 +6,9 @@ import {
   RR_TYPES,
   SSHFP_ALGORITHMS,
   SSHFP_FP_TYPES,
+  ZONEMD_HASH_ALGORITHMS,
+  formatZonemdHashAlgorithm,
+  formatZonemdScheme,
   rrTypeToString,
   svcParamKeyToString,
 } from './constants';
@@ -691,8 +694,8 @@ function parseRecordRdata(
     };
   }
 
-  // 17. TLSA (52) & SSHFP (44)
-  if (rrtype === RR_TYPES.TLSA && rdlength >= 3) {
+  // 17. TLSA (52), SMIMEA (53) & SSHFP (44)
+  if ((rrtype === RR_TYPES.TLSA || rrtype === RR_TYPES.SMIMEA) && rdlength >= 3) {
     const usage = rawRdata[0];
     const selector = rawRdata[1];
     const matchingType = rawRdata[2];
@@ -727,6 +730,20 @@ function parseRecordRdata(
     };
   }
 
+  // 17b. OPENPGPKEY (61, RFC 7929): Base64-encoded OpenPGP transferable public key packet
+  if (rrtype === RR_TYPES.OPENPGPKEY && rdlength >= 1) {
+    const keyBase64 = bytesToBase64(rawRdata);
+    return {
+      canonicalRdata: new Uint8Array(rawRdata),
+      rdataText: keyBase64,
+      parsed: {
+        kind: 'OPENPGPKEY',
+        keyBase64,
+        byteLength: rawRdata.length,
+      },
+    };
+  }
+
   // 18. CSYNC (62): SOA Serial (4), Flags (2), Type Bit Maps (RFC 7477 §2.1.1)
   if (rrtype === RR_TYPES.CSYNC && rdlength >= 6) {
     const soaSerial = view.getUint32(0, false);
@@ -746,6 +763,33 @@ function parseRecordRdata(
         soaMinimum,
         types,
         typeNames,
+      },
+    };
+  }
+
+  // 18b. ZONEMD (63, RFC 8976 §2): Serial (4), Scheme (1), Hash Algorithm (1), Digest (variable, >= 12 bytes)
+  if (rrtype === RR_TYPES.ZONEMD && rdlength >= 6) {
+    const serial = view.getUint32(0, false);
+    const scheme = rawRdata[4];
+    const hashAlgorithm = rawRdata[5];
+    const digestBytes = rawRdata.subarray(6);
+    const digestHex = bytesToHex(digestBytes);
+    const expectedBytes = ZONEMD_HASH_ALGORITHMS[hashAlgorithm]?.expectedByteLength;
+    const digestLengthValid =
+      digestBytes.length >= 12 && (expectedBytes === undefined || digestBytes.length === expectedBytes);
+    return {
+      canonicalRdata: new Uint8Array(rawRdata),
+      rdataText: `${serial} ${scheme} ${hashAlgorithm} ${digestHex}`,
+      parsed: {
+        kind: 'ZONEMD',
+        serial,
+        scheme,
+        schemeName: formatZonemdScheme(scheme),
+        hashAlgorithm,
+        hashAlgorithmName: formatZonemdHashAlgorithm(hashAlgorithm),
+        digestHex,
+        digestByteLength: digestBytes.length,
+        digestLengthValid,
       },
     };
   }

@@ -215,6 +215,24 @@ export interface SshfpRdata {
   fingerprintHex: string;
 }
 
+export interface ZonemdRdata {
+  kind: 'ZONEMD';
+  serial: number;
+  scheme: number;
+  schemeName: string;
+  hashAlgorithm: number;
+  hashAlgorithmName: string;
+  digestHex: string;
+  digestByteLength: number;
+  digestLengthValid: boolean;
+}
+
+export interface OpenpgpkeyRdata {
+  kind: 'OPENPGPKEY';
+  keyBase64: string;
+  byteLength: number;
+}
+
 export interface GenericRdata {
   kind: 'GENERIC';
   target?: string;
@@ -236,6 +254,8 @@ export type ParsedRdata =
   | CsyncRdata
   | SvcbRdata
   | SshfpRdata
+  | ZonemdRdata
+  | OpenpgpkeyRdata
   | GenericRdata;
 
 export interface DnsRecord {
@@ -470,6 +490,47 @@ export interface NsDiversityAnalysis {
   summary: string;
 }
 
+export interface ZonemdRecordDetail {
+  serial: number;
+  scheme: number;
+  schemeName: string;
+  hashAlgorithm: number;
+  hashAlgorithmName: string;
+  digestHex: string;
+  digestByteLength: number;
+  digestLengthValid: boolean;
+  serialMatchesSoa: boolean;
+}
+
+export interface ZonemdAuditSummary {
+  present: boolean;
+  status: 'valid-sync' | 'serial-mismatch' | 'invalid-digest' | 'unsigned-warning' | 'not-published';
+  dnssecStatus?: ValidationStatus;
+  soaSerial?: number;
+  records: ZonemdRecordDetail[];
+  summary: string;
+}
+
+export interface DnsblProviderResult {
+  id: string;
+  label: string;
+  zone: string;
+  category: 'spam' | 'exploit' | 'reputation' | 'tor';
+  qname: string;
+  status: 'clean' | 'listed' | 'admin-blocked' | 'error';
+  returnCodes: string[];
+  reasons: string[];
+}
+
+export interface DnsblAuditSummary {
+  ip: string;
+  checkedCount: number;
+  listedCount: number;
+  status: 'all-clean' | 'listed' | 'not-applicable' | 'unchecked';
+  providers: DnsblProviderResult[];
+  summary: string;
+}
+
 export interface ZoneAnalysis {
   zoneName: string; // "." or "com." or "cloudflare.com."
   parentZone: string | null;
@@ -499,6 +560,7 @@ export interface ZoneAnalysis {
   soaAudit?: SoaAuditSummary;
   cdsRollover?: CdsRolloverAnalysis;
   nsDiversity?: NsDiversityAnalysis;
+  zonemd?: ZonemdAuditSummary;
 }
 
 export interface CnameEdge {
@@ -570,6 +632,7 @@ export interface MxAddressEntry {
   ptrNegativeNodeId?: string;
   fcrdnsStatus?: FcrdnsStatus;
   fcrdnsMatchedNames?: string[];
+  dnsbl?: DnsblAuditSummary;
 }
 
 export interface MxHostAnalysis {
@@ -832,6 +895,42 @@ export interface BimiAnalysis {
   summary: string;
 }
 
+export interface SrvServiceRecordEntry {
+  priority: number;
+  weight: number;
+  port: number;
+  target: string;
+  isNullService: boolean;
+}
+
+export interface SrvDiscoveredService {
+  prefix: string;
+  qname: string;
+  label: string;
+  category:
+    | 'mail-groupware'
+    | 'federation-chat'
+    | 'mail-autodiscover'
+    | 'mail-submission'
+    | 'mail-access'
+    | 'calendar-contacts'
+    | 'messaging';
+  rfc: string;
+  present: boolean;
+  status: 'active' | 'disabled-explicitly' | 'not-published';
+  dnssecStatus: ValidationStatus;
+  rrsetId?: string;
+  records: SrvServiceRecordEntry[];
+}
+
+export interface SrvDiscoveryAnalysis {
+  probedCount: number;
+  activeCount: number;
+  disabledCount: number;
+  services: SrvDiscoveredService[];
+  summary: string;
+}
+
 export interface MailAnalysisResult {
   mxStatus: 'valid' | 'null-mx' | 'implicit-a' | 'warning' | 'broken' | 'none';
   mxDnssecStatus: ValidationStatus;
@@ -876,6 +975,7 @@ export interface MailAnalysisResult {
     status: 'all-valid' | 'partial' | 'broken' | 'not-applicable' | 'unchecked';
     summary: string;
   };
+  srvDiscovery?: SrvDiscoveryAnalysis;
 }
 
 export interface ReversePtrTargetEntry {
@@ -922,6 +1022,7 @@ export interface ReverseDnsAnalysis {
   fcrdnsStatus: 'valid' | 'partial' | 'ptr-mismatch' | 'no-ptr' | 'temperror' | 'not-applicable';
   fcrdnsSummary: string;
   bgp?: ReverseIpBgpInfo;
+  dnsbl?: DnsblAuditSummary;
 }
 
 export interface WebSvcbRecordDetail {
