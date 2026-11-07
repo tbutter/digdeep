@@ -3,6 +3,7 @@ import {
   DNSSEC_ALGORITHMS,
   IANA_ROOT_TRUST_ANCHORS,
   RR_TYPES,
+  WILDCARD_PROBE_LABEL,
   formatAlgorithm,
   formatDigestType,
   rcodeToString,
@@ -19,6 +20,7 @@ import {
 import { DohSession, type DohClientOptions } from './doh';
 import {
   base64ToBytes,
+  countDnsLabels,
   displayFqdn,
   getDomainHierarchy,
   isSubdomainOrEqual,
@@ -66,13 +68,18 @@ import type {
   SoaAuditSummary,
   SoaRdata,
   SoaTimerIssue,
+  TxtHygieneAudit,
+  TxtRecordCategory,
+  TxtVerificationEntry,
   ValidationStatus,
+  WildcardAuditSummary,
+  WildcardProbeTypeResult,
   ZoneAnalysis,
   ZonemdAuditSummary,
   ZonemdRecordDetail,
 } from './types';
 
-export const SNAPSHOT_ENGINE_VERSION = 10;
+export const SNAPSHOT_ENGINE_VERSION = 11;
 
 export interface AnalyzeOptions extends DohClientOptions {
   queryTypes?: string[];
@@ -389,31 +396,74 @@ export async function runDnsvizAnalysis(
   }
 
   await Promise.all([
-    ...zoneList.map((z) =>
-      session
-        .query(z, RR_TYPES.ZONEMD, {
-          cd: true,
-          doBit: true,
-          purpose: `Zone ZONEMD (${z})`,
-        })
-        .catch(() => undefined)
-    ),
-    ...nonRootLeafZones.flatMap((lz) => [
-      session
-        .query(lz, RR_TYPES.CDS, {
-          cd: true,
-          doBit: true,
-          purpose: `Zone CDS (${lz})`,
-        })
-        .catch(() => undefined),
-      session
-        .query(lz, RR_TYPES.CDNSKEY, {
-          cd: true,
-          doBit: true,
-          purpose: `Zone CDNSKEY (${lz})`,
-        })
-        .catch(() => undefined),
-    ]),
+    ...zoneList
+      .filter((z) => z === '.' || !z.endsWith('.arpa.'))
+      .map((z) =>
+        session
+          .query(z, RR_TYPES.ZONEMD, {
+            cd: true,
+            doBit: true,
+            purpose: `Zone ZONEMD (${z})`,
+          })
+          .catch(() => undefined)
+      ),
+    ...nonRootLeafZones.flatMap((lz) => {
+      const tasks: Promise<unknown>[] = [
+        session
+          .query(lz, RR_TYPES.CDS, {
+            cd: true,
+            doBit: true,
+            purpose: `Zone CDS (${lz})`,
+          })
+          .catch(() => undefined),
+        session
+          .query(lz, RR_TYPES.CDNSKEY, {
+            cd: true,
+            doBit: true,
+            purpose: `Zone CDNSKEY (${lz})`,
+          })
+          .catch(() => undefined),
+      ];
+      // For leaf domain zones (depth >= 2, excluding .arpa reverse zones), probe wildcard synthesis and apex TXT hygiene
+      if (!lz.endsWith('.arpa.') && getDomainHierarchy(lz).length >= 3) {
+        const wildcardQname = `${WILDCARD_PROBE_LABEL}.${lz}`;
+        tasks.push(
+          session
+            .query(wildcardQname, RR_TYPES.A, {
+              cd: true,
+              doBit: true,
+              purpose: `Wildcard probe (${lz} A)`,
+            })
+            .catch(() => undefined),
+          session
+            .query(wildcardQname, RR_TYPES.AAAA, {
+              cd: true,
+              doBit: true,
+              purpose: `Wildcard probe (${lz} AAAA)`,
+            })
+            .catch(() => undefined),
+          session
+            .query(wildcardQname, RR_TYPES.MX, {
+              cd: true,
+              doBit: true,
+              purpose: `Wildcard probe (${lz} MX)`,
+            })
+            .catch(() => undefined)
+        );
+        if (!findLog(currentLogs, lz, RR_TYPES.TXT, true)) {
+          tasks.push(
+            session
+              .query(lz, RR_TYPES.TXT, {
+                cd: true,
+                doBit: true,
+                purpose: `Zone TXT (${lz})`,
+              })
+              .catch(() => undefined)
+          );
+        }
+      }
+      return tasks;
+    }),
     ...Array.from(nsHosts).flatMap((host) => [
       session
         .query(host, RR_TYPES.A, { cd: true, doBit: false, purpose: `Nameserver IP (${host} A)` })
@@ -718,10 +768,16 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
         q.purpose.startsWith('Mail SRV probe') &&
         !q.packet.answers.some((r) => r.type === RR_TYPES.SRV)
       ) &&
+      !(
+        q.purpose.startsWith('Zone ZONEMD') &&
+        !q.packet.answers.some((r) => r.type === RR_TYPES.ZONEMD)
+      ) &&
       !q.purpose.startsWith('MX rDNS lookup') &&
       !q.purpose.startsWith('Reverse FCrDNS lookup') &&
       !q.purpose.startsWith('BGP ASN lookup') &&
       !q.purpose.startsWith('DNSBL reputation lookup') &&
+      !q.purpose.startsWith('Wildcard probe') &&
+      !q.purpose.startsWith('Zone TXT') &&
       !q.purpose.startsWith('Consensus probe')
   );
 
@@ -2149,6 +2205,29 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       }
     }
 
+    // Evaluate Wildcard DNS (*.zone) Synthesis & RFC 4035 §5.3.4 / RFC 5155 §7.2.6 Proofs
+    let wildcardAudit: WildcardAuditSummary | undefined;
+    if (isLeafDelegatedZone && !zoneName.endsWith('.arpa.')) {
+      wildcardAudit = await evaluateWildcardAuditForZone({
+        zoneName,
+        queries,
+        zoneDnskeys: rawZoneDnskeys.get(zoneName) ?? [],
+        zoneStatus,
+        validationEpochSec,
+        findings,
+      });
+    }
+
+    // Evaluate Apex TXT Inventory & SaaS Verification Hygiene
+    let txtHygiene: TxtHygieneAudit | undefined;
+    if (isLeafDelegatedZone && !zoneName.endsWith('.arpa.')) {
+      txtHygiene = evaluateTxtHygieneForZone({
+        zoneName,
+        queries,
+        findings,
+      });
+    }
+
     zonesByName.set(zoneName, {
       zoneName,
       parentZone,
@@ -2169,6 +2248,8 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       ...(cdsRollover ? { cdsRollover } : {}),
       ...(nsDiversity ? { nsDiversity } : {}),
       ...(zonemd ? { zonemd } : {}),
+      ...(wildcardAudit ? { wildcardAudit } : {}),
+      ...(txtHygiene ? { txtHygiene } : {}),
     });
   }
 
@@ -2988,5 +3069,823 @@ function evaluateReverseDnsFromSnapshotData(params: {
       ...(dnsbl.status !== 'unchecked' ? { dnsbl } : {}),
     },
     findings,
+  };
+}
+
+const SAAS_TXT_PATTERNS: ReadonlyArray<{
+  prefixRegex: RegExp;
+  keyPrefix: string;
+  provider: string;
+  category: TxtRecordCategory;
+}> = [
+  {
+    prefixRegex: /^google-site-verification=(.+)$/i,
+    keyPrefix: 'google-site-verification=',
+    provider: 'Google Workspace / Search Console',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^MS=(.+)$/i,
+    keyPrefix: 'MS=',
+    provider: 'Microsoft 365 / Entra ID',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^apple-domain-verification=(.+)$/i,
+    keyPrefix: 'apple-domain-verification=',
+    provider: 'Apple Business / Domain Verification',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^atlassian-domain-verification=(.+)$/i,
+    keyPrefix: 'atlassian-domain-verification=',
+    provider: 'Atlassian Cloud',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^stripe-verification=(.+)$/i,
+    keyPrefix: 'stripe-verification=',
+    provider: 'Stripe',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^docusign=(.+)$/i,
+    keyPrefix: 'docusign=',
+    provider: 'DocuSign',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^facebook-domain-verification=(.+)$/i,
+    keyPrefix: 'facebook-domain-verification=',
+    provider: 'Meta / Facebook Business',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^protonmail-verification=(.+)$/i,
+    keyPrefix: 'protonmail-verification=',
+    provider: 'Proton Mail',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^keybase-site-verification=(.+)$/i,
+    keyPrefix: 'keybase-site-verification=',
+    provider: 'Keybase',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^openai-domain-verification=(.+)$/i,
+    keyPrefix: 'openai-domain-verification=',
+    provider: 'OpenAI',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^anthropic-domain-verification=(.+)$/i,
+    keyPrefix: 'anthropic-domain-verification=',
+    provider: 'Anthropic',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^slack-domain-verification=(.+)$/i,
+    keyPrefix: 'slack-domain-verification=',
+    provider: 'Slack',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^(?:ZOOM_verify_|zoom-domain-verification=)(.+)$/i,
+    keyPrefix: 'ZOOM_verify_',
+    provider: 'Zoom',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^hubspot-(?:developer|domain)-verification=(.+)$/i,
+    keyPrefix: 'hubspot-verification=',
+    provider: 'HubSpot',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^miro-verification=(.+)$/i,
+    keyPrefix: 'miro-verification=',
+    provider: 'Miro',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^(?:notion-domain-verification=|notion_verify_)(.+)$/i,
+    keyPrefix: 'notion-domain-verification=',
+    provider: 'Notion',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^canva-site-verification=(.+)$/i,
+    keyPrefix: 'canva-site-verification=',
+    provider: 'Canva',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^(?:cisco-ci-domain-verification=|webexdomainverification\.=)(.+)$/i,
+    keyPrefix: 'cisco-ci-domain-verification=',
+    provider: 'Cisco Webex',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^adobe-(?:idp-site|sign)-verification=(.+)$/i,
+    keyPrefix: 'adobe-verification=',
+    provider: 'Adobe',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^fastly-domain-delegation-(.+)$/i,
+    keyPrefix: 'fastly-domain-delegation-',
+    provider: 'Fastly',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^cloudflare-verify=(.+)$/i,
+    keyPrefix: 'cloudflare-verify=',
+    provider: 'Cloudflare',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^amazonses:(.+)$/i,
+    keyPrefix: 'amazonses:',
+    provider: 'Amazon SES',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^have-i-been-pwned-verification=(.+)$/i,
+    keyPrefix: 'have-i-been-pwned-verification=',
+    provider: 'Have I Been Pwned',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^(?:_github-challenge-[^=]+=|github-verification=)(.+)$/i,
+    keyPrefix: 'github-verification=',
+    provider: 'GitHub',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^vercel-domain-verification=(.+)$/i,
+    keyPrefix: 'vercel-domain-verification=',
+    provider: 'Vercel',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^tailscale-domain-verification=(.+)$/i,
+    keyPrefix: 'tailscale-domain-verification=',
+    provider: 'Tailscale',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^1password-site-verification=(.+)$/i,
+    keyPrefix: '1password-site-verification=',
+    provider: '1Password',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^linear-domain-verification=(.+)$/i,
+    keyPrefix: 'linear-domain-verification=',
+    provider: 'Linear',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^figma-domain-verification=(.+)$/i,
+    keyPrefix: 'figma-domain-verification=',
+    provider: 'Figma',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^postman-domain-verification=(.+)$/i,
+    keyPrefix: 'postman-domain-verification=',
+    provider: 'Postman',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^zendesk-verification=(.+)$/i,
+    keyPrefix: 'zendesk-verification=',
+    provider: 'Zendesk',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^brave-ledger-verification=(.+)$/i,
+    keyPrefix: 'brave-ledger-verification=',
+    provider: 'Brave Creators',
+    category: 'saas-verification',
+  },
+  {
+    prefixRegex: /^did=(did:[a-z0-9]+:.+)$/i,
+    keyPrefix: 'did=',
+    provider: 'Bluesky / AT Protocol (DID)',
+    category: 'decentralized-id',
+  },
+  {
+    prefixRegex: /^_?globalsign-domain-verification=(.+)$/i,
+    keyPrefix: 'globalsign-domain-verification=',
+    provider: 'GlobalSign CA Validation',
+    category: 'ca-validation',
+  },
+];
+
+/**
+ * Classifies a single zone apex TXT string into protocol, SaaS verification, CA validation,
+ * or misplaced/malformed categories.
+ */
+export function classifyApexTxtRecord(rawText: string, byteLength?: number): TxtVerificationEntry {
+  const trimmed = rawText.trim();
+  const bytes = byteLength ?? new TextEncoder().encode(rawText).byteLength;
+
+  // 1. SPF Policy at zone apex (RFC 7208)
+  if (/^v=spf1(?:\s|$)/i.test(trimmed)) {
+    return {
+      rawText,
+      byteLength: bytes,
+      category: 'email-auth',
+      provider: 'SPF Policy (RFC 7208)',
+      keyPrefix: 'v=spf1',
+      tokenValue: trimmed.slice(6).trim(),
+      status: 'valid',
+    };
+  }
+  if (/^(?:spf1\s|v=spf[2-9]|spf2\.0)/i.test(trimmed)) {
+    return {
+      rawText,
+      byteLength: bytes,
+      category: 'email-auth',
+      provider: 'Malformed / Legacy SPF Tag',
+      keyPrefix: trimmed.split(/\s+/)[0],
+      status: 'malformed',
+      issue:
+        'Malformed or deprecated SPF version tag at zone apex; RFC 7208 §4.5 requires exact "v=spf1".',
+    };
+  }
+
+  // 2. Misplaced underscore-prefixed protocol policies accidentally published at zone apex
+  if (/^v=DMARC1(?:\s|;|$)/i.test(trimmed)) {
+    return {
+      rawText,
+      byteLength: bytes,
+      category: 'email-auth',
+      provider: 'DMARC Policy (Misplaced at Apex)',
+      keyPrefix: 'v=DMARC1',
+      status: 'misplaced-at-apex',
+      issue:
+        'DMARC policy is published at the zone apex instead of _dmarc.<domain>; RFC 7489 §6.1 receivers will ignore it.',
+    };
+  }
+  if (/^v=DKIM1(?:\s|;|$)/i.test(trimmed)) {
+    return {
+      rawText,
+      byteLength: bytes,
+      category: 'email-auth',
+      provider: 'DKIM Public Key (Misplaced at Apex)',
+      keyPrefix: 'v=DKIM1',
+      status: 'misplaced-at-apex',
+      issue:
+        'DKIM key is published at the zone apex instead of <selector>._domainkey.<domain> (RFC 6376 §3.6.2).',
+    };
+  }
+  if (/^v=BIMI1(?:\s|;|$)/i.test(trimmed)) {
+    return {
+      rawText,
+      byteLength: bytes,
+      category: 'email-auth',
+      provider: 'BIMI Record (Misplaced at Apex)',
+      keyPrefix: 'v=BIMI1',
+      status: 'misplaced-at-apex',
+      issue: 'BIMI record is published at the zone apex instead of default._bimi.<domain>.',
+    };
+  }
+  if (/^v=STSv1(?:\s|;|$)/i.test(trimmed)) {
+    return {
+      rawText,
+      byteLength: bytes,
+      category: 'tls-security',
+      provider: 'MTA-STS Policy (Misplaced at Apex)',
+      keyPrefix: 'v=STSv1',
+      status: 'misplaced-at-apex',
+      issue:
+        'MTA-STS TXT record is published at the zone apex instead of _mta-sts.<domain> (RFC 8461 §3.1).',
+    };
+  }
+  if (/^v=TLSRPTv1(?:\s|;|$)/i.test(trimmed)) {
+    return {
+      rawText,
+      byteLength: bytes,
+      category: 'tls-security',
+      provider: 'SMTP TLS-RPT (Misplaced at Apex)',
+      keyPrefix: 'v=TLSRPTv1',
+      status: 'misplaced-at-apex',
+      issue:
+        'TLS-RPT TXT record is published at the zone apex instead of _smtp._tls.<domain> (RFC 8460 §3.1).',
+    };
+  }
+
+  // 3. Known SaaS / Cloud / Identity / CA verification patterns
+  for (const pat of SAAS_TXT_PATTERNS) {
+    const m = pat.prefixRegex.exec(trimmed);
+    if (m) {
+      return {
+        rawText,
+        byteLength: bytes,
+        category: pat.category,
+        provider: pat.provider,
+        keyPrefix: pat.keyPrefix,
+        tokenValue: m[1].trim(),
+        status: 'valid',
+      };
+    }
+  }
+
+  // Generic <vendor>-site-verification=... or <vendor>-domain-verification=...
+  const genericVerif = /^([a-z0-9._-]+-(?:site|domain)-verification)=(.+)$/i.exec(trimmed);
+  if (genericVerif) {
+    const prefixName = genericVerif[1];
+    return {
+      rawText,
+      byteLength: bytes,
+      category: 'saas-verification',
+      provider: `${prefixName.split('-')[0].toUpperCase()} Verification`,
+      keyPrefix: `${prefixName}=`,
+      tokenValue: genericVerif[2].trim(),
+      status: 'valid',
+    };
+  }
+
+  return {
+    rawText,
+    byteLength: bytes,
+    category: 'custom-other',
+    provider: 'Custom / Unclassified TXT',
+    status: 'valid',
+  };
+}
+
+function evaluateTxtHygieneForZone(params: {
+  zoneName: string;
+  queries: DohQueryLog[];
+  findings: AuditFinding[];
+}): TxtHygieneAudit | undefined {
+  const { zoneName, queries, findings } = params;
+  const txtLogs = queries.filter(
+    (q) => q.qname === zoneName && q.qtype === RR_TYPES.TXT
+  );
+  if (txtLogs.length === 0) return undefined;
+
+  // Prefer the first TXT log that returned TXT answers (or the first TXT log overall)
+  const primaryLog =
+    txtLogs.find((l) => l.packet.answers.some((r) => r.name === zoneName && r.type === RR_TYPES.TXT)) ??
+    txtLogs[0];
+
+  const txtRecords = primaryLog.packet.answers.filter(
+    (r) => r.name === zoneName && r.type === RR_TYPES.TXT
+  );
+  if (txtRecords.length === 0) {
+    return {
+      recordCount: 0,
+      totalWireBytes: 0,
+      saasVerificationCount: 0,
+      duplicateCount: 0,
+      misplacedCount: 0,
+      malformedCount: 0,
+      bloatWarning: false,
+      status: 'clean',
+      entries: [],
+      summary: `No TXT records published at ${zoneName} apex.`,
+    };
+  }
+
+  const seenExactText = new Set<string>();
+  const seenProviderTokens = new Set<string>();
+  let spfCount = 0;
+  let totalWireBytes = 0;
+  const entries: TxtVerificationEntry[] = [];
+
+  for (const rec of txtRecords) {
+    const rawText = rec.parsed.kind === 'TXT' ? rec.parsed.joinedText : rec.rdataText;
+    const wireLen = base64ToBytes(rec.canonicalRdataBase64).byteLength;
+    totalWireBytes += wireLen;
+
+    const entry = classifyApexTxtRecord(rawText, wireLen);
+    const normText = rawText.trim();
+
+    if (entry.keyPrefix === 'v=spf1') {
+      spfCount++;
+      if (spfCount > 1) {
+        entry.status = 'duplicate';
+        entry.issue =
+          'Multiple v=spf1 TXT records published at zone apex violate RFC 7208 §3.2 (causes SPF PermError).';
+      }
+    }
+
+    const tokenKey =
+      entry.keyPrefix && entry.tokenValue
+        ? `${entry.provider}|${entry.tokenValue}`
+        : null;
+
+    if (seenExactText.has(normText) || (tokenKey && seenProviderTokens.has(tokenKey))) {
+      entry.status = 'duplicate';
+      entry.issue = entry.issue ?? `Duplicate ${entry.provider} TXT token at zone apex.`;
+    }
+    seenExactText.add(normText);
+    if (tokenKey) seenProviderTokens.add(tokenKey);
+
+    entries.push(entry);
+  }
+
+  const saasVerificationCount = entries.filter(
+    (e) =>
+      e.category === 'saas-verification' ||
+      e.category === 'ca-validation' ||
+      e.category === 'decentralized-id'
+  ).length;
+  const duplicateCount = entries.filter((e) => e.status === 'duplicate').length;
+  const misplacedCount = entries.filter((e) => e.status === 'misplaced-at-apex').length;
+  const malformedCount = entries.filter((e) => e.status === 'malformed').length;
+  const bloatWarning = txtRecords.length > 12 || totalWireBytes > 1232;
+
+  let status: TxtHygieneAudit['status'] = 'clean';
+  if (duplicateCount > 0 || misplacedCount > 0 || malformedCount > 0 || bloatWarning) {
+    status = 'warning';
+  } else if (saasVerificationCount > 0) {
+    status = 'info-saas';
+  }
+
+  for (const e of entries) {
+    if (e.status === 'misplaced-at-apex' || e.status === 'malformed') {
+      findings.push({
+        id: `warn-txt-misplaced-${zoneName}-${e.keyPrefix ?? e.provider}`,
+        severity: 'warning',
+        code: 'TXT_APEX_MISPLACED_POLICY',
+        title: `${e.provider} at ${zoneName} apex`,
+        detail: e.issue ?? `${e.provider} record at ${zoneName} apex is misplaced or malformed.`,
+        rfc: 'RFC 7489 / RFC 8461 / RFC 7208',
+        zone: zoneName,
+      });
+    }
+  }
+
+  if (duplicateCount > 0) {
+    const dupProviders = Array.from(
+      new Set(entries.filter((e) => e.status === 'duplicate').map((e) => e.provider))
+    ).join(', ');
+    findings.push({
+      id: `warn-txt-duplicate-${zoneName}`,
+      severity: 'warning',
+      code: 'TXT_DUPLICATE_VERIFICATION',
+      title: `${duplicateCount} duplicate TXT record${duplicateCount === 1 ? '' : 's'} at ${zoneName} apex (${dupProviders})`,
+      detail: `Found ${duplicateCount} duplicate or redundant TXT record${duplicateCount === 1 ? '' : 's'} at ${zoneName} (${dupProviders}). Remove duplicate tokens to reduce apex TXT RRset size.`,
+      zone: zoneName,
+    });
+  }
+
+  if (bloatWarning) {
+    findings.push({
+      id: `warn-txt-bloat-${zoneName}`,
+      severity: totalWireBytes > 1232 ? 'warning' : 'info',
+      code: 'TXT_APEX_BLOAT',
+      title: `Large apex TXT RRset at ${zoneName} (${txtRecords.length} records, ${totalWireBytes} bytes RDATA)`,
+      detail: `${zoneName} publishes ${txtRecords.length} TXT records totaling ${totalWireBytes} bytes of RDATA${totalWireBytes > 1232 ? ' — exceeding the 1232-byte EDNS0 UDP payload recommendation and risking IPv6 UDP truncation/TCP fallback' : ''}. Periodically prune stale SaaS domain-verification tokens.`,
+      rfc: 'RFC 8900 / DNS Flag Day 2020',
+      zone: zoneName,
+    });
+  }
+  if (saasVerificationCount > 0) {
+    const saasProviders = Array.from(
+      new Set(
+        entries
+          .filter(
+            (e) =>
+              e.category === 'saas-verification' ||
+              e.category === 'ca-validation' ||
+              e.category === 'decentralized-id'
+          )
+          .map((e) => e.provider)
+      )
+    );
+    findings.push({
+      id: `info-txt-saas-${zoneName}`,
+      severity: 'info',
+      code: 'TXT_SAAS_VERIFICATIONS_PRESENT',
+      title: `${saasVerificationCount} domain verification TXT token${saasVerificationCount === 1 ? '' : 's'} at ${zoneName} (${saasProviders.slice(0, 4).join(', ')}${saasProviders.length > 4 ? ` +${saasProviders.length - 4} more` : ''})`,
+      detail: `${zoneName} publishes ${saasVerificationCount} SaaS/CA/identity verification TXT record${saasVerificationCount === 1 ? '' : 's'} (${saasProviders.join(', ')}) across ${txtRecords.length} total apex TXT records (${totalWireBytes} bytes RDATA).`,
+      zone: zoneName,
+    });
+  }
+
+  const summaryParts: string[] = [
+    `${txtRecords.length} apex TXT record${txtRecords.length === 1 ? '' : 's'} (${totalWireBytes} B RDATA)`,
+  ];
+  if (saasVerificationCount > 0) {
+    summaryParts.push(
+      `${saasVerificationCount} SaaS/identity verification token${saasVerificationCount === 1 ? '' : 's'}`
+    );
+  }
+  if (misplacedCount > 0) {
+    summaryParts.push(`${misplacedCount} misplaced policy record${misplacedCount === 1 ? '' : 's'}`);
+  }
+  if (duplicateCount > 0) {
+    summaryParts.push(`${duplicateCount} duplicate${duplicateCount === 1 ? '' : 's'}`);
+  }
+
+  return {
+    recordCount: txtRecords.length,
+    totalWireBytes,
+    saasVerificationCount,
+    duplicateCount,
+    misplacedCount,
+    malformedCount,
+    bloatWarning,
+    status,
+    entries,
+    summary: `${summaryParts.join(' · ')}.`,
+  };
+}
+
+async function evaluateWildcardAuditForZone(params: {
+  zoneName: string;
+  queries: DohQueryLog[];
+  zoneDnskeys: DnsRecord[];
+  zoneStatus: ValidationStatus;
+  validationEpochSec: number;
+  findings: AuditFinding[];
+}): Promise<WildcardAuditSummary | undefined> {
+  const { zoneName, queries, zoneDnskeys, zoneStatus, validationEpochSec, findings } = params;
+  const probeQname = normalizeFqdn(`${WILDCARD_PROBE_LABEL}.${zoneName}`);
+  const qnameLabels = countDnsLabels(probeQname, true);
+
+  const probeTypes: Array<{ qtype: 'A' | 'AAAA' | 'MX'; code: number }> = [
+    { qtype: 'A', code: RR_TYPES.A },
+    { qtype: 'AAAA', code: RR_TYPES.AAAA },
+    { qtype: 'MX', code: RR_TYPES.MX },
+  ];
+
+  const probes: WildcardProbeTypeResult[] = [];
+  for (const pt of probeTypes) {
+    const log = queries.find(
+      (q) => q.qname === probeQname && q.qtype === pt.code
+    );
+    if (!log) continue;
+
+    const rcode = log.packet.flags.rcode;
+    const rcodeName = rcodeToString(rcode);
+    const nonSigAnswers = log.packet.answers.filter((r) => r.type !== RR_TYPES.RRSIG);
+    const sigAnswers = log.packet.answers.filter(
+      (r) => r.type === RR_TYPES.RRSIG && r.parsed.kind === 'RRSIG'
+    );
+
+    const cnameChain: string[] = [];
+    const answerValues: string[] = [];
+    for (const ans of nonSigAnswers) {
+      if (ans.type === RR_TYPES.CNAME && ans.parsed.kind === 'GENERIC' && ans.parsed.target) {
+        cnameChain.push(normalizeFqdn(ans.parsed.target));
+      } else if (ans.type === pt.code) {
+        answerValues.push(ans.rdataText);
+      }
+    }
+
+    const synthesized = rcode === 0 && (answerValues.length > 0 || cnameChain.length > 0);
+    if (!synthesized) {
+      probes.push({
+        qtype: pt.qtype,
+        qname: probeQname,
+        rcode,
+        rcodeName,
+        synthesized: false,
+        cnameChain: [],
+        answerValues: [],
+        expansionMode: 'none',
+        qnameLabels,
+        dnssecStatus:
+          zoneStatus === 'secure' || zoneStatus === 'warning' ? 'secure' : 'insecure',
+      });
+      continue;
+    }
+
+    // Wildcard answer was synthesized at probeQname! Verify RRSIG & RFC 4035 §5.3.4 / RFC 5155 §7.2.6 proof
+    const firstOwner = probeQname;
+    const firstRrset = nonSigAnswers.filter(
+      (r) =>
+        r.name === firstOwner &&
+        (r.type === pt.code || r.type === RR_TYPES.CNAME)
+    );
+    const matchingSigs = sigAnswers.filter(
+      (s) =>
+        s.name === firstOwner &&
+        s.parsed.kind === 'RRSIG' &&
+        firstRrset.length > 0 &&
+        s.parsed.typeCovered === firstRrset[0].type
+    );
+
+    if (matchingSigs.length === 0 || firstRrset.length === 0) {
+      const isSignedZone =
+        zoneStatus === 'secure' || zoneStatus === 'warning' || zoneStatus === 'bogus';
+      probes.push({
+        qtype: pt.qtype,
+        qname: probeQname,
+        rcode,
+        rcodeName,
+        synthesized: true,
+        cnameChain,
+        answerValues,
+        expansionMode: 'unsigned',
+        wildcardSourceName: `*.${zoneName}`,
+        closestEncloser: zoneName,
+        qnameLabels,
+        dnssecStatus: isSignedZone ? 'bogus' : 'insecure',
+      });
+      continue;
+    }
+
+    const rrsigVerifications = await Promise.all(
+      matchingSigs.map((s) =>
+        verifyRrsigForRrset(firstRrset, s, zoneDnskeys, validationEpochSec)
+      )
+    );
+    const validRrsig =
+      rrsigVerifications.find((v) => v.cryptoValid && v.timeValid) ?? rrsigVerifications[0];
+    const rrsigLabels = validRrsig.rrsig.labels;
+    const rrsigStatus = validRrsig.status;
+
+    if (rrsigLabels < qnameLabels) {
+      const closestEncloser = validRrsig.wildcardClosestEncloser ?? zoneName;
+      const wildcardSourceName = `*.${closestEncloser}`;
+
+      // Verify authority NSEC / NSEC3 proving no closer match (probeQname) exists per RFC 4035 §5.3.4 / RFC 5155 §7.2.6
+      const nsecRecs = log.packet.authorities.filter((r) => r.type === RR_TYPES.NSEC);
+      const nsec3Recs = log.packet.authorities.filter((r) => r.type === RR_TYPES.NSEC3);
+      const authSigs = log.packet.authorities.filter(
+        (r) => r.type === RR_TYPES.RRSIG && r.parsed.kind === 'RRSIG'
+      );
+
+      const negProof = await verifyNegativeProof({
+        kind: 'NXDOMAIN',
+        zoneApex: zoneName,
+        qname: probeQname,
+        nsecRecords: nsecRecs,
+        nsec3Records: nsec3Recs,
+      });
+
+      // For a wildcard synthesis answer, the NSEC/NSEC3 only needs to cover the next-closer name (probeQname)
+      const coversNextCloser = negProof.items.some(
+        (it) => it.coversName === probeQname || it.role.includes('Covers QNAME') || it.role.includes('Covers Next Closer')
+      );
+
+      // Verify RRSIGs on authority NSEC/NSEC3 records
+      let authSigValid = false;
+      for (const nrec of [...nsecRecs, ...nsec3Recs]) {
+        const nsigs = authSigs.filter(
+          (s) =>
+            s.name === nrec.name &&
+            s.parsed.kind === 'RRSIG' &&
+            s.parsed.typeCovered === nrec.type
+        );
+        for (const nsig of nsigs) {
+          const nv = await verifyRrsigForRrset([nrec], nsig, zoneDnskeys, validationEpochSec);
+          if (nv.cryptoValid && nv.timeValid) {
+            authSigValid = true;
+            break;
+          }
+        }
+        if (authSigValid) break;
+      }
+
+      const nsecNextCloserValid = coversNextCloser && authSigValid;
+      const dnssecStatus: ValidationStatus =
+        (rrsigStatus === 'secure' || rrsigStatus === 'warning') && nsecNextCloserValid
+          ? rrsigStatus
+          : 'bogus';
+
+      probes.push({
+        qtype: pt.qtype,
+        qname: probeQname,
+        rcode,
+        rcodeName,
+        synthesized: true,
+        cnameChain,
+        answerValues,
+        expansionMode: 'rfc4035-wildcard',
+        wildcardSourceName,
+        closestEncloser,
+        rrsigLabels,
+        qnameLabels,
+        rrsigStatus,
+        nsecNextCloserValid,
+        nsecProofProtocol: negProof.protocol,
+        nsecProofSummary: nsecNextCloserValid
+          ? `${negProof.protocol} next-closer proof verified: ${probeQname} does not exist, authenticating wildcard expansion from ${wildcardSourceName}`
+          : `Missing or invalid ${negProof.protocol !== 'NONE' ? negProof.protocol : 'NSEC/NSEC3'} next-closer proof for ${probeQname} (RFC 4035 §5.3.4 / RFC 5155 §7.2.6)`,
+        dnssecStatus,
+      });
+    } else {
+      // Online-signed wildcard (rrsig.labels === qnameLabels)
+      probes.push({
+        qtype: pt.qtype,
+        qname: probeQname,
+        rcode,
+        rcodeName,
+        synthesized: true,
+        cnameChain,
+        answerValues,
+        expansionMode: 'online-signed',
+        wildcardSourceName: `*.${zoneName}`,
+        closestEncloser: zoneName,
+        rrsigLabels,
+        qnameLabels,
+        rrsigStatus,
+        nsecNextCloserValid: true,
+        nsecProofProtocol: 'NONE',
+        nsecProofSummary: `Online-signed wildcard response (RRSIG labels=${rrsigLabels} equals QNAME labels=${qnameLabels}; no separate NSEC/NSEC3 next-closer record required).`,
+        dnssecStatus: rrsigStatus,
+      });
+    }
+  }
+
+  if (probes.length === 0) return undefined;
+
+  const synthesizedProbes = probes.filter((p) => p.synthesized);
+  const wildcardDetected = synthesizedProbes.length > 0;
+  const wildcardTypes = synthesizedProbes.map((p) => p.qtype);
+  const hasWildcardMx = wildcardTypes.includes('MX');
+  const anyBogus = synthesizedProbes.some((p) => p.dnssecStatus === 'bogus');
+
+  let status: WildcardAuditSummary['status'] = 'no-wildcard';
+  if (anyBogus) {
+    status = 'wildcard-bogus';
+  } else if (hasWildcardMx) {
+    status = 'wildcard-mx-risk';
+  } else if (wildcardDetected) {
+    status = 'wildcard-active';
+  }
+
+  const dnssecStatus: ValidationStatus = anyBogus
+    ? 'bogus'
+    : synthesizedProbes.some((p) => p.dnssecStatus === 'warning')
+      ? 'warning'
+      : synthesizedProbes.every((p) => p.dnssecStatus === 'secure') &&
+          (synthesizedProbes.length > 0 || zoneStatus === 'secure')
+        ? 'secure'
+        : 'insecure';
+
+  let summary = '';
+  if (!wildcardDetected) {
+    summary = `No wildcard DNS synthesis detected at *.${zoneName} (${probeQname} returned ${probes[0]?.rcodeName ?? 'NXDOMAIN'}).`;
+  } else {
+    const detailStr = synthesizedProbes
+      .map((p) => {
+        const vals =
+          p.answerValues.length > 0
+            ? p.answerValues.join(', ')
+            : p.cnameChain.map((c) => `CNAME ${c}`).join(' → ');
+        const modeTag =
+          p.expansionMode === 'rfc4035-wildcard'
+            ? `RFC 4035 wildcard RRSIG labels=${p.rrsigLabels}<${p.qnameLabels} + ${p.nsecProofProtocol} proof`
+            : p.expansionMode === 'online-signed'
+              ? `online-signed RRSIG labels=${p.rrsigLabels}`
+              : 'unsigned';
+        return `${p.qtype} → ${vals} (${modeTag})`;
+      })
+      .join('; ');
+    summary = `Wildcard DNS (*.${zoneName}) synthesizes responses for nonexistent subdomains: ${detailStr}.`;
+  }
+
+  if (anyBogus) {
+    findings.push({
+      id: `err-wildcard-bogus-${zoneName}`,
+      severity: 'error',
+      code: 'WILDCARD_DNSSEC_BOGUS',
+      title: `Bogus DNSSEC wildcard synthesis proof for *.${zoneName}`,
+      detail: `${summary} A signed wildcard answer with RRSIG.labels < QNAME.labels must be accompanied by a valid RRSIG and an authenticated NSEC/NSEC3 record covering the next-closer name (RFC 4035 §5.3.4 / RFC 5155 §7.2.6).`,
+      rfc: 'RFC 4035 §5.3.4 / RFC 5155 §7.2.6',
+      zone: zoneName,
+    });
+  } else if (hasWildcardMx) {
+    findings.push({
+      id: `warn-wildcard-mx-${zoneName}`,
+      severity: 'warning',
+      code: 'WILDCARD_MX_RISK',
+      title: `Wildcard MX record (*.${zoneName}) accepts mail for arbitrary nonexistent subdomains`,
+      detail: `${summary} RFC 1912 §2.7 discourages wildcard MX records because mail addressed to typo subdomains is accepted or queued instead of immediately failing, increasing backscatter and spoofing surface.`,
+      rfc: 'RFC 1912 §2.7',
+      zone: zoneName,
+    });
+  } else if (wildcardDetected) {
+    findings.push({
+      id: `warn-wildcard-active-${zoneName}`,
+      severity: 'warning',
+      code: 'WILDCARD_DNS_ENABLED',
+      title: `Wildcard DNS (*.${zoneName}) enabled for ${wildcardTypes.join(', ')}`,
+      detail: `${summary} Wildcard A/AAAA/CNAME records cause every nonexistent subdomain under ${zoneName} to resolve, which can expand cookie/CORS scope and mask dangling subdomain misconfigurations.`,
+      rfc: 'RFC 4592 / RFC 4035 §5.3.4',
+      zone: zoneName,
+    });
+  }
+
+  return {
+    probeQname,
+    wildcardDetected,
+    wildcardTypes,
+    hasWildcardMx,
+    status,
+    dnssecStatus,
+    probes,
+    summary,
   };
 }

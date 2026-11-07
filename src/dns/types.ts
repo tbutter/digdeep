@@ -531,6 +531,69 @@ export interface DnsblAuditSummary {
   summary: string;
 }
 
+export interface WildcardProbeTypeResult {
+  qtype: 'A' | 'AAAA' | 'MX';
+  qname: string;
+  rcode: number;
+  rcodeName: string;
+  synthesized: boolean;
+  cnameChain: string[];
+  answerValues: string[];
+  expansionMode: 'rfc4035-wildcard' | 'online-signed' | 'unsigned' | 'none';
+  wildcardSourceName?: string;
+  closestEncloser?: string;
+  rrsigLabels?: number;
+  qnameLabels?: number;
+  rrsigStatus?: ValidationStatus;
+  nsecNextCloserValid?: boolean;
+  nsecProofProtocol?: 'NSEC' | 'NSEC3' | 'NONE';
+  nsecProofSummary?: string;
+  dnssecStatus: ValidationStatus;
+}
+
+export interface WildcardAuditSummary {
+  probeQname: string;
+  wildcardDetected: boolean;
+  wildcardTypes: ('A' | 'AAAA' | 'MX')[];
+  hasWildcardMx: boolean;
+  status: 'no-wildcard' | 'wildcard-active' | 'wildcard-mx-risk' | 'wildcard-bogus';
+  dnssecStatus: ValidationStatus;
+  probes: WildcardProbeTypeResult[];
+  summary: string;
+}
+
+export type TxtRecordCategory =
+  | 'email-auth'
+  | 'tls-security'
+  | 'saas-verification'
+  | 'ca-validation'
+  | 'decentralized-id'
+  | 'custom-other';
+
+export interface TxtVerificationEntry {
+  rawText: string;
+  byteLength: number;
+  category: TxtRecordCategory;
+  provider: string;
+  keyPrefix?: string;
+  tokenValue?: string;
+  status: 'valid' | 'duplicate' | 'misplaced-at-apex' | 'malformed';
+  issue?: string;
+}
+
+export interface TxtHygieneAudit {
+  recordCount: number;
+  totalWireBytes: number;
+  saasVerificationCount: number;
+  duplicateCount: number;
+  misplacedCount: number;
+  malformedCount: number;
+  bloatWarning: boolean;
+  status: 'clean' | 'info-saas' | 'warning';
+  entries: TxtVerificationEntry[];
+  summary: string;
+}
+
 export interface ZoneAnalysis {
   zoneName: string; // "." or "com." or "cloudflare.com."
   parentZone: string | null;
@@ -561,6 +624,8 @@ export interface ZoneAnalysis {
   cdsRollover?: CdsRolloverAnalysis;
   nsDiversity?: NsDiversityAnalysis;
   zonemd?: ZonemdAuditSummary;
+  wildcardAudit?: WildcardAuditSummary;
+  txtHygiene?: TxtHygieneAudit;
 }
 
 export interface CnameEdge {

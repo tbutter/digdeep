@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { evaluateSnapshotFromLogs, reverifySnapshot, runDnsvizAnalysis } from '../analyzer';
+import {
+  classifyApexTxtRecord,
+  evaluateSnapshotFromLogs,
+  reverifySnapshot,
+  runDnsvizAnalysis,
+} from '../analyzer';
 import {
   CONSENSUS_DOH_RESOLVERS,
   DOH_SERVER_PRESETS,
@@ -873,6 +878,145 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
       expect(revSnap.reverseDns?.dnsbl).toBeDefined();
       expect(revSnap.reverseDns?.dnsbl?.checkedCount).toBe(6);
       expect(revSnap.reverseDns?.dnsbl?.providers).toHaveLength(6);
+    },
+    30000
+  );
+
+  it(
+    'audits Wildcard DNS (*.domain) synthesis (RFC 4035 §5.3.4 / RFC 5155 §7.2.6) and SaaS Verification TXT Hygiene',
+    async () => {
+      // 1. Unit tests for classifyApexTxtRecord across SaaS, DID, SPF, and misplaced protocol policies
+      expect(classifyApexTxtRecord('google-site-verification=abc123XYZ').provider).toBe(
+        'Google Workspace / Search Console'
+      );
+      expect(classifyApexTxtRecord('MS=ms12345678').provider).toBe('Microsoft 365 / Entra ID');
+      expect(classifyApexTxtRecord('apple-domain-verification=a1b2c3').provider).toBe(
+        'Apple Business / Domain Verification'
+      );
+      expect(classifyApexTxtRecord('atlassian-domain-verification=atl99').provider).toBe(
+        'Atlassian Cloud'
+      );
+      expect(classifyApexTxtRecord('stripe-verification=str42').provider).toBe('Stripe');
+      expect(classifyApexTxtRecord('docusign=0123-4567').provider).toBe('DocuSign');
+      expect(classifyApexTxtRecord('facebook-domain-verification=fb99').provider).toBe(
+        'Meta / Facebook Business'
+      );
+      expect(classifyApexTxtRecord('protonmail-verification=pm88').provider).toBe('Proton Mail');
+      expect(classifyApexTxtRecord('keybase-site-verification=kb77').provider).toBe('Keybase');
+      expect(classifyApexTxtRecord('_github-challenge-org=gh66').provider).toBe('GitHub');
+      expect(classifyApexTxtRecord('did=did:plc:ewvi7nxzyoun6zhxrhs64oiz').category).toBe(
+        'decentralized-id'
+      );
+      expect(classifyApexTxtRecord('v=spf1 include:_spf.google.com -all').status).toBe('valid');
+      expect(classifyApexTxtRecord('spf1 include:_spf.google.com -all').status).toBe('malformed');
+      expect(classifyApexTxtRecord('v=DMARC1; p=reject;').status).toBe('misplaced-at-apex');
+      expect(classifyApexTxtRecord('v=STSv1; id=20261107;').status).toBe('misplaced-at-apex');
+      expect(classifyApexTxtRecord('v=TLSRPTv1; rua=mailto:tls@example.com').status).toBe(
+        'misplaced-at-apex'
+      );
+      expect(classifyApexTxtRecord('v=DKIM1; k=rsa; p=MIIB...').status).toBe('misplaced-at-apex');
+
+      // 2. Live trace on cloudflare.com: verifies wildcardAudit (_digdeep-wildcard-check.cloudflare.com.) and apex TXT SaaS inventory
+      const cfSnap = await runDnsvizAnalysis('cloudflare.com', { queryTypes: ['A'] });
+      const cfZone = cfSnap.zones.find((z) => z.zoneName === 'cloudflare.com.');
+      expect(cfZone?.wildcardAudit).toBeDefined();
+      expect(cfZone?.wildcardAudit?.probeQname).toBe('_digdeep-wildcard-check.cloudflare.com.');
+      expect(cfZone?.wildcardAudit?.wildcardDetected).toBe(false);
+      expect(cfZone?.wildcardAudit?.status).toBe('no-wildcard');
+
+      expect(cfZone?.txtHygiene).toBeDefined();
+      expect(cfZone?.txtHygiene?.recordCount).toBeGreaterThanOrEqual(1);
+      expect(cfZone?.txtHygiene?.saasVerificationCount).toBeGreaterThanOrEqual(1);
+      expect(
+        cfSnap.findings.some((f) => f.code === 'TXT_SAAS_VERIFICATIONS_PRESENT')
+      ).toBe(true);
+
+      // 3. Synthetic mutation: simulate wildcard A + MX synthesis and duplicate / misplaced apex TXT records
+      const mutatedQueries = cfSnap.queries.map((q) => {
+        if (
+          q.qname === '_digdeep-wildcard-check.cloudflare.com.' &&
+          (q.qtype === RR_TYPES.A || q.qtype === RR_TYPES.MX)
+        ) {
+          return {
+            ...q,
+            packet: {
+              ...q.packet,
+              flags: { ...q.packet.flags, rcode: 0 },
+              answers: [
+                {
+                  name: '_digdeep-wildcard-check.cloudflare.com.',
+                  type: q.qtype,
+                  typeName: q.qtypeName,
+                  rrclass: 1,
+                  ttl: 300,
+                  section: 'answer' as const,
+                  rdataBase64: 'xFFkKg==',
+                  rdataText: q.qtype === RR_TYPES.A ? '198.51.100.42' : '10 mail.cloudflare.com.',
+                  canonicalRdataBase64: 'xFFkKg==',
+                  parsed: { kind: 'GENERIC' as const, rawHex: 'c633642a', text: '198.51.100.42' },
+                },
+              ],
+            },
+          };
+        }
+        if (q.qname === 'cloudflare.com.' && q.qtype === RR_TYPES.TXT) {
+          const dupRec = q.packet.answers.find((a) => a.type === RR_TYPES.TXT);
+          const misplacedDmarc = dupRec
+            ? {
+                ...dupRec,
+                rdataText: '"v=DMARC1; p=reject;"',
+                parsed: {
+                  kind: 'TXT' as const,
+                  strings: ['v=DMARC1; p=reject;'],
+                  joinedText: 'v=DMARC1; p=reject;',
+                },
+              }
+            : undefined;
+          return {
+            ...q,
+            packet: {
+              ...q.packet,
+              answers: [
+                ...q.packet.answers,
+                ...(dupRec ? [dupRec] : []),
+                ...(misplacedDmarc ? [misplacedDmarc] : []),
+              ],
+            },
+          };
+        }
+        return q;
+      });
+
+      const mutatedSnap = await evaluateSnapshotFromLogs({
+        id: 'test-wildcard-txt-hygiene',
+        targetName: cfSnap.targetName,
+        queryTypes: cfSnap.queryTypes,
+        dohEndpoint: cfSnap.dohEndpoint,
+        capturedAt: cfSnap.capturedAt,
+        validatedAt: cfSnap.validatedAt,
+        durationMs: cfSnap.durationMs,
+        queries: mutatedQueries,
+        trustAnchors: cfSnap.trustAnchorsUsed,
+      });
+
+      const mutZone = mutatedSnap.zones.find((z) => z.zoneName === 'cloudflare.com.');
+      expect(mutZone?.wildcardAudit?.wildcardDetected).toBe(true);
+      expect(mutZone?.wildcardAudit?.hasWildcardMx).toBe(true);
+      expect(mutZone?.wildcardAudit?.wildcardTypes).toEqual(['A', 'MX']);
+      // Because cloudflare.com is DNSSEC-signed and our synthetic wildcard answer had no RRSIG, it flags WILDCARD_DNSSEC_BOGUS!
+      expect(mutZone?.wildcardAudit?.status).toBe('wildcard-bogus');
+      expect(
+        mutatedSnap.findings.some((f) => f.code === 'WILDCARD_DNSSEC_BOGUS')
+      ).toBe(true);
+
+      expect(mutZone?.txtHygiene?.duplicateCount).toBeGreaterThanOrEqual(1);
+      expect(mutZone?.txtHygiene?.misplacedCount).toBe(1);
+      expect(
+        mutatedSnap.findings.some((f) => f.code === 'TXT_APEX_MISPLACED_POLICY')
+      ).toBe(true);
+      expect(
+        mutatedSnap.findings.some((f) => f.code === 'TXT_DUPLICATE_VERIFICATION')
+      ).toBe(true);
     },
     30000
   );

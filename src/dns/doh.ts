@@ -90,6 +90,13 @@ export class DohSession {
         const latencyMs = Math.max(1, Math.round(performance.now() - perfStart));
         const packet = parseDnsPacket(buf);
 
+        // If CD=1 (DNSSEC validation disabled on resolver) still returned SERVFAIL (rcode 2) on attempt 0,
+        // retry once after a short backoff in case of a cold-cache upstream timeout.
+        if (attempt === 0 && cd && packet.flags.rcode === 2) {
+          await new Promise((r) => setTimeout(r, 200));
+          continue;
+        }
+
         const log: DohQueryLog = {
           id: `q-${++this.counter}-${normName}-${rrTypeToString(qtype)}`,
           qname: normName,

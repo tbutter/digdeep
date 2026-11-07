@@ -690,3 +690,9 @@ export const SRV_DISCOVERY_PROBES: readonly SrvDiscoveryProbeDescriptor[] = [
     rfc: 'RFC 6120 §3.2',
   },
 ];
+
+/**
+ * Deterministic nonexistent subdomain label probed at leaf zones to detect
+ * wildcard DNS synthesis (`*.<zone>`) and RFC 4035 §5.3.4 / RFC 5155 §7.2.6 proofs.
+ */
+export const WILDCARD_PROBE_LABEL = '_digdeep-wildcard-check';
