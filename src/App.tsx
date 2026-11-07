@@ -67,35 +67,64 @@ const EXTRA_TYPES = QUERYABLE_RR_TYPES.filter((t) => !PRIMARY_TYPES.includes(t))
 const DEFAULT_PAGE_TITLE =
   'DigDeep — Client-Side DNSSEC, MX, DANE, SPF, DKIM & DMARC Analyzer';
 
-const FOOTER_EXAMPLE_TRACES: ReadonlyArray<{
+const EXAMPLE_TRACES: ReadonlyArray<{
   domain: string;
   mode?: AnalysisMode;
   types: string[];
-  label: string;
+  badge: string;
+  description: string;
 }> = [
-  { domain: 'www.iana.org', types: ['A', 'AAAA'], label: 'www.iana.org (Cross-zone CNAME)' },
-  { domain: 'dnssec-failed.org', types: ['A', 'AAAA'], label: 'dnssec-failed.org (Bogus SEP)' },
+  {
+    domain: 'www.iana.org',
+    types: ['A', 'AAAA'],
+    badge: 'DNSSEC',
+    description: 'Cross-zone signed CNAME chain',
+  },
+  {
+    domain: 'dnssec-failed.org',
+    types: ['A', 'AAAA'],
+    badge: 'DNSSEC',
+    description: 'Broken DS delegation & missing SEP DNSKEY (Bogus)',
+  },
   {
     domain: 'ietf.org',
     mode: 'mail',
     types: ['MX', 'TXT'],
-    label: 'ietf.org (MX + DANE + SPF + DKIM + DMARC)',
+    badge: 'Mail',
+    description: 'MX + SMTP DANE + SPF + DKIM + DMARC + DNSBL + SRV',
   },
   {
     domain: 'cloudflare.com',
     mode: 'web',
     types: ['A', 'AAAA', 'HTTPS', 'CAA'],
-    label: 'cloudflare.com (HTTPS + ECH + CAA)',
+    badge: 'Web',
+    description: 'HTTPS/SVCB, TLS ECHConfigList & CAA Policy',
   },
   {
     domain: 'dnssec-failed.org',
     mode: 'consensus',
     types: ['A', 'AAAA', 'SOA', 'DNSKEY', 'DS'],
-    label: 'dnssec-failed.org (Multi-DoH EDE Consensus)',
+    badge: 'Consensus',
+    description: 'Multi-DoH Resolver Matrix & RFC 8914 EDE',
   },
-  { domain: '9.9.9.9', types: ['PTR'], label: '9.9.9.9 (rDNS PTR + FCrDNS + BGP ASN)' },
-  { domain: 'cloudflare.com', types: ['A', 'AAAA'], label: 'cloudflare.com (ECDSA)' },
-  { domain: '.', types: ['DNSKEY', 'SOA'], label: '. (Root Zone)' },
+  {
+    domain: '9.9.9.9',
+    types: ['PTR'],
+    badge: 'rDNS',
+    description: 'Signed PTR + FCrDNS + BGP ASN + DNSBL reputation',
+  },
+  {
+    domain: 'cloudflare.com',
+    types: ['A', 'AAAA'],
+    badge: 'DNSSEC',
+    description: 'ECDSA P-256 chain of trust',
+  },
+  {
+    domain: '.',
+    types: ['DNSKEY', 'SOA'],
+    badge: 'DNSSEC',
+    description: 'IANA Root Zone Trust Anchor & RFC 8976 ZONEMD',
+  },
 ];
 
 export function App() {
@@ -179,6 +208,8 @@ export function App() {
   const [progress, setProgress] = useState<AnalysisProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [examplesOpen, setExamplesOpen] = useState(false);
+  const examplesContainerRef = useRef<HTMLDivElement | null>(null);
   const [focusedGraphTarget, setFocusedGraphTarget] = useState<string | null>(
     initialBootState.focusedTarget
   );
@@ -231,6 +262,9 @@ export function App() {
   // Press '/' anywhere outside inputs to focus domain search bar
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setExamplesOpen(false);
+      }
       if (
         e.key === '/' &&
         document.activeElement?.tagName !== 'INPUT' &&
@@ -245,6 +279,21 @@ export function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
+
+  // Close examples overlay when clicking outside
+  useEffect(() => {
+    if (!examplesOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (
+        examplesContainerRef.current &&
+        !examplesContainerRef.current.contains(e.target as Node)
+      ) {
+        setExamplesOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [examplesOpen]);
 
   const executeAnalysis = useCallback(
     async (
@@ -766,19 +815,100 @@ export function App() {
         {/* Domain Query & RR Type Bar */}
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 pb-3.5 space-y-2.5">
           <form onSubmit={handleSubmit} className="flex flex-col sm:flex-row gap-2">
-            <div className="relative flex-1">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+            <div ref={examplesContainerRef} className="relative flex-1">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 ref={inputRef}
                 type="text"
                 value={domainInput}
                 onChange={(e) => setDomainInput(e.target.value)}
                 placeholder="Enter domain or IPv4/IPv6 address (e.g. digdeep.butter.eu, 1.1.1.1, 2606:4700:4700::1111, .) — press / to focus"
-                className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 pl-10 pr-10 py-2.5 font-mono text-sm text-slate-900 dark:text-slate-100 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20"
+                className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 pl-10 pr-16 py-2.5 font-mono text-sm text-slate-900 dark:text-slate-100 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20"
               />
-              <kbd className="hidden sm:inline-block absolute right-3 top-1/2 -translate-y-1/2 rounded border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-400">
-                /
-              </kbd>
+              <div className="absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                <kbd
+                  title="Press / to focus search"
+                  className="hidden sm:inline-block rounded border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-400 select-none"
+                >
+                  /
+                </kbd>
+                <button
+                  type="button"
+                  onClick={() => setExamplesOpen((v) => !v)}
+                  aria-label="Example DNS traces"
+                  aria-expanded={examplesOpen}
+                  title="Example DNS & IP traces"
+                  className={`inline-flex items-center justify-center rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold transition-colors cursor-pointer ${
+                    examplesOpen
+                      ? 'border-cyan-500 bg-cyan-500/15 text-cyan-600 dark:text-cyan-300'
+                      : 'border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:border-cyan-500 hover:text-cyan-600 dark:hover:text-cyan-300'
+                  }`}
+                >
+                  ?
+                </button>
+              </div>
+
+              {examplesOpen && (
+                <div
+                  role="dialog"
+                  aria-label="Example DNS traces"
+                  className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xl p-3 space-y-2"
+                >
+                  <div className="flex items-center justify-between gap-2 pb-1 border-b border-slate-100 dark:border-slate-800">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                      Example DNS &amp; IP Traces
+                    </span>
+                    <span className="text-[10px] text-slate-400">Click any example to run</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                    {EXAMPLE_TRACES.map((ex) => {
+                      const exMode: AnalysisMode = ex.mode ?? 'dnssec';
+                      const href =
+                        exMode === 'mail'
+                          ? `?name=${encodeURIComponent(ex.domain)}&mode=mail`
+                          : exMode === 'web'
+                            ? `?name=${encodeURIComponent(ex.domain)}&mode=web`
+                            : exMode === 'consensus'
+                              ? `?name=${encodeURIComponent(ex.domain)}&mode=consensus`
+                              : `?name=${encodeURIComponent(ex.domain)}&types=${ex.types.join(',')}`;
+                      return (
+                        <a
+                          key={`${ex.domain}-${exMode}-${ex.badge}`}
+                          href={href}
+                          onClick={(e) => {
+                            if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0)
+                              return;
+                            e.preventDefault();
+                            setExamplesOpen(false);
+                            setAnalysisMode(exMode);
+                            setDomainInput(ex.domain);
+                            if (exMode === 'dnssec') {
+                              setSelectedTypes(ex.types);
+                            }
+                            void executeAnalysis(ex.domain, ex.types, {
+                              modeOverride: exMode,
+                              pushHistory: true,
+                            });
+                          }}
+                          className="group flex items-start justify-between gap-2 rounded-lg border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 hover:border-cyan-500/60 hover:bg-cyan-500/5 px-2.5 py-2 transition-colors"
+                        >
+                          <div className="min-w-0">
+                            <div className="font-mono text-xs font-semibold text-cyan-700 dark:text-cyan-300 group-hover:underline truncate">
+                              {ex.domain}
+                            </div>
+                            <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                              {ex.description}
+                            </div>
+                          </div>
+                          <span className="shrink-0 rounded bg-slate-200/80 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] font-medium text-slate-600 dark:text-slate-300">
+                            {ex.badge}
+                          </span>
+                        </a>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
 
             <DohChooser
@@ -1458,42 +1588,6 @@ export function App() {
               <span>GitHub</span>
             </a>
           </div>
-          <nav aria-label="Example DNSSEC traces" className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <span className="text-slate-400 dark:text-slate-500">Examples:</span>
-            {FOOTER_EXAMPLE_TRACES.map((ex) => {
-              const exMode: AnalysisMode = ex.mode ?? 'dnssec';
-              const href =
-                exMode === 'mail'
-                  ? `?name=${encodeURIComponent(ex.domain)}&mode=mail`
-                  : exMode === 'web'
-                    ? `?name=${encodeURIComponent(ex.domain)}&mode=web`
-                    : exMode === 'consensus'
-                      ? `?name=${encodeURIComponent(ex.domain)}&mode=consensus`
-                      : `?name=${encodeURIComponent(ex.domain)}&types=${ex.types.join(',')}`;
-              return (
-                <a
-                  key={`${ex.domain}-${exMode}`}
-                  href={href}
-                  onClick={(e) => {
-                    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
-                    e.preventDefault();
-                    setAnalysisMode(exMode);
-                    setDomainInput(ex.domain);
-                    if (exMode === 'dnssec') {
-                      setSelectedTypes(ex.types);
-                    }
-                    void executeAnalysis(ex.domain, ex.types, {
-                      modeOverride: exMode,
-                      pushHistory: true,
-                    });
-                  }}
-                  className="font-mono text-cyan-600 dark:text-cyan-400 hover:underline"
-                >
-                  {ex.label}
-                </a>
-              );
-            })}
-          </nav>
         </div>
       </footer>
 
