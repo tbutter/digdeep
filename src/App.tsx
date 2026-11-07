@@ -1,9 +1,11 @@
 import {
   Activity,
   AlertTriangle,
+  Check,
   Clock,
   Download,
   Globe,
+  Link2,
   Moon,
   Network,
   Play,
@@ -23,7 +25,7 @@ import { DohChooser } from './components/DohChooser';
 import { HistoryPanel } from './components/HistoryPanel';
 import { ResponsesPanel } from './components/ResponsesPanel';
 import { SettingsModal } from './components/SettingsModal';
-import { StatusBadge } from './components/StatusBadge';
+import { STATUS_META, StatusBadge } from './components/StatusBadge';
 import { ZonesPanel } from './components/ZonesPanel';
 import { reverifySnapshot, runDnsvizAnalysis, SNAPSHOT_ENGINE_VERSION } from './dns/analyzer';
 import { formatDohShortLabel, QUERYABLE_RR_TYPES } from './dns/constants';
@@ -42,44 +44,91 @@ import {
   updateSnapshotMeta,
   type UserSettings,
 } from './storage/historyStore';
-
-type ActiveTab = 'graph' | 'audit' | 'responses' | 'zones' | 'history';
+import {
+  buildDeepLinkSearch,
+  buildShareUrl,
+  parseDeepLinkParams,
+  type ActiveTab,
+} from './urlState';
 
 const PRIMARY_TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SOA', 'CAA', 'HTTPS', 'DNSKEY'];
 const EXTRA_TYPES = QUERYABLE_RR_TYPES.filter((t) => !PRIMARY_TYPES.includes(t));
 
+const DEFAULT_PAGE_TITLE = 'DigDeep — Client-Side DNSSEC Visualizer & DoH Wire Inspector';
+
+const FOOTER_EXAMPLE_TRACES: ReadonlyArray<{
+  domain: string;
+  types: string[];
+  label: string;
+}> = [
+  { domain: 'www.iana.org', types: ['A', 'AAAA'], label: 'www.iana.org (Cross-zone CNAME)' },
+  { domain: 'dnssec-failed.org', types: ['A', 'AAAA'], label: 'dnssec-failed.org (Bogus SEP)' },
+  { domain: 'cloudflare.com', types: ['A', 'AAAA'], label: 'cloudflare.com (ECDSA)' },
+  { domain: '.', types: ['DNSKEY', 'SOA'], label: '. (Root Zone)' },
+];
+
 export function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => loadTheme());
-  const [settings, setSettings] = useState<UserSettings>(() => loadUserSettings());
-  const [snapshots, setSnapshots] = useState<AnalysisSnapshot[]>(() => loadSnapshots());
+
+  const [initialBootState] = useState(() => {
+    const savedSettings = loadUserSettings();
+    const savedSnapshots = loadSnapshots();
+    const search = typeof window !== 'undefined' ? window.location.search : '';
+    const deepLink = parseDeepLinkParams(search, savedSettings.customDohEndpoints);
+
+    const effectiveSettings: UserSettings = {
+      ...savedSettings,
+      dohEndpoint: deepLink.dohEndpoint ?? savedSettings.dohEndpoint,
+      showSoaAndNs: deepLink.showSoaAndNs ?? savedSettings.showSoaAndNs,
+      showStandbyKeys: deepLink.showStandbyKeys ?? savedSettings.showStandbyKeys,
+    };
+
+    const initialDomain = deepLink.name ?? savedSnapshots[0]?.displayDomain ?? 'digdeep.butter.eu';
+    const initialTypes = deepLink.types ?? savedSnapshots[0]?.queryTypes ?? ['A', 'AAAA'];
+
+    const latestSnap = savedSnapshots[0] ?? null;
+    const matchesLatestSnap =
+      latestSnap !== null &&
+      (!deepLink.name ||
+        latestSnap.displayDomain.toLowerCase() === deepLink.name.toLowerCase().replace(/\.$/, '') ||
+        (deepLink.name === '.' && latestSnap.displayDomain === '.'));
+
+    return {
+      settings: effectiveSettings,
+      snapshots: savedSnapshots,
+      activeSnapshot: matchesLatestSnap ? latestSnap : null,
+      domainInput: initialDomain,
+      selectedTypes: initialTypes,
+      hasExtraType: initialTypes.some((t) => (EXTRA_TYPES as readonly string[]).includes(t)),
+      activeTab: deepLink.tab ?? ('graph' as ActiveTab),
+      focusedTarget: deepLink.focus,
+      deepLink,
+    };
+  });
+
+  const [settings, setSettings] = useState<UserSettings>(initialBootState.settings);
+  const [snapshots, setSnapshots] = useState<AnalysisSnapshot[]>(initialBootState.snapshots);
   const [activeSnapshot, setActiveSnapshot] = useState<AnalysisSnapshot | null>(
-    () => loadSnapshots()[0] ?? null
+    initialBootState.activeSnapshot
   );
 
-  const [domainInput, setDomainInput] = useState<string>(() => {
-    const params = new URLSearchParams(window.location.search);
-    return params.get('name') ?? loadSnapshots()[0]?.displayDomain ?? 'digdeep.butter.eu';
-  });
-  const [selectedTypes, setSelectedTypes] = useState<string[]>(() => {
-    const params = new URLSearchParams(window.location.search);
-    const tParam = params.get('types');
-    if (tParam) {
-      const parsed = tParam
-        .split(',')
-        .map((s) => s.trim().toUpperCase())
-        .filter(Boolean);
-      if (parsed.length > 0) return parsed;
-    }
-    return loadSnapshots()[0]?.queryTypes ?? ['A', 'AAAA'];
-  });
-  const [showExtraTypes, setShowExtraTypes] = useState(false);
+  const [domainInput, setDomainInput] = useState<string>(initialBootState.domainInput);
+  const [selectedTypes, setSelectedTypes] = useState<string[]>(initialBootState.selectedTypes);
+  const [showExtraTypes, setShowExtraTypes] = useState<boolean>(initialBootState.hasExtraType);
 
-  const [activeTab, setActiveTab] = useState<ActiveTab>('graph');
+  const [activeTab, setActiveTab] = useState<ActiveTab>(initialBootState.activeTab);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState<AnalysisProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [focusedGraphTarget, setFocusedGraphTarget] = useState<string | null>(null);
+  const [focusedGraphTarget, setFocusedGraphTarget] = useState<string | null>(
+    initialBootState.focusedTarget
+  );
+  const [untrustedDohPending, setUntrustedDohPending] = useState<string | null>(
+    initialBootState.deepLink.isUntrustedCustomDoh ? initialBootState.deepLink.dohEndpoint : null
+  );
+  const [copiedLink, setCopiedLink] = useState(false);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { canInstall, isOffline, promptInstall } = usePwaInstall();
 
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -95,6 +144,23 @@ export function App() {
     }
     saveTheme(theme);
   }, [theme]);
+
+  // Dynamic <title> reflecting active domain & validation verdict for browser tabs, bookmarks, and history
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    if (activeSnapshot) {
+      const verdict = STATUS_META[activeSnapshot.overallStatus].label;
+      document.title = `${activeSnapshot.displayDomain} (${verdict}) — DigDeep DNSSEC Visualizer`;
+    } else {
+      document.title = DEFAULT_PAGE_TITLE;
+    }
+  }, [activeSnapshot]);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
 
   // Press '/' anywhere outside inputs to focus domain search bar
   useEffect(() => {
@@ -115,21 +181,34 @@ export function App() {
   }, []);
 
   const executeAnalysis = useCallback(
-    async (targetDomain: string, typesToQuery: string[]) => {
+    async (
+      targetDomain: string,
+      typesToQuery: string[],
+      options?: {
+        dohEndpointOverride?: string;
+        preserveFocus?: boolean;
+        pushHistory?: boolean;
+      }
+    ) => {
       const cleanDomain = targetDomain.trim() || '.';
       const cleanTypes = typesToQuery.length > 0 ? typesToQuery : ['A'];
+      const endpointToUse = options?.dohEndpointOverride ?? settings.dohEndpoint;
 
+      if (!options?.preserveFocus) {
+        setFocusedGraphTarget(null);
+      }
+      setUntrustedDohPending(null);
       setLoading(true);
       setError(null);
       setProgress({
         phase: 'zone-cuts',
-        message: `Starting ${formatDohShortLabel(settings.dohEndpoint)} DoH trace for ${cleanDomain}…`,
+        message: `Starting ${formatDohShortLabel(endpointToUse)} DoH trace for ${cleanDomain}…`,
         completedQueries: 0,
       });
 
       try {
         const snap = await runDnsvizAnalysis(cleanDomain, {
-          endpoint: settings.dohEndpoint,
+          endpoint: endpointToUse,
           queryTypes: cleanTypes,
           trustAnchors: settings.trustAnchors,
           onProgress: (p) => setProgress(p),
@@ -139,27 +218,127 @@ export function App() {
         setSnapshots(updatedList);
         setActiveSnapshot(snap);
 
-        const url = new URL(window.location.href);
-        url.searchParams.set('name', snap.displayDomain);
-        url.searchParams.set('types', snap.queryTypes.join(','));
-        window.history.replaceState({}, '', url.toString());
-
+        const nextTab: ActiveTab = activeTab === 'history' ? 'graph' : activeTab;
         if (activeTab === 'history') {
           setActiveTab('graph');
+        }
+
+        if (typeof window !== 'undefined' && window.history) {
+          const url = new URL(window.location.href);
+          url.hash = '';
+          url.search = buildDeepLinkSearch({
+            name: snap.displayDomain,
+            types: snap.queryTypes,
+            dohEndpoint: snap.dohEndpoint,
+            tab: nextTab,
+            focus: options?.preserveFocus ? focusedGraphTarget : null,
+            showSoaAndNs: settings.showSoaAndNs,
+            showStandbyKeys: settings.showStandbyKeys,
+          });
+          if (options?.pushHistory && url.toString() !== window.location.href) {
+            window.history.pushState({}, '', url.toString());
+          } else {
+            window.history.replaceState({}, '', url.toString());
+          }
         }
       } catch (err) {
         setError(
           err instanceof Error
             ? err.message
-            : `Failed to query ${formatDohShortLabel(settings.dohEndpoint)} DoH. Check network connectivity.`
+            : `Failed to query ${formatDohShortLabel(endpointToUse)} DoH. Check network connectivity.`
         );
       } finally {
         setLoading(false);
         setProgress(null);
       }
     },
-    [settings.dohEndpoint, settings.trustAnchors, activeTab]
+    [
+      settings.dohEndpoint,
+      settings.trustAnchors,
+      settings.showSoaAndNs,
+      settings.showStandbyKeys,
+      activeTab,
+      focusedGraphTarget,
+    ]
   );
+
+  // Keep browser URL query string in sync as user switches tabs, selects graph elements, or toggles filters
+  useEffect(() => {
+    if (!activeSnapshot || loading) return;
+    if (typeof window === 'undefined' || !window.history?.replaceState) return;
+
+    const url = new URL(window.location.href);
+    const nextSearch = buildDeepLinkSearch({
+      name: activeSnapshot.displayDomain,
+      types: activeSnapshot.queryTypes,
+      dohEndpoint: activeSnapshot.dohEndpoint,
+      tab: activeTab,
+      focus: focusedGraphTarget,
+      showSoaAndNs: settings.showSoaAndNs,
+      showStandbyKeys: settings.showStandbyKeys,
+    });
+    if (url.search !== nextSearch) {
+      url.search = nextSearch;
+      window.history.replaceState({}, '', url.toString());
+    }
+  }, [
+    activeSnapshot,
+    activeTab,
+    focusedGraphTarget,
+    loading,
+    settings.showSoaAndNs,
+    settings.showStandbyKeys,
+  ]);
+
+  // Support browser Back / Forward navigation across deep-linked traces
+  useEffect(() => {
+    const onPopState = () => {
+      const parsed = parseDeepLinkParams(window.location.search, settings.customDohEndpoints);
+      if (parsed.tab) setActiveTab(parsed.tab);
+      else setActiveTab('graph');
+
+      setFocusedGraphTarget(parsed.focus);
+
+      if (parsed.showSoaAndNs !== null || parsed.showStandbyKeys !== null || parsed.dohEndpoint) {
+        setSettings((prev) => ({
+          ...prev,
+          dohEndpoint: parsed.dohEndpoint ?? prev.dohEndpoint,
+          showSoaAndNs: parsed.showSoaAndNs ?? prev.showSoaAndNs,
+          showStandbyKeys: parsed.showStandbyKeys ?? prev.showStandbyKeys,
+        }));
+      }
+
+      if (!parsed.name) return;
+      const targetTypes = parsed.types ?? ['A', 'AAAA'];
+      const targetDoh = parsed.dohEndpoint ?? settings.dohEndpoint;
+      setDomainInput(parsed.name);
+      setSelectedTypes(targetTypes);
+
+      if (parsed.isUntrustedCustomDoh && parsed.dohEndpoint) {
+        setUntrustedDohPending(parsed.dohEndpoint);
+        return;
+      }
+
+      const cached = snapshots.find(
+        (s) =>
+          s.displayDomain.toLowerCase() === parsed.name!.toLowerCase().replace(/\.$/, '') &&
+          s.queryTypes.join(',') === targetTypes.join(',') &&
+          s.dohEndpoint === targetDoh
+      );
+      if (cached) {
+        setActiveSnapshot(cached);
+      } else if (!isOffline) {
+        void executeAnalysis(parsed.name, targetTypes, {
+          dohEndpointOverride: targetDoh,
+          preserveFocus: Boolean(parsed.focus),
+          pushHistory: false,
+        });
+      }
+    };
+
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [executeAnalysis, isOffline, settings.customDohEndpoints, settings.dohEndpoint, snapshots]);
 
   // Auto-upgrade any localStorage snapshots captured with an older validation engine version
   useEffect(() => {
@@ -184,20 +363,72 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto-run on initial visit if URL specifies ?name= or if localStorage has no snapshots yet
+  // Auto-run on initial visit if URL specifies deep-link params or if localStorage has no snapshots yet
   useEffect(() => {
     if (didBootRef.current) return;
     didBootRef.current = true;
     if (isOffline && snapshots.length > 0) return;
-    const params = new URLSearchParams(window.location.search);
-    if (!isOffline && (params.has('name') || snapshots.length === 0)) {
-      void executeAnalysis(domainInput, selectedTypes);
+    if (untrustedDohPending) return;
+    const { deepLink } = initialBootState;
+    if (
+      !isOffline &&
+      (deepLink.name !== null ||
+        deepLink.types !== null ||
+        deepLink.dohEndpoint !== null ||
+        snapshots.length === 0)
+    ) {
+      void executeAnalysis(domainInput, selectedTypes, {
+        preserveFocus: Boolean(deepLink.focus),
+        pushHistory: false,
+      });
     }
-  }, [domainInput, executeAnalysis, isOffline, selectedTypes, snapshots.length]);
+  }, [
+    domainInput,
+    executeAnalysis,
+    initialBootState,
+    isOffline,
+    selectedTypes,
+    snapshots.length,
+    untrustedDohPending,
+  ]);
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    void executeAnalysis(domainInput, selectedTypes);
+    void executeAnalysis(domainInput, selectedTypes, { pushHistory: true });
+  };
+
+  const handleCopyShareLink = async () => {
+    if (!activeSnapshot || typeof window === 'undefined') return;
+    const shareUrl = buildShareUrl(window.location.href, {
+      name: activeSnapshot.displayDomain,
+      types: activeSnapshot.queryTypes,
+      dohEndpoint: activeSnapshot.dohEndpoint,
+      tab: activeTab,
+      focus: focusedGraphTarget,
+      showSoaAndNs: settings.showSoaAndNs,
+      showStandbyKeys: settings.showStandbyKeys,
+    });
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(shareUrl);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = shareUrl;
+        ta.setAttribute('readonly', 'true');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopiedLink(true);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => setCopiedLink(false), 2000);
+    } catch {
+      // Ignore clipboard permission errors
+    }
   };
 
   const toggleQueryType = (t: string) => {
@@ -409,6 +640,30 @@ export function App() {
 
       {/* Live Progress / Error Banner */}
       <main className="max-w-[1600px] w-full mx-auto px-4 sm:px-6 py-4 flex-1 space-y-4">
+        {untrustedDohPending && !loading && (
+          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-800 dark:text-amber-200">
+            <span>
+              Shared link specifies custom DoH endpoint{' '}
+              <code className="font-mono font-semibold">{untrustedDohPending}</code>. Confirm to
+              send DNS queries to this resolver.
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  void executeAnalysis(domainInput, selectedTypes, {
+                    dohEndpointOverride: untrustedDohPending,
+                    preserveFocus: Boolean(focusedGraphTarget),
+                  })
+                }
+                className="rounded-lg bg-amber-500 hover:bg-amber-400 px-3 py-1 font-semibold text-slate-950 cursor-pointer"
+              >
+                Use &amp; Run Trace
+              </button>
+            </div>
+          </div>
+        )}
+
         {loading && progress && (
           <div className="rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-4 py-3 flex items-center justify-between gap-3 text-xs">
             <div className="flex items-center gap-2.5">
@@ -474,18 +729,43 @@ export function App() {
                   { new Date(activeSnapshot.capturedAt).toLocaleString() } ·{' '}
                   {activeSnapshot.queries.length} queries ({activeSnapshot.durationMs}ms)
                 </div>
-                <button
-                  type="button"
-                  disabled={loading}
-                  onClick={() =>
-                    void executeAnalysis(activeSnapshot.displayDomain, activeSnapshot.queryTypes)
-                  }
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-cyan-500 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 cursor-pointer"
-                  title="Run a fresh live 1.1.1.1 DoH trace and save a new snapshot"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  Re-probe
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyShareLink()}
+                    className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer ${
+                      copiedLink
+                        ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                        : 'border-slate-200 dark:border-slate-700 hover:border-cyan-500 text-slate-700 dark:text-slate-200'
+                    }`}
+                    title="Copy deep link including domain, RR types, DoH resolver, active tab, and selected graph node"
+                  >
+                    {copiedLink ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-500" />
+                        <span>Copied!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Link2 className="w-3.5 h-3.5 text-cyan-500" />
+                        <span>Copy Link</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={() =>
+                      void executeAnalysis(activeSnapshot.displayDomain, activeSnapshot.queryTypes)
+                    }
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-cyan-500 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 cursor-pointer"
+                    title={`Run a fresh live ${formatDohShortLabel(settings.dohEndpoint)} DoH trace and save a new snapshot`}
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    Re-probe
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -568,6 +848,7 @@ export function App() {
                   })
                 }
                 focusedTargetId={focusedGraphTarget}
+                onSelectTargetId={setFocusedGraphTarget}
               />
             )}
 
@@ -590,6 +871,7 @@ export function App() {
                 snapshots={snapshots}
                 activeSnapshotId={activeSnapshot.id}
                 onSelectSnapshot={(snap) => {
+                  setFocusedGraphTarget(null);
                   setActiveSnapshot(snap);
                   setDomainInput(snap.displayDomain);
                   setSelectedTypes(snap.queryTypes);
@@ -598,7 +880,7 @@ export function App() {
                 onReprobe={(dom, types) => {
                   setDomainInput(dom);
                   setSelectedTypes(types);
-                  void executeAnalysis(dom, types);
+                  void executeAnalysis(dom, types, { pushHistory: true });
                 }}
                 onTogglePin={(id, pinned) => {
                   const next = updateSnapshotMeta(id, { pinned });
@@ -635,13 +917,14 @@ export function App() {
           <HistoryPanel
             snapshots={snapshots}
             onSelectSnapshot={(snap) => {
+              setFocusedGraphTarget(null);
               setActiveSnapshot(snap);
               setActiveTab('graph');
             }}
             onReprobe={(dom, types) => {
               setDomainInput(dom);
               setSelectedTypes(types);
-              void executeAnalysis(dom, types);
+              void executeAnalysis(dom, types, { pushHistory: true });
             }}
             onTogglePin={(id, pinned) => setSnapshots(updateSnapshotMeta(id, { pinned }))}
             onDelete={(id) => setSnapshots(deleteSnapshot(id))}
@@ -654,6 +937,38 @@ export function App() {
           />
         )}
       </main>
+
+      <footer className="border-t border-slate-200/80 dark:border-slate-800/80 bg-white/60 dark:bg-slate-950/60">
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+          <div>
+            <span className="font-semibold text-slate-700 dark:text-slate-300">DigDeep</span> ·
+            100% client-side RFC 4035 / 5155 DNSSEC &amp; RFC 8484 DoH visualizer verified in-browser
+            via WebCrypto.
+          </div>
+          <nav aria-label="Example DNSSEC traces" className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="text-slate-400 dark:text-slate-500">Examples:</span>
+            {FOOTER_EXAMPLE_TRACES.map((ex) => {
+              const href = `?name=${encodeURIComponent(ex.domain)}&types=${ex.types.join(',')}`;
+              return (
+                <a
+                  key={ex.domain}
+                  href={href}
+                  onClick={(e) => {
+                    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+                    e.preventDefault();
+                    setDomainInput(ex.domain);
+                    setSelectedTypes(ex.types);
+                    void executeAnalysis(ex.domain, ex.types, { pushHistory: true });
+                  }}
+                  className="font-mono text-cyan-600 dark:text-cyan-400 hover:underline"
+                >
+                  {ex.label}
+                </a>
+              );
+            })}
+          </nav>
+        </div>
+      </footer>
 
       <SettingsModal
         open={settingsOpen}

@@ -9,8 +9,66 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="DigDeep" />
-    <title>DigDeep — Client-Side DNSSEC Visualizer &amp; 1.1.1.1 DoH Inspector</title>
+    <meta name="application-name" content="DigDeep" />
+
+    <title>DigDeep — Client-Side DNSSEC Visualizer &amp; DoH Wire Inspector</title>
+    <meta
+      name="description"
+      content="Interactive client-side DNSSEC chain-of-trust visualizer and DNS-over-HTTPS (DoH) wire packet inspector. Cryptographically verify DS, DNSKEY, RRSIG, NSEC/NSEC3, and RFC 8914 Extended DNS Errors directly in your browser."
+    />
+    <meta
+      name="keywords"
+      content="DNSSEC visualizer, DNSViz alternative, DNSSEC debugger, DNS over HTTPS, DoH inspector, RRSIG verification, DS DNSKEY checker, NSEC3, Black Lies, RFC 8914 EDE, dig online"
+    />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1" />
+    <link rel="canonical" href="https://digdeep.fyi/" />
+
+    <!-- OpenGraph / Slack / Discord / Mastodon / Bluesky / LinkedIn -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="DigDeep" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:url" content="https://digdeep.fyi/" />
+    <meta
+      property="og:title"
+      content="DigDeep — Client-Side DNSSEC Visualizer &amp; DoH Wire Inspector"
+    />
+    <meta
+      property="og:description"
+      content="Verify DS, DNSKEY, RRSIG, NSEC/NSEC3 &amp; Black Lies cryptographically in your browser via WebCrypto and RFC 8484 DoH (1.1.1.1, 8.8.8.8, 9.9.9.9, DNS4EU). Zero backend."
+    />
+    <meta property="og:image" content="https://digdeep.fyi/og-card.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="DigDeep interactive DNSSEC chain-of-trust graph from IANA Root KSK through org. to iana.org verified in-browser via 1.1.1.1 DoH"
+    />
+
+    <!-- Twitter / X Large Summary Card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:url" content="https://digdeep.fyi/" />
+    <meta
+      name="twitter:title"
+      content="DigDeep — Client-Side DNSSEC Visualizer &amp; DoH Wire Inspector"
+    />
+    <meta
+      name="twitter:description"
+      content="100% browser-side DNSSEC chain-of-trust graph, RRSIG WebCrypto validator, snapshot diffing &amp; RFC 8484 DoH packet inspector."
+    />
+    <meta name="twitter:image" content="https://digdeep.fyi/og-card.png" />
+    <meta
+      name="twitter:image:alt"
+      content="DigDeep interactive DNSSEC chain-of-trust graph verified client-side via WebCrypto and DoH"
+    />
+
     <link rel="manifest" href="./manifest.webmanifest" />
+    <link
+      rel="search"
+      type="application/opensearchdescription+xml"
+      title="DigDeep DNSSEC"
+      href="./opensearch.xml"
+    />
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <link rel="icon" type="image/x-icon" href="./favicon.ico" />
     <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
@@ -20,9 +78,90 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
+
+    <!-- Structured Data for Search Engines -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "DigDeep",
+        "alternateName": "digdeep.fyi",
+        "url": "https://digdeep.fyi/",
+        "image": "https://digdeep.fyi/og-card.png",
+        "description": "Modern client-side DNSSEC chain-of-trust visualizer, RFC 4034/4035/5155 WebCrypto validator, and RFC 8484 DNS-over-HTTPS (DoH) wire packet inspector.",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Any",
+        "browserRequirements": "Requires JavaScript and WebCrypto (SubtleCrypto)",
+        "isAccessibleForFree": true,
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        },
+        "featureList": [
+          "100% client-side DNSSEC validation using browser SubtleCrypto",
+          "Interactive chain-of-trust SVG and high-DPI PNG graph export",
+          "Multi-resolver RFC 8484 DoH wireformat inspection (Cloudflare 1.1.1.1, Google 8.8.8.8, Quad9 9.9.9.9, DNS4EU)",
+          "RSASHA1, RSASHA256, RSASHA512, ECDSAP256SHA256, ECDSAP384SHA384, and ED25519 signature verification",
+          "NSEC, NSEC3 Opt-Out, wildcard synthesis, and Compact Denial of Existence (Black Lies) proofs",
+          "RFC 8914 Extended DNS Error (EDE) diagnostics, time-travel RRSIG clock override, and snapshot diffing"
+        ],
+        "potentialAction": {
+          "@type": "SearchAction",
+          "target": "https://digdeep.fyi/?name={search_term_string}",
+          "query-input": "required name=search_term_string"
+        }
+      }
+    </script>
   </head>
   <body class="bg-slate-950 text-slate-100 antialiased selection:bg-cyan-500/30 selection:text-cyan-200">
-    <div id="root"></div>
+    <div id="root">
+      <!-- Semantic crawlable shell for search engines and non-JS link unfurlers; replaced immediately on React mount -->
+      <main class="max-w-4xl mx-auto px-6 py-12 text-slate-300 space-y-6">
+        <header class="space-y-2">
+          <h1 class="text-2xl font-bold text-slate-100">
+            DigDeep — Client-Side DNSSEC Chain-of-Trust Visualizer &amp; DoH Wire Inspector
+          </h1>
+          <p class="text-sm text-slate-400">
+            Analyze DNS delegations, DS digests, DNSKEY rollovers, RRSIG cryptographic signatures,
+            NSEC/NSEC3 negative proofs, and raw RFC 8484 DNS-over-HTTPS wire packets directly in
+            your browser with zero backend servers.
+          </p>
+        </header>
+        <section class="space-y-2 text-sm text-slate-400">
+          <h2 class="text-base font-semibold text-slate-200">Key Capabilities</h2>
+          <ul class="list-disc pl-5 space-y-1">
+            <li>
+              <strong>Browser WebCrypto Verification:</strong> Validates RFC 4034, RFC 4035, and RFC
+              5155 chains from IANA Root KSK trust anchors using <code>SubtleCrypto</code>.
+            </li>
+            <li>
+              <strong>Multi-Resolver DoH Comparison:</strong> Query Cloudflare <code>1.1.1.1</code>,
+              Google <code>8.8.8.8</code>, Quad9 <code>9.9.9.9</code>, DNS.SB, DNS4EU, or custom DoH
+              resolvers with side-by-side <code>CD=1</code> / <code>CD=0</code> and RFC 8914
+              Extended DNS Error (EDE) inspection.
+            </li>
+            <li>
+              <strong>Interactive Graph &amp; Snapshot Diffing:</strong> Inspect cross-zone CNAMEs,
+              missing SEP keys, time-travel RRSIG expiration windows, and export standalone SVG or
+              PNG diagrams.
+            </li>
+          </ul>
+        </section>
+        <nav aria-label="Example DNSSEC Traces" class="text-xs text-cyan-400 space-x-4">
+          <a href="https://digdeep.fyi/?name=www.iana.org&amp;types=A,AAAA">www.iana.org (Cross-zone CNAME)</a>
+          <a href="https://digdeep.fyi/?name=dnssec-failed.org&amp;types=A,AAAA">dnssec-failed.org (Bogus SEP)</a>
+          <a href="https://digdeep.fyi/?name=cloudflare.com&amp;types=A,AAAA">cloudflare.com (ECDSA)</a>
+          <a href="https://digdeep.fyi/?name=.&amp;types=DNSKEY,SOA">Root Zone (.)</a>
+        </nav>
+        <noscript>
+          <p class="text-xs text-amber-300">
+            Enable JavaScript to run live browser-side DNS-over-HTTPS queries and interactive
+            WebCrypto DNSSEC verification.
+          </p>
+        </noscript>
+      </main>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/">
+  <ShortName>DigDeep</ShortName>
+  <Description>Analyze DNSSEC chain of trust and DoH wire responses on digdeep.fyi</Description>
+  <InputEncoding>UTF-8</InputEncoding>
+  <Image width="36" height="36" type="image/svg+xml">https://digdeep.fyi/favicon.svg</Image>
+  <Image width="192" height="192" type="image/png">https://digdeep.fyi/icon-192.png</Image>
+  <Url type="text/html" method="get" template="https://digdeep.fyi/?name={searchTerms}" />
+</OpenSearchDescription>

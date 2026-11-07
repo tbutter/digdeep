@@ -2,12 +2,18 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { App } from '../../App';
 import { AuditPanel } from '../../components/AuditPanel';
-import { ChainGraphView } from '../../components/ChainGraphView';
+import { ChainGraphView, prepareExportSvgElement } from '../../components/ChainGraphView';
 import { HistoryPanel } from '../../components/HistoryPanel';
 import { ResponsesPanel } from '../../components/ResponsesPanel';
 import { SettingsModal } from '../../components/SettingsModal';
 import { ZonesPanel } from '../../components/ZonesPanel';
-import { DEFAULT_USER_SETTINGS } from '../../storage/historyStore';
+import { buildChainGraph } from '../../graph/layout';
+import { DEFAULT_USER_SETTINGS, saveSnapshot } from '../../storage/historyStore';
+import {
+  buildDeepLinkSearch,
+  buildShareUrl,
+  parseDeepLinkParams,
+} from '../../urlState';
 import { runDnsvizAnalysis } from '../analyzer';
 
 // Minimal localStorage shim for HistoryPanel stats
@@ -177,5 +183,222 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
         Object.defineProperty(globalThis.navigator, 'onLine', prevOnline);
       }
     }
+  });
+
+  it(
+    'appends DigDeep · digdeep.fyi attribution footer to exported SVG/PNG diagrams without overlapping graph',
+    async () => {
+      const snap = await runDnsvizAnalysis('dnssec-failed.org', { queryTypes: ['A'] });
+      const filters = { showSoaAndNs: false, showStandbyKeys: true };
+      const graph = buildChainGraph(snap, filters);
+
+      const html = renderToStaticMarkup(
+        <ChainGraphView
+          snapshot={snap}
+          theme="dark"
+          filters={filters}
+          onChangeFilters={() => {}}
+        />
+      );
+      const { JSDOM } = (await import('jsdom' as string)) as {
+        JSDOM: new (markup: string) => { window: { document: Document } };
+      };
+      const dom = new JSDOM(html);
+      const svgEl = dom.window.document.querySelector('svg') as unknown as SVGSVGElement;
+      expect(svgEl).toBeTruthy();
+
+      const { clone, exportWidth, exportHeight } = prepareExportSvgElement(
+        svgEl,
+        snap,
+        graph,
+        'dark'
+      );
+      expect(exportWidth).toBeGreaterThanOrEqual(graph.width);
+      expect(exportHeight).toBe(graph.height + 42);
+
+      const serialized = clone.outerHTML;
+      expect(serialized).toContain('data-export-attribution="true"');
+      expect(serialized).toContain('DigDeep');
+      expect(serialized).toContain('digdeep.fyi');
+      expect(serialized).toContain('dnssec-failed.org [A]');
+      expect(serialized).toContain('BOGUS');
+      expect(serialized).toContain('1.1.1.1 DoH');
+    },
+    20000
+  );
+
+  it('parses and builds deep-link URLs, guards untrusted DoH params, and renders Copy Link UI', async () => {
+    const shareUrl = buildShareUrl('https://digdeep.fyi/', {
+      name: 'dnssec-failed.org',
+      types: ['A', 'AAAA'],
+      dohEndpoint: 'https://9.9.9.9/dns-query',
+      tab: 'audit',
+      focus: 'zone:dnssec-failed.org.',
+      showSoaAndNs: true,
+      showStandbyKeys: false,
+    });
+    expect(shareUrl).toBe(
+      'https://digdeep.fyi/?name=dnssec-failed.org&types=A,AAAA&doh=9.9.9.9&tab=audit'
+    );
+
+    const graphShareUrl = buildShareUrl('https://digdeep.fyi/', {
+      name: 'www.iana.org',
+      types: ['A'],
+      dohEndpoint: 'https://1.1.1.1/dns-query',
+      tab: 'graph',
+      focus: 'zone:iana.org.',
+      showSoaAndNs: true,
+      showStandbyKeys: false,
+    });
+    expect(graphShareUrl).toBe(
+      'https://digdeep.fyi/?name=www.iana.org&types=A&doh=1.1.1.1&focus=zone%3Aiana.org.&soa=1&standby=0'
+    );
+
+    // History tab normalizes to graph in shared URLs while preserving clean default address bar
+    const historyShare = buildShareUrl('https://digdeep.fyi/', {
+      name: 'cloudflare.com',
+      types: ['A'],
+      dohEndpoint: 'https://1.1.1.1/dns-query',
+      tab: 'history',
+    });
+    expect(historyShare).toBe('https://digdeep.fyi/?name=cloudflare.com&types=A&doh=1.1.1.1');
+
+    const addressBarDefault = buildDeepLinkSearch({
+      name: 'cloudflare.com',
+      types: ['A', 'AAAA'],
+      dohEndpoint: 'https://1.1.1.1/dns-query',
+      tab: 'graph',
+    });
+    expect(addressBarDefault).toBe('?name=cloudflare.com&types=A,AAAA');
+
+    // Parse preset DoH shortLabel
+    const parsedPreset = parseDeepLinkParams(
+      '?name=dnssec-failed.org&types=a,dnskey&doh=unfiltered.joindns4.eu&tab=audit'
+    );
+    expect(parsedPreset.name).toBe('dnssec-failed.org');
+    expect(parsedPreset.types).toEqual(['A', 'DNSKEY']);
+    expect(parsedPreset.dohEndpoint).toBe('https://unfiltered.joindns4.eu/dns-query');
+    expect(parsedPreset.isUntrustedCustomDoh).toBe(false);
+    expect(parsedPreset.tab).toBe('audit');
+
+    // Flag unknown external HTTPS DoH as untrusted; reject loopback/private hosts
+    const parsedExternal = parseDeepLinkParams('?name=example.com&doh=https://doh.example.net/dns-query');
+    expect(parsedExternal.dohEndpoint).toBe('https://doh.example.net/dns-query');
+    expect(parsedExternal.isUntrustedCustomDoh).toBe(true);
+
+    const parsedSaved = parseDeepLinkParams(
+      '?name=example.com&doh=https://doh.example.net/dns-query',
+      ['https://doh.example.net/dns-query']
+    );
+    expect(parsedSaved.isUntrustedCustomDoh).toBe(false);
+
+    const parsedLoopback = parseDeepLinkParams('?name=example.com&doh=https://127.0.0.1/dns-query');
+    expect(parsedLoopback.dohEndpoint).toBeNull();
+
+    // Render App with saved snapshot + deep-link query params -> shows Copy Link button and active resolver
+    const snap = await runDnsvizAnalysis('www.iana.org', { queryTypes: ['A'] });
+    mem.clear();
+    saveSnapshot(snap);
+
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        location: {
+          search: '?name=www.iana.org&types=A&doh=9.9.9.9&tab=responses',
+          href: 'https://digdeep.fyi/?name=www.iana.org&types=A&doh=9.9.9.9&tab=responses',
+        },
+        matchMedia: () => ({ matches: false }),
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      },
+      configurable: true,
+    });
+
+    const appHtml = renderToStaticMarkup(<App />);
+    expect(appHtml).toContain('Copy Link');
+    expect(appHtml).toContain('9.9.9.9 DoH');
+    expect(appHtml).toContain('application/dns-message');
+
+    // Render App with untrusted custom DoH -> shows confirmation prompt
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        location: {
+          search: '?name=www.iana.org&doh=https://custom-doh.example/dns-query',
+          href: 'https://digdeep.fyi/?name=www.iana.org&doh=https://custom-doh.example/dns-query',
+        },
+        matchMedia: () => ({ matches: false }),
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      },
+      configurable: true,
+    });
+    const untrustedHtml = renderToStaticMarkup(<App />);
+    expect(untrustedHtml).toContain('https://custom-doh.example/dns-query');
+    expect(untrustedHtml).toContain('Use &amp; Run Trace');
+  }, 20000);
+
+  it('ships complete SEO metadata, 1200x630 OpenGraph card, JSON-LD schema, robots.txt, sitemap.xml, and opensearch.xml', () => {
+    const fs = (
+      globalThis as unknown as {
+        process: {
+          getBuiltinModule: (id: string) => {
+            existsSync: (p: URL) => boolean;
+            readFileSync: (p: URL, enc?: string) => string | Uint8Array;
+          };
+        };
+      }
+    ).process.getBuiltinModule('node:fs');
+
+    // Validate 1200x630 OpenGraph PNG image
+    const ogCardUrl = new URL('../../../public/og-card.png', import.meta.url);
+    expect(fs.existsSync(ogCardUrl)).toBe(true);
+    const ogBytes = fs.readFileSync(ogCardUrl) as Uint8Array;
+    const ogView = new DataView(ogBytes.buffer, ogBytes.byteOffset, ogBytes.byteLength);
+    expect(ogView.getUint32(0, false)).toBe(0x89504e47);
+    expect(ogView.getUint32(16, false)).toBe(1200);
+    expect(ogView.getUint32(20, false)).toBe(630);
+
+    // Validate index.html SEO, OpenGraph, Twitter Card, JSON-LD, and crawlable shell
+    const indexHtml = fs.readFileSync(
+      new URL('../../../index.html', import.meta.url),
+      'utf8'
+    ) as string;
+    expect(indexHtml).toContain('rel="canonical" href="https://digdeep.fyi/"');
+    expect(indexHtml).toContain('property="og:image" content="https://digdeep.fyi/og-card.png"');
+    expect(indexHtml).toContain('property="og:image:width" content="1200"');
+    expect(indexHtml).toContain('property="og:image:height" content="630"');
+    expect(indexHtml).toContain('name="twitter:card" content="summary_large_image"');
+    expect(indexHtml).toContain('type="application/opensearchdescription+xml"');
+    expect(indexHtml).toContain('<h1');
+
+    const jsonLdMatch = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/.exec(indexHtml);
+    expect(jsonLdMatch).toBeTruthy();
+    const schema = JSON.parse(jsonLdMatch![1]) as {
+      '@type': string;
+      url: string;
+      potentialAction: { '@type': string; target: string };
+    };
+    expect(schema['@type']).toBe('WebApplication');
+    expect(schema.url).toBe('https://digdeep.fyi/');
+    expect(schema.potentialAction.target).toBe('https://digdeep.fyi/?name={search_term_string}');
+
+    // Validate robots.txt, sitemap.xml, and opensearch.xml
+    const robotsTxt = fs.readFileSync(
+      new URL('../../../public/robots.txt', import.meta.url),
+      'utf8'
+    ) as string;
+    expect(robotsTxt).toContain('Sitemap: https://digdeep.fyi/sitemap.xml');
+
+    const sitemapXml = fs.readFileSync(
+      new URL('../../../public/sitemap.xml', import.meta.url),
+      'utf8'
+    ) as string;
+    expect(sitemapXml).toContain('<loc>https://digdeep.fyi/</loc>');
+    expect(sitemapXml).toContain('dnssec-failed.org');
+
+    const openSearchXml = fs.readFileSync(
+      new URL('../../../public/opensearch.xml', import.meta.url),
+      'utf8'
+    ) as string;
+    expect(openSearchXml).toContain('https://digdeep.fyi/?name={searchTerms}');
   });
 });

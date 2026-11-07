@@ -16,6 +16,7 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
+import { formatDohShortLabel } from '../dns/constants';
 import type { AnalysisSnapshot, ValidationStatus } from '../dns/types';
 import {
   buildChainGraph,
@@ -76,18 +77,175 @@ function buildEdgePath(edge: GraphEdge): { d: string; labelX: number; labelY: nu
   };
 }
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+/**
+ * Clones the live SVG graph, resets pan/zoom to 1:1, prepends a solid theme background,
+ * and appends a non-overlapping DigDeep attribution footer bar for standalone SVG/PNG sharing.
+ */
+export function prepareExportSvgElement(
+  svgEl: SVGSVGElement,
+  snapshot: AnalysisSnapshot,
+  graph: { width: number; height: number },
+  theme: 'dark' | 'light'
+): { clone: SVGSVGElement; exportWidth: number; exportHeight: number } {
+  const doc = svgEl.ownerDocument;
+  const isDark = theme === 'dark';
+
+  const dohLabel = formatDohShortLabel(snapshot.dohEndpoint);
+  const statusMeta = STATUS_META[snapshot.overallStatus];
+  const utcStr = `${new Date(snapshot.capturedAt).toISOString().replace('T', ' ').slice(0, 16)} UTC`;
+  const domainLabel = snapshot.displayDomain === '.' ? '. (root)' : snapshot.displayDomain;
+  const metaRightText = `${domainLabel} [${snapshot.queryTypes.join(',')}] · ${statusMeta.label} · ${dohLabel} DoH · ${utcStr}`;
+
+  const footerHeight = 42;
+  const minWidthForFooter = Math.ceil(metaRightText.length * 6.9 + 248);
+  const exportWidth = Math.max(graph.width, minWidthForFooter, 640);
+  const exportHeight = graph.height + footerHeight;
+  const offsetX = Math.round((exportWidth - graph.width) / 2);
+
+  const clone = svgEl.cloneNode(true) as SVGSVGElement;
+  clone.setAttribute('width', String(exportWidth));
+  clone.setAttribute('height', String(exportHeight));
+  clone.setAttribute('viewBox', `0 0 ${exportWidth} ${exportHeight}`);
+
+  const rootGroup = clone.querySelector('[data-pan-zoom-root="true"]');
+  if (rootGroup) {
+    rootGroup.setAttribute('transform', `translate(${offsetX}, 0) scale(1)`);
+  }
+
+  // Prepend solid background rect for standalone SVG/PNG export
+  const bgRect = doc.createElementNS(SVG_NS, 'rect');
+  bgRect.setAttribute('x', '0');
+  bgRect.setAttribute('y', '0');
+  bgRect.setAttribute('width', String(exportWidth));
+  bgRect.setAttribute('height', String(exportHeight));
+  bgRect.setAttribute('fill', isDark ? '#090d16' : '#f8fafc');
+  clone.insertBefore(bgRect, clone.firstChild);
+
+  // Append dedicated attribution footer bar below the graph canvas
+  const footerGroup = doc.createElementNS(SVG_NS, 'g');
+  footerGroup.setAttribute('data-export-attribution', 'true');
+
+  const footerBg = doc.createElementNS(SVG_NS, 'rect');
+  footerBg.setAttribute('x', '0');
+  footerBg.setAttribute('y', String(graph.height));
+  footerBg.setAttribute('width', String(exportWidth));
+  footerBg.setAttribute('height', String(footerHeight));
+  footerBg.setAttribute('fill', isDark ? '#060a12' : '#f1f5f9');
+  footerGroup.appendChild(footerBg);
+
+  const divider = doc.createElementNS(SVG_NS, 'line');
+  divider.setAttribute('x1', '0');
+  divider.setAttribute('y1', String(graph.height + 0.5));
+  divider.setAttribute('x2', String(exportWidth));
+  divider.setAttribute('y2', String(graph.height + 0.5));
+  divider.setAttribute('stroke', isDark ? '#1e293b' : '#cbd5e1');
+  divider.setAttribute('stroke-width', '1');
+  footerGroup.appendChild(divider);
+
+  // Mini DigDeep brand badge on the left
+  const badgeY = graph.height + 11;
+  const badgeRect = doc.createElementNS(SVG_NS, 'rect');
+  badgeRect.setAttribute('x', '16');
+  badgeRect.setAttribute('y', String(badgeY));
+  badgeRect.setAttribute('width', '20');
+  badgeRect.setAttribute('height', '20');
+  badgeRect.setAttribute('rx', '5');
+  badgeRect.setAttribute('fill', '#22d3ee');
+  footerGroup.appendChild(badgeRect);
+
+  const glyphGroup = doc.createElementNS(SVG_NS, 'g');
+  glyphGroup.setAttribute('transform', `translate(20, ${badgeY + 4}) scale(0.5)`);
+  glyphGroup.setAttribute('fill', 'none');
+  glyphGroup.setAttribute('stroke', '#020617');
+  glyphGroup.setAttribute('stroke-width', '2.5');
+  glyphGroup.setAttribute('stroke-linecap', 'round');
+  glyphGroup.setAttribute('stroke-linejoin', 'round');
+  for (const [rx, ry] of [
+    [9, 2],
+    [2, 16],
+    [16, 16],
+  ]) {
+    const box = doc.createElementNS(SVG_NS, 'rect');
+    box.setAttribute('x', String(rx));
+    box.setAttribute('y', String(ry));
+    box.setAttribute('width', '6');
+    box.setAttribute('height', '6');
+    box.setAttribute('rx', '1');
+    glyphGroup.appendChild(box);
+  }
+  const p1 = doc.createElementNS(SVG_NS, 'path');
+  p1.setAttribute('d', 'M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3');
+  glyphGroup.appendChild(p1);
+  const p2 = doc.createElementNS(SVG_NS, 'path');
+  p2.setAttribute('d', 'M12 12V8');
+  glyphGroup.appendChild(p2);
+  footerGroup.appendChild(glyphGroup);
+
+  const brandText = doc.createElementNS(SVG_NS, 'text');
+  brandText.setAttribute('x', '44');
+  brandText.setAttribute('y', String(graph.height + 25));
+  brandText.setAttribute('font-family', 'Inter, system-ui, -apple-system, sans-serif');
+  brandText.setAttribute('font-size', '12');
+
+  const brandName = doc.createElementNS(SVG_NS, 'tspan');
+  brandName.setAttribute('font-weight', '700');
+  brandName.setAttribute('fill', isDark ? '#f8fafc' : '#0f172a');
+  brandName.textContent = 'DigDeep';
+  brandText.appendChild(brandName);
+
+  const brandUrl = doc.createElementNS(SVG_NS, 'tspan');
+  brandUrl.setAttribute('font-weight', '600');
+  brandUrl.setAttribute('fill', isDark ? '#22d3ee' : '#0891b2');
+  brandUrl.textContent = ' · digdeep.fyi';
+  brandText.appendChild(brandUrl);
+  footerGroup.appendChild(brandText);
+
+  // Right-aligned domain, status dot, DoH resolver, and UTC timestamp
+  const metaText = doc.createElementNS(SVG_NS, 'text');
+  metaText.setAttribute('x', String(exportWidth - 16));
+  metaText.setAttribute('y', String(graph.height + 25));
+  metaText.setAttribute('text-anchor', 'end');
+  metaText.setAttribute('font-family', 'JetBrains Mono, ui-monospace, monospace');
+  metaText.setAttribute('font-size', '11');
+  metaText.setAttribute('font-weight', '500');
+  metaText.setAttribute('fill', isDark ? '#94a3b8' : '#475569');
+
+  const prefixSpan = doc.createElementNS(SVG_NS, 'tspan');
+  prefixSpan.textContent = `${domainLabel} [${snapshot.queryTypes.join(',')}] · `;
+  metaText.appendChild(prefixSpan);
+
+  const statusDotSpan = doc.createElementNS(SVG_NS, 'tspan');
+  statusDotSpan.setAttribute('fill', statusMeta.svgStroke);
+  statusDotSpan.setAttribute('font-weight', '700');
+  statusDotSpan.textContent = `● ${statusMeta.label}`;
+  metaText.appendChild(statusDotSpan);
+
+  const suffixSpan = doc.createElementNS(SVG_NS, 'tspan');
+  suffixSpan.textContent = ` · ${dohLabel} DoH · ${utcStr}`;
+  metaText.appendChild(suffixSpan);
+
+  footerGroup.appendChild(metaText);
+  clone.appendChild(footerGroup);
+
+  return { clone, exportWidth, exportHeight };
+}
+
 export function ChainGraphView({
   snapshot,
   theme,
   filters,
   onChangeFilters,
   focusedTargetId,
+  onSelectTargetId,
 }: {
   snapshot: AnalysisSnapshot;
   theme: 'dark' | 'light';
   filters: GraphFilterOptions;
   onChangeFilters: (next: GraphFilterOptions) => void;
   focusedTargetId?: string | null;
+  onSelectTargetId?: (targetId: string | null) => void;
 }) {
   const graph = useMemo(() => buildChainGraph(snapshot, filters), [snapshot, filters]);
   const rootWrapperRef = useRef<HTMLDivElement | null>(null);
@@ -119,6 +277,22 @@ export function ChainGraphView({
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [showLegend, setShowLegend] = useState(false);
   const hasUserZoomedRef = useRef(false);
+
+  const selectAndNotify = useCallback(
+    (next: GraphSelection | null) => {
+      setSelection(next);
+      if (!next) {
+        onSelectTargetId?.(null);
+      } else if (next.kind === 'node') {
+        onSelectTargetId?.(next.node.id);
+      } else if (next.kind === 'edge') {
+        onSelectTargetId?.(next.edge.id);
+      } else if (next.kind === 'zone') {
+        onSelectTargetId?.(next.zone.zoneName);
+      }
+    },
+    [onSelectTargetId]
+  );
 
   const resetToDefaultZoom = useCallback(() => {
     const paneEl = containerRef.current ?? rootWrapperRef.current;
@@ -215,7 +389,7 @@ export function ChainGraphView({
     return () => observer.disconnect();
   }, [graph]);
 
-  // Focus node/zone when user clicks a finding in Audit panel
+  // Focus node/edge/zone when user clicks a finding in Audit panel or opens a ?focus= deep link
   useEffect(() => {
     if (!focusedTargetId) return;
     const matchedNode = graph.nodes.find((n) => n.id === focusedTargetId);
@@ -240,13 +414,18 @@ export function ChainGraphView({
       }
       return;
     }
+    const matchedEdge = graph.edges.find((e) => e.id === focusedTargetId);
+    if (matchedEdge) {
+      setSelection({ kind: 'edge', edge: matchedEdge });
+      return;
+    }
     const matchedZone = graph.zones.find(
       (z) => z.id === focusedTargetId || z.zone.zoneName === focusedTargetId
     );
     if (matchedZone) {
       setSelection({ kind: 'zone', zone: matchedZone.zone });
     }
-  }, [focusedTargetId, graph.nodes, graph.zones]);
+  }, [focusedTargetId, graph.nodes, graph.edges, graph.zones]);
 
   // Plain scroll scrolls the full page; trackpad/touchscreen pinch or Shift+Scroll zooms the graph!
   useEffect(() => {
@@ -470,24 +649,12 @@ export function ChainGraphView({
     const svgEl = svgRef.current;
     if (!svgEl) return;
 
-    const clone = svgEl.cloneNode(true) as SVGSVGElement;
-    clone.setAttribute('width', String(graph.width));
-    clone.setAttribute('height', String(graph.height));
-    clone.setAttribute('viewBox', `0 0 ${graph.width} ${graph.height}`);
-
-    const rootGroup = clone.querySelector('[data-pan-zoom-root="true"]');
-    if (rootGroup) {
-      rootGroup.setAttribute('transform', 'translate(0, 0) scale(1)');
-    }
-
-    // Prepend solid background rect for standalone SVG/PNG export
-    const bgRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-    bgRect.setAttribute('x', '0');
-    bgRect.setAttribute('y', '0');
-    bgRect.setAttribute('width', String(graph.width));
-    bgRect.setAttribute('height', String(graph.height));
-    bgRect.setAttribute('fill', theme === 'dark' ? '#090d16' : '#f8fafc');
-    clone.insertBefore(bgRect, clone.firstChild);
+    const { clone, exportWidth, exportHeight } = prepareExportSvgElement(
+      svgEl,
+      snapshot,
+      graph,
+      theme
+    );
 
     const serializer = new XMLSerializer();
     const svgString = serializer.serializeToString(clone);
@@ -510,8 +677,8 @@ export function ChainGraphView({
     img.onload = () => {
       const scale = 2;
       const canvas = document.createElement('canvas');
-      canvas.width = graph.width * scale;
-      canvas.height = graph.height * scale;
+      canvas.width = exportWidth * scale;
+      canvas.height = exportHeight * scale;
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.scale(scale, scale);
@@ -757,7 +924,7 @@ export function ChainGraphView({
                     onClick={(e) => {
                       e.stopPropagation();
                       if (!dragStartRef.current.moved) {
-                        setSelection({ kind: 'zone', zone: zb.zone });
+                        selectAndNotify({ kind: 'zone', zone: zb.zone });
                       }
                     }}
                     style={{ cursor: 'pointer' }}
@@ -843,7 +1010,7 @@ export function ChainGraphView({
                     onClick={(e) => {
                       e.stopPropagation();
                       if (!dragStartRef.current.moved) {
-                        setSelection({ kind: 'edge', edge });
+                        selectAndNotify({ kind: 'edge', edge });
                       }
                     }}
                     style={{ cursor: 'pointer', transition: 'opacity 140ms ease' }}
@@ -910,7 +1077,7 @@ export function ChainGraphView({
                     onClick={(e) => {
                       e.stopPropagation();
                       if (!dragStartRef.current.moved) {
-                        setSelection({ kind: 'node', node });
+                        selectAndNotify({ kind: 'node', node });
                       }
                     }}
                     style={{ cursor: 'pointer', transition: 'opacity 140ms ease' }}
@@ -1017,7 +1184,7 @@ export function ChainGraphView({
       </div>
 
       {/* Right-Hand Cryptographic & Wire Inspector Drawer */}
-      <GraphInspector selection={selection} onClose={() => setSelection(null)} />
+      <GraphInspector selection={selection} onClose={() => selectAndNotify(null)} />
     </div>
   );
 }
