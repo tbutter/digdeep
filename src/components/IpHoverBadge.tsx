@@ -1,4 +1,4 @@
-import { Globe, Loader2, Network, Server, ShieldAlert } from 'lucide-react';
+import { Globe, Loader2, Network, Server, ShieldAlert, ShieldCheck } from 'lucide-react';
 import {
   type ReactNode,
   useCallback,
@@ -11,13 +11,22 @@ import { DEFAULT_DOH_ENDPOINT, RR_TYPES } from '../dns/constants';
 import { DohSession } from '../dns/doh';
 import { normalizeFqdn } from '../dns/encoding';
 import {
+  getCachedRpkiValidation,
   ipToCymruOriginQname,
   parseCymruAsnTxt,
   parseCymruOriginTxt,
   parseReverseIpInput,
   reverseArpaToIp,
+  seedRpkiValidationCache,
+  summarizeRpkiValidationState,
+  validateRpkiRoute,
 } from '../dns/ipUtils';
-import type { AnalysisSnapshot, BgpAsnOrganization } from '../dns/types';
+import type {
+  AnalysisSnapshot,
+  BgpAsnOrganization,
+  RpkiRouteValidation,
+  RpkiValidationState,
+} from '../dns/types';
 
 export interface IpAsnNetworkInfo {
   ip: string;
@@ -29,6 +38,8 @@ export interface IpAsnNetworkInfo {
   country?: string;
   rir?: string;
   allocatedDate?: string;
+  rpkiStatus?: RpkiValidationState;
+  rpkiValidations?: RpkiRouteValidation[];
   status: 'ready' | 'loading' | 'unannounced' | 'special' | 'error';
 }
 
@@ -146,7 +157,8 @@ export function seedIpAsnCacheFromSnapshot(snapshot?: AnalysisSnapshot | null): 
     }
   }
 
-  // Also seed ASN organization metadata from analyzed zones and reverseDns
+  // Also seed ASN organization & RPKI metadata from analyzed zones and reverseDns
+  const snapshotRpkiEntries: RpkiRouteValidation[] = [];
   for (const zone of snapshot.zones) {
     for (const ns of zone.nameservers) {
       for (const a of ns.asns ?? []) {
@@ -154,6 +166,9 @@ export function seedIpAsnCacheFromSnapshot(snapshot?: AnalysisSnapshot | null): 
           asnOrgCache.set(a.asn, a);
           updated = true;
         }
+      }
+      for (const rv of ns.rpkiValidations ?? []) {
+        snapshotRpkiEntries.push(rv);
       }
     }
   }
@@ -164,6 +179,14 @@ export function seedIpAsnCacheFromSnapshot(snapshot?: AnalysisSnapshot | null): 
         updated = true;
       }
     }
+    if (snapshot.reverseDns.bgp.rpkiValidations) {
+      snapshotRpkiEntries.push(...snapshot.reverseDns.bgp.rpkiValidations);
+    } else if (snapshot.reverseDns.bgp.rpki) {
+      snapshotRpkiEntries.push(snapshot.reverseDns.bgp.rpki);
+    }
+  }
+  if (snapshotRpkiEntries.length > 0) {
+    seedRpkiValidationCache(snapshotRpkiEntries);
   }
 
   // 2. Seed IP -> BGP prefix + ASN entries from Team Cymru *.origin.asn.cymru.com TXT logs
@@ -196,6 +219,17 @@ export function seedIpAsnCacheFromSnapshot(snapshot?: AnalysisSnapshot | null): 
     const bgpPrefixes = Array.from(
       new Set(origins.map((o) => o.bgpPrefix).filter((p): p is string => Boolean(p)))
     );
+    const rpkiValidations: RpkiRouteValidation[] = [];
+    for (const o of origins) {
+      if (!o.bgpPrefix) continue;
+      for (const asn of o.asns) {
+        const rv = getCachedRpkiValidation(asn, o.bgpPrefix);
+        if (rv && !rpkiValidations.some((ex) => ex.asn === rv.asn && ex.prefix === rv.prefix)) {
+          rpkiValidations.push(rv);
+        }
+      }
+    }
+    const rpkiStatus = summarizeRpkiValidationState(rpkiValidations);
 
     ipInfoCache.set(fromOrigin.ip, {
       ip: fromOrigin.ip,
@@ -206,6 +240,8 @@ export function seedIpAsnCacheFromSnapshot(snapshot?: AnalysisSnapshot | null): 
       country: primary.country ?? asns[0]?.country,
       rir: primary.rir ?? asns[0]?.rir,
       allocatedDate: primary.allocatedDate ?? asns[0]?.allocatedDate,
+      ...(rpkiStatus ? { rpkiStatus } : {}),
+      ...(rpkiValidations.length > 0 ? { rpkiValidations } : {}),
       status: 'ready',
     });
     updated = true;
@@ -217,6 +253,9 @@ export function seedIpAsnCacheFromSnapshot(snapshot?: AnalysisSnapshot | null): 
     const parsed = parseIpToken(r.ip);
     const keyIp = parsed?.canonicalIp ?? r.ip;
     if (r.bgp && r.bgp.asns.length > 0) {
+      const rdnsRpki =
+        r.bgp.rpkiValidations ?? (r.bgp.rpki ? [r.bgp.rpki] : []);
+      const rdnsRpkiStatus = summarizeRpkiValidationState(rdnsRpki);
       ipInfoCache.set(keyIp, {
         ip: keyIp,
         family: r.family,
@@ -227,6 +266,8 @@ export function seedIpAsnCacheFromSnapshot(snapshot?: AnalysisSnapshot | null): 
         country: r.bgp.country,
         rir: r.bgp.rir,
         allocatedDate: r.bgp.allocatedDate,
+        ...(rdnsRpkiStatus ? { rpkiStatus: rdnsRpkiStatus } : {}),
+        ...(rdnsRpki.length > 0 ? { rpkiValidations: rdnsRpki } : {}),
         status: 'ready',
       });
       updated = true;
@@ -261,6 +302,10 @@ export function seedIpAsnCacheFromSnapshot(snapshot?: AnalysisSnapshot | null): 
           country: ns.country ?? ns.asns[0]?.country,
           rir: ns.rir ?? ns.asns[0]?.rir,
           allocatedDate: ns.asns[0]?.allocatedDate,
+          ...(ns.rpkiStatus ? { rpkiStatus: ns.rpkiStatus } : {}),
+          ...(ns.rpkiValidations && ns.rpkiValidations.length > 0
+            ? { rpkiValidations: ns.rpkiValidations }
+            : {}),
           status: 'ready',
         });
         updated = true;
@@ -369,38 +414,52 @@ export async function ensureIpAsnInfoLoaded(parsed: ParsedIpToken): Promise<IpAs
 
       const primary = origins[0];
       const uniqueAsnNums = Array.from(new Set(origins.flatMap((o) => o.asns)));
+      const rpkiPairs = new Map<string, { asn: number; prefix: string }>();
+      for (const o of origins) {
+        if (!o.bgpPrefix) continue;
+        for (const asn of o.asns) {
+          rpkiPairs.set(`${asn}|${o.bgpPrefix}`, { asn, prefix: o.bgpPrefix });
+        }
+      }
 
-      // Fetch any missing AS<n>.asn.cymru.com TXT records in parallel
-      await Promise.all(
-        uniqueAsnNums.map(async (asn) => {
-          if (asnOrgCache.has(asn)) return;
-          try {
-            const asnLog = await session.query(`AS${asn}.asn.cymru.com.`, RR_TYPES.TXT, {
-              cd: false,
-              doBit: false,
-              purpose: `BGP ASN organization lookup (AS${asn})`,
-            });
-            const asnTxts: string[] = [];
-            for (const ans of asnLog.packet.answers) {
-              if (ans.type === RR_TYPES.TXT) {
-                asnTxts.push(ans.parsed.kind === 'TXT' ? ans.parsed.joinedText : ans.rdataText);
-              }
-            }
-            const parsedAsn = parseCymruAsnTxt(asnTxts);
-            if (parsedAsn) {
-              asnOrgCache.set(asn, {
-                asn: parsedAsn.asn,
-                asName: parsedAsn.asName,
-                country: parsedAsn.country,
-                rir: parsedAsn.rir,
-                allocatedDate: parsedAsn.allocatedDate,
+      // Fetch any missing AS<n>.asn.cymru.com TXT records and RPKI ROA validations in parallel
+      const [, rpkiResults] = await Promise.all([
+        Promise.all(
+          uniqueAsnNums.map(async (asn) => {
+            if (asnOrgCache.has(asn)) return;
+            try {
+              const asnLog = await session.query(`AS${asn}.asn.cymru.com.`, RR_TYPES.TXT, {
+                cd: false,
+                doBit: false,
+                purpose: `BGP ASN organization lookup (AS${asn})`,
               });
+              const asnTxts: string[] = [];
+              for (const ans of asnLog.packet.answers) {
+                if (ans.type === RR_TYPES.TXT) {
+                  asnTxts.push(ans.parsed.kind === 'TXT' ? ans.parsed.joinedText : ans.rdataText);
+                }
+              }
+              const parsedAsn = parseCymruAsnTxt(asnTxts);
+              if (parsedAsn) {
+                asnOrgCache.set(asn, {
+                  asn: parsedAsn.asn,
+                  asName: parsedAsn.asName,
+                  country: parsedAsn.country,
+                  rir: parsedAsn.rir,
+                  allocatedDate: parsedAsn.allocatedDate,
+                });
+              }
+            } catch {
+              // Keep bare ASN number if org TXT lookup fails
             }
-          } catch {
-            // Keep bare ASN number if org TXT lookup fails
-          }
-        })
-      );
+          })
+        ),
+        Promise.all(
+          Array.from(rpkiPairs.values()).map((pair) =>
+            validateRpkiRoute(pair.asn, pair.prefix).catch(() => undefined)
+          )
+        ),
+      ]);
 
       const asns: BgpAsnOrganization[] = uniqueAsnNums.map((asn) => {
         const org = asnOrgCache.get(asn);
@@ -417,6 +476,11 @@ export async function ensureIpAsnInfoLoaded(parsed: ParsedIpToken): Promise<IpAs
         new Set(origins.map((o) => o.bgpPrefix).filter((p): p is string => Boolean(p)))
       );
 
+      const rpkiValidations = rpkiResults.filter(
+        (v): v is RpkiRouteValidation => v !== undefined && v.status !== 'error'
+      );
+      const rpkiStatus = summarizeRpkiValidationState(rpkiValidations);
+
       const result: IpAsnNetworkInfo = {
         ip: parsed.canonicalIp,
         family: parsed.family,
@@ -426,6 +490,8 @@ export async function ensureIpAsnInfoLoaded(parsed: ParsedIpToken): Promise<IpAs
         country: primary.country ?? asns[0]?.country,
         rir: primary.rir ?? asns[0]?.rir,
         allocatedDate: primary.allocatedDate ?? asns[0]?.allocatedDate,
+        ...(rpkiStatus ? { rpkiStatus } : {}),
+        ...(rpkiValidations.length > 0 ? { rpkiValidations } : {}),
         status: 'ready',
       };
 
@@ -453,6 +519,45 @@ export async function ensureIpAsnInfoLoaded(parsed: ParsedIpToken): Promise<IpAs
 }
 
 /**
+ * Ensures RPKI ROA validation is loaded for an already-cached `IpAsnNetworkInfo` entry when hovered.
+ */
+async function ensureIpRpkiLoaded(canonicalIp: string): Promise<void> {
+  const cur = ipInfoCache.get(canonicalIp);
+  if (!cur || cur.status !== 'ready' || cur.asns.length === 0 || cur.bgpPrefixes.length === 0) {
+    return;
+  }
+  if (cur.rpkiValidations && cur.rpkiValidations.length > 0) {
+    return;
+  }
+
+  const pairs: Array<{ asn: number; prefix: string }> = [];
+  for (const a of cur.asns) {
+    for (const pfx of cur.bgpPrefixes) {
+      pairs.push({ asn: a.asn, prefix: pfx });
+    }
+  }
+  if (pairs.length === 0) return;
+
+  const results = await Promise.all(
+    pairs.slice(0, 6).map((p) => validateRpkiRoute(p.asn, p.prefix).catch(() => undefined))
+  );
+  const validList = results.filter(
+    (v): v is RpkiRouteValidation => v !== undefined && v.status !== 'error'
+  );
+  if (validList.length === 0) return;
+
+  const latest = ipInfoCache.get(canonicalIp);
+  if (!latest) return;
+  const rpkiStatus = summarizeRpkiValidationState(validList);
+  ipInfoCache.set(canonicalIp, {
+    ...latest,
+    rpkiStatus,
+    rpkiValidations: validList,
+  });
+  notifyCacheListeners();
+}
+
+/**
  * Hook that subscribes to BGP ASN & network info for one or more raw IP strings.
  */
 export function useIpAsnInfos(rawIps: string[], active: boolean): Array<{
@@ -474,6 +579,13 @@ export function useIpAsnInfos(rawIps: string[], active: boolean): Array<{
         const cur = ipInfoCache.get(tok.canonicalIp);
         if (!cur || cur.status === 'loading' || cur.status === 'error') {
           void ensureIpAsnInfoLoaded(tok);
+        } else if (
+          cur.status === 'ready' &&
+          cur.asns.length > 0 &&
+          cur.bgpPrefixes.length > 0 &&
+          (!cur.rpkiValidations || cur.rpkiValidations.length === 0)
+        ) {
+          void ensureIpRpkiLoaded(tok.canonicalIp);
         }
       }
     }
@@ -486,6 +598,55 @@ export function useIpAsnInfos(rawIps: string[], active: boolean): Array<{
     token,
     info: getCachedOrInitialIpInfo(token),
   }));
+}
+
+/**
+ * Renders a compact RPKI Route Origin Authorization (ROA — RFC 6811) status pill.
+ */
+export function RpkiStatusBadge({
+  status,
+  validation,
+  compact = false,
+  className = '',
+}: {
+  status: RpkiValidationState;
+  validation?: RpkiRouteValidation;
+  compact?: boolean;
+  className?: string;
+}) {
+  if (status === 'error') return null;
+
+  const styles =
+    status === 'valid'
+      ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+      : status === 'invalid-asn' || status === 'invalid-length'
+        ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/35'
+        : 'bg-slate-200/80 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-300 dark:border-slate-700';
+
+  const label =
+    status === 'valid'
+      ? 'RPKI VALID ✓'
+      : status === 'invalid-asn'
+        ? 'RPKI INVALID (ASN)'
+        : status === 'invalid-length'
+          ? 'RPKI INVALID (LEN)'
+          : compact
+            ? 'RPKI NO ROA'
+            : 'RPKI NOT FOUND (NO ROA)';
+
+  return (
+    <span
+      title={validation?.summary}
+      className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold ${styles} ${className}`}
+    >
+      {status === 'valid' ? (
+        <ShieldCheck className="w-3 h-3 shrink-0" />
+      ) : status === 'invalid-asn' || status === 'invalid-length' ? (
+        <ShieldAlert className="w-3 h-3 shrink-0" />
+      ) : null}
+      <span>{label}</span>
+    </span>
+  );
 }
 
 /**
@@ -599,6 +760,46 @@ export function IpAsnHoverCardContent({
                         </span>
                       ))}
                     </div>
+                  </div>
+                )}
+
+                {info.rpkiStatus && info.rpkiStatus !== 'error' && (
+                  <div className="space-y-1 pt-0.5">
+                    <div className="flex flex-wrap items-center justify-between gap-1.5 text-[11px] font-mono">
+                      <span className="text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                        <ShieldCheck className="w-3 h-3 text-cyan-500" />
+                        <span>RPKI ROA:</span>
+                      </span>
+                      <RpkiStatusBadge
+                        status={info.rpkiStatus}
+                        validation={info.rpkiValidations?.[0]}
+                        compact
+                      />
+                    </div>
+                    {info.rpkiValidations?.[0]?.roas &&
+                      info.rpkiValidations[0].roas.length > 0 && (
+                        <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 flex flex-wrap items-center justify-end gap-1">
+                          {info.rpkiStatus === 'invalid-asn' ? (
+                            <span className="text-rose-600 dark:text-rose-400">
+                              ROA Origin:{' '}
+                              {Array.from(
+                                new Set(
+                                  info.rpkiValidations[0].roas.map((r) => `AS${r.originAsn}`)
+                                )
+                              )
+                                .slice(0, 3)
+                                .join(', ')}{' '}
+                              (maxLen /{info.rpkiValidations[0].roas[0].maxLength})
+                            </span>
+                          ) : (
+                            <span>
+                              ROA AS{info.rpkiValidations[0].roas[0].originAsn} ·{' '}
+                              {info.rpkiValidations[0].roas[0].prefix} (maxLen /
+                              {info.rpkiValidations[0].roas[0].maxLength})
+                            </span>
+                          )}
+                        </div>
+                      )}
                   </div>
                 )}
               </div>

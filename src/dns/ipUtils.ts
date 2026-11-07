@@ -1,7 +1,14 @@
 import { DNSBL_PROVIDERS, RR_TYPES } from './constants';
 import type { DohSession } from './doh';
 import { displayFqdn, normalizeFqdn } from './encoding';
-import type { DnsblAuditSummary, DnsblProviderResult, DohQueryLog } from './types';
+import type {
+  DnsblAuditSummary,
+  DnsblProviderResult,
+  DohQueryLog,
+  RpkiRoaEntry,
+  RpkiRouteValidation,
+  RpkiValidationState,
+} from './types';
 
 export interface IpClassification {
   isPublic: boolean;
@@ -585,4 +592,218 @@ export function evaluateDnsblAuditForIp(
     providers,
     summary: `Clean across all ${cleanCount} responsive DoH DNSBL providers (RFC 5782).`,
   };
+}
+
+const rpkiValidationCache = new Map<string, RpkiRouteValidation>();
+const inFlightRpkiLookups = new Map<string, Promise<RpkiRouteValidation>>();
+
+function buildRpkiCacheKey(asn: number, prefix: string): string {
+  return `${asn}|${prefix.trim().toLowerCase()}`;
+}
+
+/**
+ * Returns a cached RPKI Route Origin Authorization (ROA) validation result for `(asn, prefix)` if present.
+ */
+export function getCachedRpkiValidation(
+  asn: number,
+  prefix: string
+): RpkiRouteValidation | undefined {
+  if (!Number.isInteger(asn) || asn <= 0 || !prefix.trim()) return undefined;
+  return rpkiValidationCache.get(buildRpkiCacheKey(asn, prefix));
+}
+
+/**
+ * Seeds the in-memory RPKI ROA validation cache from existing `RpkiRouteValidation` objects
+ * (e.g. from a saved `AnalysisSnapshot` during offline re-verification).
+ */
+export function seedRpkiValidationCache(entries: RpkiRouteValidation[]): void {
+  for (const entry of entries) {
+    if (!entry || !Number.isInteger(entry.asn) || entry.asn <= 0 || !entry.prefix) continue;
+    if (entry.status === 'error') continue;
+    rpkiValidationCache.set(buildRpkiCacheKey(entry.asn, entry.prefix), entry);
+  }
+}
+
+/**
+ * Summarizes an array of `RpkiRouteValidation` entries into a single worst-first `RpkiValidationState`.
+ */
+export function summarizeRpkiValidationState(
+  validations: RpkiRouteValidation[]
+): RpkiValidationState | undefined {
+  if (!validations || validations.length === 0) return undefined;
+  if (validations.some((v) => v.status === 'invalid-asn')) return 'invalid-asn';
+  if (validations.some((v) => v.status === 'invalid-length')) return 'invalid-length';
+  if (validations.some((v) => v.status === 'valid')) return 'valid';
+  if (validations.some((v) => v.status === 'not-found')) return 'not-found';
+  return 'error';
+}
+
+interface RipeStatRpkiJsonResponse {
+  status?: string;
+  data?: {
+    status?: string;
+    validator?: string;
+    validating_roas?: Array<{
+      origin?: string | number;
+      prefix?: string;
+      validity?: string;
+      max_length?: number;
+    }>;
+  };
+}
+
+/**
+ * Validates whether BGP origin `asn` is cryptographically authorized to announce `prefix`
+ * via RPKI Route Origin Authorizations (ROAs — RFC 6811 / RFC 6480), using the CORS-enabled
+ * RIPE Stat RPKI validation API (`https://stat.ripe.net/data/rpki-validation/data.json`).
+ */
+export async function validateRpkiRoute(
+  asn: number,
+  prefix: string,
+  options: { fetchImpl?: typeof fetch; timeoutMs?: number } = {}
+): Promise<RpkiRouteValidation> {
+  const cleanPrefix = prefix.trim();
+  if (!Number.isInteger(asn) || asn <= 0 || !cleanPrefix) {
+    return {
+      asn,
+      prefix: cleanPrefix,
+      status: 'error',
+      roas: [],
+      summary: `Invalid ASN or BGP prefix for RPKI ROA validation.`,
+    };
+  }
+
+  const key = buildRpkiCacheKey(asn, cleanPrefix);
+  const cached = rpkiValidationCache.get(key);
+  if (cached && cached.status !== 'error') {
+    return cached;
+  }
+
+  const inFlight = inFlightRpkiLookups.get(key);
+  if (inFlight) return inFlight;
+
+  const task = (async (): Promise<RpkiRouteValidation> => {
+    const fetchFn = options.fetchImpl ?? (typeof fetch !== 'undefined' ? fetch : undefined);
+    if (!fetchFn) {
+      return {
+        asn,
+        prefix: cleanPrefix,
+        status: 'error',
+        roas: [],
+        summary: `Fetch API unavailable for RPKI ROA validation.`,
+      };
+    }
+
+    const timeoutMs = options.timeoutMs ?? 4500;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const url = `https://stat.ripe.net/data/rpki-validation/data.json?resource=${encodeURIComponent(
+        String(asn)
+      )}&prefix=${encodeURIComponent(cleanPrefix)}`;
+      const res = await fetchFn(url, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        return {
+          asn,
+          prefix: cleanPrefix,
+          status: 'error',
+          roas: [],
+          summary: `RPKI ROA lookup returned HTTP ${res.status} for AS${asn} (${cleanPrefix}).`,
+        };
+      }
+
+      const payload = (await res.json()) as RipeStatRpkiJsonResponse;
+      const rawStatus = (payload.data?.status ?? '').toLowerCase();
+      let status: RpkiValidationState = 'not-found';
+      if (rawStatus === 'valid') {
+        status = 'valid';
+      } else if (rawStatus === 'invalid_asn' || rawStatus === 'invalid-asn') {
+        status = 'invalid-asn';
+      } else if (rawStatus === 'invalid_length' || rawStatus === 'invalid-length') {
+        status = 'invalid-length';
+      } else if (rawStatus === 'unknown' || rawStatus === 'not-found' || rawStatus === 'not_found') {
+        status = 'not-found';
+      }
+
+      const seenRoaKeys = new Set<string>();
+      const parsedRoas: RpkiRoaEntry[] = [];
+      for (const r of payload.data?.validating_roas ?? []) {
+        const originNum = Number.parseInt(String(r.origin ?? '').replace(/^AS/i, ''), 10);
+        if (!Number.isInteger(originNum) || originNum < 0 || !r.prefix) continue;
+        const maxLength =
+          typeof r.max_length === 'number' && Number.isInteger(r.max_length)
+            ? r.max_length
+            : Number.parseInt(r.prefix.split('/')[1] ?? '0', 10) || 0;
+        const validity = String(r.validity ?? rawStatus);
+        const roaKey = `${originNum}|${r.prefix}|${maxLength}|${validity}`;
+        if (seenRoaKeys.has(roaKey)) continue;
+        seenRoaKeys.add(roaKey);
+        parsedRoas.push({
+          originAsn: originNum,
+          prefix: r.prefix,
+          maxLength,
+          validity,
+        });
+      }
+
+      parsedRoas.sort((a, b) => {
+        const aMatch = a.originAsn === asn ? 0 : 1;
+        const bMatch = b.originAsn === asn ? 0 : 1;
+        return aMatch - bMatch;
+      });
+      const cappedRoas = parsedRoas.slice(0, 6);
+
+      let summary = '';
+      if (status === 'valid') {
+        const matchingRoa = cappedRoas.find((r) => r.originAsn === asn) ?? cappedRoas[0];
+        summary = `RPKI ROA valid: AS${asn} is cryptographically authorized to originate ${cleanPrefix}${
+          matchingRoa ? ` (ROA ${matchingRoa.prefix} maxLength /${matchingRoa.maxLength})` : ''
+        } per RFC 6811.`;
+      } else if (status === 'invalid-asn') {
+        const authorizedAsns = Array.from(new Set(parsedRoas.map((r) => `AS${r.originAsn}`)))
+          .slice(0, 4)
+          .join(', ');
+        summary = `RPKI ROA INVALID (Unauthorized Origin ASN): ${cleanPrefix} is covered by signed RPKI ROA(s) for ${
+          authorizedAsns || 'another ASN'
+        }, not AS${asn} (potential BGP route hijack or leak per RFC 6811).`;
+      } else if (status === 'invalid-length') {
+        const matchingRoa = cappedRoas.find((r) => r.originAsn === asn) ?? cappedRoas[0];
+        summary = `RPKI ROA INVALID (MaxLength Exceeded): AS${asn} announcement ${cleanPrefix} is more specific than covering RPKI ROA${
+          matchingRoa ? ` (${matchingRoa.prefix} maxLength /${matchingRoa.maxLength})` : ''
+        } per RFC 6811.`;
+      } else {
+        summary = `No covering RPKI Route Origin Authorization (ROA) published for ${cleanPrefix} (AS${asn}) — BGP route is RPKI NotFound (RFC 6811).`;
+      }
+
+      const result: RpkiRouteValidation = {
+        asn,
+        prefix: cleanPrefix,
+        status,
+        roas: cappedRoas,
+        ...(payload.data?.validator ? { validator: payload.data.validator } : {}),
+        summary,
+      };
+      rpkiValidationCache.set(key, result);
+      return result;
+    } catch {
+      return {
+        asn,
+        prefix: cleanPrefix,
+        status: 'error',
+        roas: [],
+        summary: `RPKI ROA validation lookup timed out or failed for AS${asn} (${cleanPrefix}).`,
+      };
+    } finally {
+      clearTimeout(timer);
+      inFlightRpkiLookups.delete(key);
+    }
+  })();
+
+  inFlightRpkiLookups.set(key, task);
+  return task;
 }

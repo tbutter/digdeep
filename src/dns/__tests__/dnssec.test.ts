@@ -27,12 +27,16 @@ import {
 } from '../encoding';
 import {
   classifyDnsblReturnIp,
+  getCachedRpkiValidation,
   ipToCymruOriginQname,
   ipToDnsblQname,
   parseCymruAsnTxt,
   parseCymruOriginTxt,
   parseReverseIpInput,
   reverseArpaToIp,
+  seedRpkiValidationCache,
+  summarizeRpkiValidationState,
+  validateRpkiRoute,
 } from '../ipUtils';
 import { buildDnsQuery, decodeDnsName, encodeDnsName, parseDnsPacket } from '../wire';
 import { parseCaaRecordEntry, runWebAnalysis } from '../webAnalyzer';
@@ -1016,6 +1020,86 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
       ).toBe(true);
       expect(
         mutatedSnap.findings.some((f) => f.code === 'TXT_DUPLICATE_VERIFICATION')
+      ).toBe(true);
+    },
+    30000
+  );
+
+  it(
+    'validates BGP Route Origin Authorizations (RPKI ROAs — RFC 6811 / RFC 6480) on live routes and flags BGP_RPKI_ROA_INVALID on unauthorized origins',
+    async () => {
+      // 1. Live RIPE Stat RPKI validation checks for valid, invalid-asn, and invalid-length routes
+      const [validRoa, invalidAsnRoa, invalidLenRoa] = await Promise.all([
+        validateRpkiRoute(13335, '1.1.1.0/24'),
+        validateRpkiRoute(64496, '1.1.1.0/24'),
+        validateRpkiRoute(13335, '1.1.1.0/25'),
+      ]);
+
+      expect(validRoa.status).toBe('valid');
+      expect(validRoa.roas.some((r) => r.originAsn === 13335 && r.maxLength === 24)).toBe(true);
+      expect(getCachedRpkiValidation(13335, '1.1.1.0/24')?.status).toBe('valid');
+
+      expect(invalidAsnRoa.status).toBe('invalid-asn');
+      expect(invalidAsnRoa.summary).toContain('Unauthorized Origin ASN');
+      expect(invalidAsnRoa.roas.some((r) => r.originAsn === 13335)).toBe(true);
+
+      expect(invalidLenRoa.status).toBe('invalid-length');
+      expect(invalidLenRoa.summary).toContain('MaxLength Exceeded');
+
+      expect(summarizeRpkiValidationState([validRoa, invalidAsnRoa])).toBe('invalid-asn');
+      expect(summarizeRpkiValidationState([validRoa, invalidLenRoa])).toBe('invalid-length');
+      expect(summarizeRpkiValidationState([validRoa])).toBe('valid');
+
+      // 2. Verify Reverse DNS snapshot on 1.1.1.1 includes valid RPKI ROA and flags BGP_RPKI_ROA_INVALID when origin ASN is hijacked
+      const rdnsSnap = await runDnsvizAnalysis('1.1.1.1');
+      expect(rdnsSnap.reverseDns?.bgp?.rpki).toBeDefined();
+      expect(rdnsSnap.reverseDns?.bgp?.rpki?.status).toBe('valid');
+
+      // Simulate an unauthorized BGP origin announcement (AS64496 announcing 1.1.1.0/24) in Cymru TXT log
+      seedRpkiValidationCache([invalidAsnRoa]);
+      const hijackedRdnsQueries = rdnsSnap.queries.map((q) => {
+        if (q.qname === '1.1.1.1.origin.asn.cymru.com.' && q.qtype === RR_TYPES.TXT) {
+          return {
+            ...q,
+            packet: {
+              ...q.packet,
+              answers: q.packet.answers.map((ans) =>
+                ans.type === RR_TYPES.TXT
+                  ? {
+                      ...ans,
+                      rdataText: '"64496 | 1.1.1.0/24 | AU | apnic | 2011-08-11"',
+                      parsed: {
+                        kind: 'TXT' as const,
+                        strings: ['64496 | 1.1.1.0/24 | AU | apnic | 2011-08-11'],
+                        joinedText: '64496 | 1.1.1.0/24 | AU | apnic | 2011-08-11',
+                      },
+                    }
+                  : ans
+              ),
+            },
+          };
+        }
+        return q;
+      });
+
+      const hijackedSnap = await evaluateSnapshotFromLogs({
+        id: 'test-rpki-hijack-rdns',
+        targetName: rdnsSnap.targetName,
+        queriedIp: rdnsSnap.queriedIp,
+        queryTypes: rdnsSnap.queryTypes,
+        dohEndpoint: rdnsSnap.dohEndpoint,
+        capturedAt: rdnsSnap.capturedAt,
+        validatedAt: rdnsSnap.validatedAt,
+        durationMs: rdnsSnap.durationMs,
+        queries: hijackedRdnsQueries,
+        trustAnchors: rdnsSnap.trustAnchorsUsed,
+      });
+
+      expect(hijackedSnap.reverseDns?.bgp?.rpki?.status).toBe('invalid-asn');
+      expect(
+        hijackedSnap.findings.some(
+          (f) => f.code === 'BGP_RPKI_ROA_INVALID' && f.severity === 'warning'
+        )
       ).toBe(true);
     },
     30000

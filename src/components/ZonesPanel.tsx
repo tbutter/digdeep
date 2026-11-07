@@ -12,7 +12,7 @@ import {
 import { formatAlgorithm, formatDigestType } from '../dns/constants';
 import { displayFqdn } from '../dns/encoding';
 import type { AnalysisSnapshot } from '../dns/types';
-import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
+import { IpHoverBadge, RpkiStatusBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
 import { StatusBadge } from './StatusBadge';
 
 export function ZonesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
@@ -197,7 +197,8 @@ export function ZonesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
                           </div>
                         )}
                         {((ns.asns && ns.asns.length > 0) ||
-                          (ns.bgpPrefixes && ns.bgpPrefixes.length > 0)) && (
+                          (ns.bgpPrefixes && ns.bgpPrefixes.length > 0) ||
+                          ns.rpkiStatus) && (
                           <div className="flex flex-wrap items-center gap-1 mt-1">
                             {ns.asns?.map((a) => (
                               <span
@@ -220,6 +221,13 @@ export function ZonesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
                                 {pfx}
                               </span>
                             ))}
+                            {ns.rpkiStatus && ns.rpkiStatus !== 'error' && (
+                              <RpkiStatusBadge
+                                status={ns.rpkiStatus}
+                                validation={ns.rpkiValidations?.[0]}
+                                compact
+                              />
+                            )}
                           </div>
                         )}
                       </div>

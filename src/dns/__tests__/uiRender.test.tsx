@@ -173,7 +173,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v14');
+    expect(swCode).toContain('digdeep-shell-v15');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge when navigator.onLine is false
@@ -538,6 +538,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(rdnsHtml).toContain('FCrDNS VERIFIED ✓');
       expect(rdnsHtml).toContain('AS13335');
       expect(rdnsHtml).toContain('1.1.1.0/24');
+      expect(rdnsHtml).toContain('RPKI VALID ✓');
 
       const webSnap = await runWebAnalysis('cloudflare.com');
       expect(webSnap.mode).toBe('web');
@@ -605,6 +606,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       );
       expect(hoverCardHtml).toContain('AS13335');
       expect(hoverCardHtml).toContain('1.1.1.0/24');
+      expect(hoverCardHtml).toContain('RPKI VALID ✓');
       expect(hoverCardHtml).toContain('SPECIAL RANGE');
 
       const badgeHtml = renderToStaticMarkup(<IpHoverBadge ip="1.1.1.1" />);

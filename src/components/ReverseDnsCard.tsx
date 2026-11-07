@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { displayFqdn } from '../dns/encoding';
 import type { ReverseDnsAnalysis } from '../dns/types';
-import { IpHoverBadge } from './IpHoverBadge';
+import { IpHoverBadge, RpkiStatusBadge } from './IpHoverBadge';
 import { StatusBadge } from './StatusBadge';
 
 export interface ReverseDnsCardProps {
@@ -303,7 +303,18 @@ export function ReverseDnsCard({
                       Allocated: {reverseDns.bgp.allocatedDate}
                     </span>
                   )}
+                  {reverseDns.bgp.rpki && reverseDns.bgp.rpki.status !== 'error' && (
+                    <RpkiStatusBadge
+                      status={reverseDns.bgp.rpki.status}
+                      validation={reverseDns.bgp.rpki}
+                    />
+                  )}
                 </div>
+                {reverseDns.bgp.rpki && reverseDns.bgp.rpki.status !== 'error' && (
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug pt-0.5">
+                    {reverseDns.bgp.rpki.summary}
+                  </div>
+                )}
               </div>
             ) : (
               <p className="text-xs text-slate-500 dark:text-slate-400">

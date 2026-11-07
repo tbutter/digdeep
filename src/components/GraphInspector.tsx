@@ -4,7 +4,7 @@ import { DNSSEC_ALGORITHMS, formatAlgorithm, formatDigestType } from '../dns/con
 import { displayFqdn } from '../dns/encoding';
 import type { NegativeProofVerification, ZoneAnalysis } from '../dns/types';
 import type { GraphEdge, GraphNode } from '../graph/layout';
-import { IpHoverBadge } from './IpHoverBadge';
+import { IpHoverBadge, RpkiStatusBadge } from './IpHoverBadge';
 import { StatusBadge } from './StatusBadge';
 
 export type GraphSelection =
@@ -239,6 +239,35 @@ export function GraphInspector({
                               {idx < arr.length - 1 ? ' ·' : ''}
                             </span>
                           ))}
+                        </div>
+                      )}
+                      {((ns.asns && ns.asns.length > 0) ||
+                        (ns.bgpPrefixes && ns.bgpPrefixes.length > 0) ||
+                        (ns.rpkiStatus && ns.rpkiStatus !== 'error')) && (
+                        <div className="flex flex-wrap items-center gap-1 mt-1">
+                          {ns.asns?.map((a) => (
+                            <span
+                              key={a.asn}
+                              className="rounded bg-cyan-500/10 border border-cyan-500/25 px-1.5 py-0.5 font-mono text-[10px] font-bold text-cyan-700 dark:text-cyan-300"
+                            >
+                              AS{a.asn}
+                            </span>
+                          ))}
+                          {ns.bgpPrefixes?.map((pfx) => (
+                            <span
+                              key={pfx}
+                              className="rounded bg-slate-200/80 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-600 dark:text-slate-300"
+                            >
+                              {pfx}
+                            </span>
+                          ))}
+                          {ns.rpkiStatus && ns.rpkiStatus !== 'error' && (
+                            <RpkiStatusBadge
+                              status={ns.rpkiStatus}
+                              validation={ns.rpkiValidations?.[0]}
+                              compact
+                            />
+                          )}
                         </div>
                       )}
                     </div>

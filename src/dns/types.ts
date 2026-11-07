@@ -419,6 +419,29 @@ export interface NegativeNode {
   status: ValidationStatus;
 }
 
+export type RpkiValidationState =
+  | 'valid'
+  | 'invalid-asn'
+  | 'invalid-length'
+  | 'not-found'
+  | 'error';
+
+export interface RpkiRoaEntry {
+  originAsn: number;
+  prefix: string;
+  maxLength: number;
+  validity: string;
+}
+
+export interface RpkiRouteValidation {
+  asn: number;
+  prefix: string;
+  status: RpkiValidationState;
+  roas: RpkiRoaEntry[];
+  validator?: string;
+  summary: string;
+}
+
 export interface NameserverEntry {
   hostname: string;
   ipv4: string[];
@@ -428,6 +451,8 @@ export interface NameserverEntry {
   bgpPrefixes?: string[];
   country?: string;
   rir?: string;
+  rpkiStatus?: RpkiValidationState;
+  rpkiValidations?: RpkiRouteValidation[];
 }
 
 export interface CdsRecordDetail {
@@ -1068,6 +1093,8 @@ export interface ReverseIpBgpInfo {
   allocatedDate?: string;
   asns: BgpAsnOrganization[];
   rawOriginTxt?: string;
+  rpki?: RpkiRouteValidation;
+  rpkiValidations?: RpkiRouteValidation[];
 }
 
 export interface ReverseDnsAnalysis {

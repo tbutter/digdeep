@@ -29,6 +29,7 @@ import {
 import {
   evaluateDnsblAuditForIp,
   formatCanonicalIpv6,
+  getCachedRpkiValidation,
   ipToCymruOriginQname,
   parseCymruAsnTxt,
   parseCymruOriginTxt,
@@ -36,6 +37,9 @@ import {
   parseIpv6Groups,
   parseReverseIpInput,
   queryDnsblForIp,
+  seedRpkiValidationCache,
+  summarizeRpkiValidationState,
+  validateRpkiRoute,
   type ParsedReverseIpTarget,
 } from './ipUtils';
 import { evaluateConsensusFromSnapshotData } from './consensusAnalyzer';
@@ -64,6 +68,7 @@ import type {
   ReverseDnsAnalysis,
   ReverseIpBgpInfo,
   ReversePtrTargetEntry,
+  RpkiRouteValidation,
   RrsigVerification,
   SoaAuditSummary,
   SoaRdata,
@@ -79,7 +84,7 @@ import type {
   ZonemdRecordDetail,
 } from './types';
 
-export const SNAPSHOT_ENGINE_VERSION = 11;
+export const SNAPSHOT_ENGINE_VERSION = 12;
 
 export interface AnalyzeOptions extends DohClientOptions {
   queryTypes?: string[];
@@ -507,6 +512,7 @@ export async function runDnsvizAnalysis(
       )
     );
     const nsUniqueAsns = new Set<number>();
+    const nsRpkiPairs = new Map<string, { asn: number; prefix: string }>();
     for (const oLog of originLogs) {
       if (!oLog) continue;
       const txts: string[] = [];
@@ -518,12 +524,18 @@ export async function runDnsvizAnalysis(
       for (const parsed of parseCymruOriginTxt(txts)) {
         for (const asn of parsed.asns) {
           nsUniqueAsns.add(asn);
+          if (parsed.bgpPrefix && nsRpkiPairs.size < 12) {
+            nsRpkiPairs.set(`${asn}|${parsed.bgpPrefix}`, {
+              asn,
+              prefix: parsed.bgpPrefix,
+            });
+          }
         }
       }
     }
-    if (nsUniqueAsns.size > 0) {
-      await Promise.all(
-        Array.from(nsUniqueAsns)
+    if (nsUniqueAsns.size > 0 || nsRpkiPairs.size > 0) {
+      await Promise.all([
+        ...Array.from(nsUniqueAsns)
           .slice(0, 8)
           .map((asn) => {
             const asnQname = `as${asn}.asn.cymru.com.`;
@@ -534,8 +546,11 @@ export async function runDnsvizAnalysis(
                 purpose: `BGP ASN lookup (${asnQname} TXT)`,
               })
               .catch(() => undefined);
-          })
-      );
+          }),
+        ...Array.from(nsRpkiPairs.values()).map((pair) =>
+          validateRpkiRoute(pair.asn, pair.prefix).catch(() => undefined)
+        ),
+      ]);
     }
   }
 
@@ -593,9 +608,16 @@ export async function runDnsvizAnalysis(
             const uniqueAsns = Array.from(
               new Set(parsedOrigins.flatMap((o) => o.asns))
             ).slice(0, 4);
-            if (uniqueAsns.length > 0) {
-              await Promise.all(
-                uniqueAsns.map((asn) => {
+            const rdnsRpkiPairs = new Map<string, { asn: number; prefix: string }>();
+            for (const o of parsedOrigins) {
+              if (!o.bgpPrefix) continue;
+              for (const asn of o.asns) {
+                rdnsRpkiPairs.set(`${asn}|${o.bgpPrefix}`, { asn, prefix: o.bgpPrefix });
+              }
+            }
+            if (uniqueAsns.length > 0 || rdnsRpkiPairs.size > 0) {
+              await Promise.all([
+                ...uniqueAsns.map((asn) => {
                   const asnQname = `as${asn}.asn.cymru.com.`;
                   return session
                     .query(asnQname, RR_TYPES.TXT, {
@@ -604,8 +626,11 @@ export async function runDnsvizAnalysis(
                       purpose: `BGP ASN lookup (${asnQname} TXT)`,
                     })
                     .catch(() => undefined);
-                })
-              );
+                }),
+                ...Array.from(rdnsRpkiPairs.values()).map((pair) =>
+                  validateRpkiRoute(pair.asn, pair.prefix).catch(() => undefined)
+                ),
+              ]);
             }
           })
           .catch(() => undefined)
@@ -659,6 +684,23 @@ export async function reverifySnapshot(
   snapshot: AnalysisSnapshot,
   options: { validationTimeMs?: number; trustAnchors?: TrustAnchor[] } = {}
 ): Promise<AnalysisSnapshot> {
+  const existingRpki: RpkiRouteValidation[] = [];
+  for (const z of snapshot.zones) {
+    for (const ns of z.nameservers) {
+      for (const v of ns.rpkiValidations ?? []) {
+        existingRpki.push(v);
+      }
+    }
+  }
+  if (snapshot.reverseDns?.bgp?.rpkiValidations) {
+    existingRpki.push(...snapshot.reverseDns.bgp.rpkiValidations);
+  } else if (snapshot.reverseDns?.bgp?.rpki) {
+    existingRpki.push(snapshot.reverseDns.bgp.rpki);
+  }
+  if (existingRpki.length > 0) {
+    seedRpkiValidationCache(existingRpki);
+  }
+
   const updated = await evaluateSnapshotFromLogs({
     id: snapshot.id,
     mode: snapshot.mode,
@@ -1028,11 +1070,22 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     const bgpPrefixes = Array.from(
       new Set(origins.map((o) => o.bgpPrefix).filter((p): p is string => Boolean(p)))
     );
+    const rpkiValidations: RpkiRouteValidation[] = [];
+    for (const o of origins) {
+      if (!o.bgpPrefix) continue;
+      for (const asn of o.asns) {
+        const v = getCachedRpkiValidation(asn, o.bgpPrefix);
+        if (v && !rpkiValidations.some((ex) => ex.asn === v.asn && ex.prefix === v.prefix)) {
+          rpkiValidations.push(v);
+        }
+      }
+    }
     return {
       asns,
       bgpPrefixes,
       country: primary.country,
       rir: primary.rir,
+      rpkiValidations,
     };
   };
 
@@ -1772,6 +1825,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
           // Aggregate BGP ASN & routed prefixes across all resolved IPs for this nameserver
           const hostAsnsMap = new Map<number, BgpAsnOrganization>();
           const hostPrefixes = new Set<string>();
+          const hostRpkiMap = new Map<string, RpkiRouteValidation>();
           let hostCountry: string | undefined;
           let hostRir: string | undefined;
           for (const ip of [...ipv4, ...ipv6]) {
@@ -1783,7 +1837,13 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
             for (const a of bgpMeta.asns) {
               if (!hostAsnsMap.has(a.asn)) hostAsnsMap.set(a.asn, a);
             }
+            for (const rv of bgpMeta.rpkiValidations) {
+              const rk = `${rv.asn}|${rv.prefix}`;
+              if (!hostRpkiMap.has(rk)) hostRpkiMap.set(rk, rv);
+            }
           }
+          const hostRpkiValidations = Array.from(hostRpkiMap.values());
+          const hostRpkiStatus = summarizeRpkiValidationState(hostRpkiValidations);
 
           nameservers.push({
             hostname: host,
@@ -1794,6 +1854,8 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
             ...(hostPrefixes.size > 0 ? { bgpPrefixes: Array.from(hostPrefixes) } : {}),
             ...(hostCountry ? { country: hostCountry } : {}),
             ...(hostRir ? { rir: hostRir } : {}),
+            ...(hostRpkiStatus ? { rpkiStatus: hostRpkiStatus } : {}),
+            ...(hostRpkiValidations.length > 0 ? { rpkiValidations: hostRpkiValidations } : {}),
           });
         }
       }
@@ -1913,6 +1975,24 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
             rfc: 'RFC 3901',
             zone: zoneName,
           });
+        }
+        for (const ns of nameservers) {
+          for (const rv of ns.rpkiValidations ?? []) {
+            if (rv.status === 'invalid-asn' || rv.status === 'invalid-length') {
+              const rpkiFindingId = `warn-ns-rpki-invalid-${zoneName}-${ns.hostname}-${rv.asn}-${rv.prefix}`;
+              if (!findings.some((f) => f.id === rpkiFindingId)) {
+                findings.push({
+                  id: rpkiFindingId,
+                  severity: 'warning',
+                  code: 'BGP_RPKI_ROA_INVALID',
+                  title: `Authoritative NS ${displayFqdn(ns.hostname)} (${zoneName}) routed via RPKI-invalid BGP announcement (AS${rv.asn} / ${rv.prefix})`,
+                  detail: `${displayFqdn(ns.hostname)} resolves to an IP announced by AS${rv.asn} in ${rv.prefix}: ${rv.summary}`,
+                  rfc: 'RFC 6811 / RFC 6480',
+                  zone: zoneName,
+                });
+              }
+            }
+          }
         }
       }
     }
@@ -3010,6 +3090,36 @@ function evaluateReverseDnsFromSnapshotData(params: {
           };
         });
 
+        const rpkiValidations: RpkiRouteValidation[] = [];
+        for (const o of parsedOrigins) {
+          if (!o.bgpPrefix) continue;
+          for (const asn of o.asns) {
+            const rv = getCachedRpkiValidation(asn, o.bgpPrefix);
+            if (rv && !rpkiValidations.some((ex) => ex.asn === rv.asn && ex.prefix === rv.prefix)) {
+              rpkiValidations.push(rv);
+            }
+          }
+        }
+        const primaryRpki =
+          rpkiValidations.find(
+            (v) => v.status === 'invalid-asn' || v.status === 'invalid-length'
+          ) ?? rpkiValidations[0];
+
+        for (const rv of rpkiValidations) {
+          if (rv.status === 'invalid-asn' || rv.status === 'invalid-length') {
+            findings.push({
+              id: `warn-rdns-rpki-invalid-${reverseIpTarget.ip}-${rv.asn}-${rv.prefix}`,
+              severity: 'warning',
+              code: 'BGP_RPKI_ROA_INVALID',
+              title: `BGP route origin RPKI ROA invalid (${
+                rv.status === 'invalid-asn' ? 'unauthorized ASN' : 'maxLength exceeded'
+              }) for ${reverseIpTarget.ip} (AS${rv.asn} / ${rv.prefix})`,
+              detail: rv.summary,
+              rfc: 'RFC 6811 / RFC 6480',
+            });
+          }
+        }
+
         bgp = {
           originQueryName: reverseIpTarget.cymruOriginQname,
           bgpPrefix: primaryOrigin.bgpPrefix,
@@ -3018,6 +3128,8 @@ function evaluateReverseDnsFromSnapshotData(params: {
           allocatedDate: primaryOrigin.allocatedDate,
           asns,
           rawOriginTxt: primaryOrigin.raw,
+          ...(primaryRpki ? { rpki: primaryRpki } : {}),
+          ...(rpkiValidations.length > 0 ? { rpkiValidations } : {}),
         };
       }
     }
