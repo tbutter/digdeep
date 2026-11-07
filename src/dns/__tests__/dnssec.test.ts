@@ -19,6 +19,11 @@ import {
 } from '../consensusAnalyzer';
 import { computeDsDigest, computeNsec3Hash } from '../crypto';
 import {
+  formatSnapshotAsZonefile,
+  formatZoneAsZonefile,
+  generateCliReproducerCommands,
+} from '../digFormat';
+import {
   base64ToBytes,
   compareCanonicalDnsNames,
   computeKeyTag,
@@ -1236,6 +1241,44 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
         validationTimeMs: webSnap.validatedAt,
       });
       expect(reverified.webAnalysis?.ctAnalysis?.status).toBe('caa-mismatch');
+
+      // 4. Verify CLI Command Reproducer (dig / delv / kdig) & RFC 1035 Master Zonefile (.zone) export (#18)
+      const cli = generateCliReproducerCommands({
+        qname: 'cloudflare.com.',
+        qtypeName: 'HTTPS',
+        dohEndpoint: 'https://cloudflare-dns.com/dns-query',
+        cd: true,
+        capturedAt: 1700000000000,
+        validatedAt: 1700003600000,
+      });
+      expect(cli.dig).toBe('dig +dnssec +multi +cd @1.1.1.1 cloudflare.com HTTPS');
+      expect(cli.delv).toBe('delv @1.1.1.1 cloudflare.com HTTPS +rtrace -t 1700003600');
+      expect(cli.kdig).toBe('kdig +dnssec +cd +https @cloudflare-dns.com cloudflare.com HTTPS');
+
+      const cfZone = webSnap.zones.find((z) => z.zoneName === 'cloudflare.com.')!;
+      expect(cfZone).toBeDefined();
+      const singleZonefile = formatZoneAsZonefile(cfZone, webSnap);
+      expect(singleZonefile).toContain('$ORIGIN cloudflare.com.');
+      expect(singleZonefile).toContain('$TTL ');
+      expect(singleZonefile).toContain('IN SOA');
+      expect(singleZonefile).toContain('IN NS');
+      expect(singleZonefile).toContain('IN HTTPS');
+      expect(singleZonefile).toContain('IN CAA');
+      expect(singleZonefile).toContain('IN DNSKEY');
+      expect(singleZonefile).toContain('IN RRSIG');
+
+      const noDnssecZonefile = formatZoneAsZonefile(cfZone, webSnap, {
+        includeDnssecRecords: false,
+      });
+      expect(noDnssecZonefile).toContain('IN HTTPS');
+      expect(noDnssecZonefile).not.toContain('IN RRSIG');
+      expect(noDnssecZonefile).not.toContain('IN DNSKEY');
+
+      const fullZonefile = formatSnapshotAsZonefile(webSnap);
+      expect(fullZonefile).toContain('RFC 1035 Master Zonefile Export');
+      expect(fullZonefile).toContain('$ORIGIN cloudflare.com.');
+      expect(fullZonefile).toContain('$ORIGIN com.');
+      expect(fullZonefile).toContain('$ORIGIN .');
     },
     30000
   );

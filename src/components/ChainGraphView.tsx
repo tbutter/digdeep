@@ -1232,7 +1232,13 @@ export function ChainGraphView({
       </div>
 
       {/* Right-Hand Cryptographic & Wire Inspector Drawer */}
-      <GraphInspector selection={selection} onClose={() => selectAndNotify(null)} />
+      <GraphInspector
+        selection={selection}
+        dohEndpoint={snapshot.dohEndpoint}
+        capturedAt={snapshot.capturedAt}
+        validatedAt={snapshot.validatedAt}
+        onClose={() => selectAndNotify(null)}
+      />
 
       {/* Floating BGP ASN & Network Hover Card for SVG A / AAAA Nodes */}
       {hoveredIpNode &&

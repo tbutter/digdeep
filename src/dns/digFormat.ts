@@ -1,6 +1,12 @@
-import { rcodeToString } from './constants';
-import { base64ToBytes } from './encoding';
-import type { DnsPacket, DnsRecord, DohQueryLog } from './types';
+import { RR_TYPES, rcodeToString } from './constants';
+import { base64ToBytes, compareCanonicalDnsNames, displayFqdn, normalizeFqdn } from './encoding';
+import type {
+  AnalysisSnapshot,
+  DnsPacket,
+  DnsRecord,
+  DohQueryLog,
+  ZoneAnalysis,
+} from './types';
 
 function formatRecordLine(r: DnsRecord): string {
   const owner = r.name.padEnd(24, ' ');
@@ -112,4 +118,364 @@ export function formatWireHexDump(wireBase64: string): HexDumpRow[] {
     });
   }
   return rows;
+}
+
+export interface CliReproducerCommands {
+  dig: string;
+  delv: string;
+  kdig: string;
+  resolverIpOrHost: string;
+  dohHost: string;
+}
+
+const DOH_HOST_TO_RESOLVER_IP: Record<string, string> = {
+  'cloudflare-dns.com': '1.1.1.1',
+  'one.one.one.one': '1.1.1.1',
+  '1.1.1.1': '1.1.1.1',
+  'mozilla.cloudflare-dns.com': '1.1.1.1',
+  'security.cloudflare-dns.com': '1.1.1.2',
+  'family.cloudflare-dns.com': '1.1.1.3',
+  'dns.google': '8.8.8.8',
+  '8.8.8.8': '8.8.8.8',
+  'dns.quad9.net': '9.9.9.9',
+  'dns9.quad9.net': '9.9.9.9',
+  '9.9.9.9': '9.9.9.9',
+  'dns11.quad9.net': '9.9.9.11',
+  'dns10.quad9.net': '9.9.9.10',
+  'dns.adguard-dns.com': '94.140.14.14',
+  'unfiltered.adguard-dns.com': '94.140.14.140',
+  'doh.opendns.com': '208.67.222.222',
+  'dns.mullvad.net': '194.242.2.2',
+  'doh.cleanbrowsing.org': '185.228.168.9',
+};
+
+/**
+ * Generates ready-to-run `dig`, `delv`, and `kdig` CLI commands to reproduce a DNS query
+ * or DNSSEC validation locally in a terminal.
+ */
+export function generateCliReproducerCommands(params: {
+  qname: string;
+  qtypeName: string;
+  dohEndpoint?: string;
+  cd?: boolean;
+  validatedAt?: number;
+  capturedAt?: number;
+}): CliReproducerCommands {
+  const normQname = normalizeFqdn(params.qname);
+  const target = normQname === '.' ? '.' : displayFqdn(normQname);
+  const qtype = (params.qtypeName || 'A').trim().toUpperCase();
+
+  let dohHost = 'cloudflare-dns.com';
+  if (params.dohEndpoint) {
+    try {
+      const parsed = new URL(params.dohEndpoint);
+      if (parsed.hostname) {
+        dohHost = parsed.hostname.toLowerCase();
+      }
+    } catch {
+      // keep default
+    }
+  }
+
+  const resolverIpOrHost = DOH_HOST_TO_RESOLVER_IP[dohHost] ?? dohHost;
+  const cdFlag = params.cd ? ' +cd' : '';
+  const hasClockOverride =
+    params.validatedAt !== undefined &&
+    params.capturedAt !== undefined &&
+    Math.abs(params.validatedAt - params.capturedAt) > 1000;
+  const delvTimeFlag = hasClockOverride
+    ? ` -t ${Math.floor((params.validatedAt as number) / 1000)}`
+    : '';
+
+  return {
+    dig: `dig +dnssec +multi${cdFlag} @${resolverIpOrHost} ${target} ${qtype}`,
+    delv: `delv @${resolverIpOrHost} ${target} ${qtype} +rtrace${delvTimeFlag}`,
+    kdig: `kdig +dnssec${cdFlag} +https @${dohHost} ${target} ${qtype}`,
+    resolverIpOrHost,
+    dohHost,
+  };
+}
+
+const ZONEFILE_TYPE_PRIORITY: Record<string, number> = {
+  SOA: 1,
+  NS: 2,
+  A: 3,
+  AAAA: 4,
+  CNAME: 5,
+  MX: 6,
+  TXT: 7,
+  SPF: 8,
+  SRV: 9,
+  NAPTR: 10,
+  CAA: 11,
+  HTTPS: 12,
+  SVCB: 13,
+  TLSA: 14,
+  SMIMEA: 15,
+  OPENPGPKEY: 16,
+  SSHFP: 17,
+  PTR: 18,
+  CDS: 19,
+  CDNSKEY: 20,
+  CSYNC: 21,
+  ZONEMD: 22,
+  DS: 23,
+  DNSKEY: 24,
+  NSEC: 25,
+  NSEC3: 26,
+  NSEC3PARAM: 27,
+  RRSIG: 28,
+};
+
+function findDeepestMatchingZoneForOwner(owner: string, zoneNames: string[]): string {
+  const norm = normalizeFqdn(owner);
+  let best = '.';
+  let bestLen = 0;
+  for (const z of zoneNames) {
+    const normZ = normalizeFqdn(z);
+    if (normZ === '.') {
+      if (bestLen === 0) best = '.';
+      continue;
+    }
+    if (norm === normZ || norm.endsWith(`.${normZ}`)) {
+      if (normZ.length > bestLen) {
+        best = normZ;
+        bestLen = normZ.length;
+      }
+    }
+  }
+  return best;
+}
+
+function formatRrsigTimestamp(epochSec: number): string {
+  const d = new Date(epochSec * 1000);
+  const pad = (n: number, len = 2) => String(n).padStart(len, '0');
+  return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}${pad(
+    d.getUTCHours()
+  )}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}`;
+}
+
+function formatMasterRecordLine(rec: DnsRecord): string {
+  const owner = rec.name.padEnd(28, ' ');
+  const ttl = String(rec.ttl).padStart(6, ' ');
+  const cls = rec.rrclass === 1 ? 'IN' : `CLASS${rec.rrclass}`;
+  const type = rec.typeName.padEnd(10, ' ');
+  return `${owner} ${ttl} ${cls} ${type} ${rec.rdataText}`;
+}
+
+/**
+ * Formats a single `ZoneAnalysis` as an RFC 1035 Master Zonefile snippet (`.zone`).
+ */
+export function formatZoneAsZonefile(
+  zone: ZoneAnalysis,
+  snapshot?: AnalysisSnapshot,
+  options: { includeDnssecRecords?: boolean; includeHeader?: boolean } = {}
+): string {
+  const includeDnssec = options.includeDnssecRecords ?? true;
+  const includeHeader = options.includeHeader ?? true;
+  const zoneName = normalizeFqdn(zone.zoneName);
+  const allZoneNames = snapshot
+    ? snapshot.zones.map((z) => normalizeFqdn(z.zoneName))
+    : [zoneName];
+  const defaultTtl = zone.soa?.minimum ?? 3600;
+
+  const lines: string[] = [];
+  if (includeHeader) {
+    lines.push('; ============================================================================');
+    lines.push(`; DigDeep (https://digdeep.fyi) — RFC 1035 Master Zonefile Export`);
+    lines.push(
+      `; Zone: ${zoneName} (DNSSEC status: ${zone.status.toUpperCase()}, mode: ${zone.nsecMode})`
+    );
+    if (snapshot) {
+      lines.push(
+        `; Captured: ${new Date(snapshot.capturedAt).toISOString()} via ${snapshot.dohEndpoint}`
+      );
+    }
+    lines.push('; ============================================================================');
+    lines.push('');
+  }
+
+  lines.push(`$ORIGIN ${zoneName}`);
+  lines.push(`$TTL ${defaultTtl}`);
+
+  const recordMap = new Map<string, DnsRecord>();
+  const addRec = (r: DnsRecord) => {
+    if (
+      !includeDnssec &&
+      (r.type === RR_TYPES.RRSIG ||
+        r.type === RR_TYPES.NSEC ||
+        r.type === RR_TYPES.NSEC3 ||
+        r.type === RR_TYPES.DNSKEY ||
+        r.type === RR_TYPES.DS)
+    ) {
+      return;
+    }
+    const key = `${normalizeFqdn(r.name)}|${r.typeName}|${r.rdataText}`;
+    if (!recordMap.has(key)) {
+      recordMap.set(key, {
+        ...r,
+        name: normalizeFqdn(r.name),
+      });
+    }
+  };
+
+  // 1. Collect all records & RRSIGs from analyzed RRsets in this zone
+  for (const rrset of zone.rrsets) {
+    for (const r of rrset.records) {
+      addRec(r);
+    }
+    if (includeDnssec) {
+      for (const rv of rrset.rrsigs) {
+        addRec({
+          name: rrset.name,
+          type: RR_TYPES.RRSIG,
+          typeName: 'RRSIG',
+          rrclass: 1,
+          ttl: rv.rrsigTtl || rrset.ttl,
+          section: 'answer',
+          rdataBase64: '',
+          canonicalRdataBase64: '',
+          rdataText: `${rv.rrsig.typeCoveredName} ${rv.rrsig.algorithm} ${rv.rrsig.labels} ${rv.rrsig.originalTtl} ${formatRrsigTimestamp(rv.rrsig.expiration)} ${formatRrsigTimestamp(rv.rrsig.inception)} ${rv.rrsig.keyTag} ${rv.rrsig.signerName} ${rv.rrsig.signatureBase64}`,
+          parsed: rv.rrsig,
+        });
+      }
+    }
+  }
+
+  // 2. Ensure SOA is present if zone.soa was parsed from authority section
+  const hasSoa = Array.from(recordMap.values()).some(
+    (r) => r.name === zoneName && r.type === RR_TYPES.SOA
+  );
+  if (!hasSoa && zone.soa) {
+    addRec({
+      name: zoneName,
+      type: RR_TYPES.SOA,
+      typeName: 'SOA',
+      rrclass: 1,
+      ttl: zone.soa.minimum || 3600,
+      section: 'authority',
+      rdataBase64: '',
+      canonicalRdataBase64: '',
+      rdataText: `${zone.soa.mname} ${zone.soa.rname} ${zone.soa.serial} ${zone.soa.refresh} ${zone.soa.retry} ${zone.soa.expire} ${zone.soa.minimum}`,
+      parsed: zone.soa,
+    });
+  }
+
+  // 3. Ensure NS records are present from zone.nameservers if not already in zone.rrsets
+  const hasApexNs = Array.from(recordMap.values()).some(
+    (r) => r.name === zoneName && r.type === RR_TYPES.NS
+  );
+  if (!hasApexNs && zone.nameservers.length > 0) {
+    for (const ns of zone.nameservers) {
+      addRec({
+        name: zoneName,
+        type: RR_TYPES.NS,
+        typeName: 'NS',
+        rrclass: 1,
+        ttl: defaultTtl,
+        section: 'answer',
+        rdataBase64: '',
+        canonicalRdataBase64: '',
+        rdataText: normalizeFqdn(ns.hostname),
+        parsed: { kind: 'GENERIC', target: normalizeFqdn(ns.hostname) },
+      });
+    }
+  }
+
+  // 4. Also harvest any additional Answer records from snapshot.queries belonging to this zone
+  // (e.g., TXT records from SPF/DMARC/DKIM/MTA-STS/BIMI probes, SRV records, etc.)
+  if (snapshot) {
+    for (const q of snapshot.queries) {
+      if (
+        q.packet.flags.rcode !== 0 ||
+        q.purpose.startsWith('BGP ASN lookup') ||
+        q.purpose.startsWith('DNSBL reputation lookup') ||
+        q.purpose.startsWith('Wildcard probe')
+      ) {
+        continue;
+      }
+      for (const ans of q.packet.answers) {
+        const ownerZone = findDeepestMatchingZoneForOwner(ans.name, allZoneNames);
+        if (ownerZone === zoneName) {
+          addRec(ans);
+        }
+      }
+    }
+  }
+
+  const sortedRecords = Array.from(recordMap.values()).sort((a, b) => {
+    // Keep zone apex SOA & NS at the very top of the zone
+    const aIsApexTop = a.name === zoneName && (a.typeName === 'SOA' || a.typeName === 'NS');
+    const bIsApexTop = b.name === zoneName && (b.typeName === 'SOA' || b.typeName === 'NS');
+    if (aIsApexTop !== bIsApexTop) return aIsApexTop ? -1 : 1;
+
+    const ownerCmp = compareCanonicalDnsNames(a.name, b.name);
+    if (ownerCmp !== 0) return ownerCmp;
+
+    const pa = ZONEFILE_TYPE_PRIORITY[a.typeName] ?? 20;
+    const pb = ZONEFILE_TYPE_PRIORITY[b.typeName] ?? 20;
+    if (pa !== pb) return pa - pb;
+    return a.rdataText.localeCompare(b.rdataText);
+  });
+
+  for (const rec of sortedRecords) {
+    lines.push(formatMasterRecordLine(rec));
+  }
+
+  return lines.join('\n') + '\n';
+}
+
+/**
+ * Formats all discovered authoritative zones (or a filtered zone) in an `AnalysisSnapshot`
+ * as a standards-compliant RFC 1035 Master Zonefile (`.zone`).
+ */
+export function formatSnapshotAsZonefile(
+  snapshot: AnalysisSnapshot,
+  options: { zoneFilter?: string; includeDnssecRecords?: boolean } = {}
+): string {
+  const includeDnssec = options.includeDnssecRecords ?? true;
+  const headerLines: string[] = [
+    '; ============================================================================',
+    '; DigDeep (https://digdeep.fyi) — RFC 1035 Master Zonefile Export',
+    `; Target: ${snapshot.targetName} [${snapshot.queryTypes.join(', ')}]${snapshot.mode ? ` (mode: ${snapshot.mode})` : ''}`,
+    `; Captured: ${new Date(snapshot.capturedAt).toISOString()} via ${snapshot.dohEndpoint}`,
+    `; Overall Validation Status: ${snapshot.overallStatus.toUpperCase()}`,
+    '; ============================================================================',
+    '',
+  ];
+
+  const targetZones = options.zoneFilter
+    ? snapshot.zones.filter((z) => normalizeFqdn(z.zoneName) === normalizeFqdn(options.zoneFilter!))
+    : // Order deepest leaf zone first when exporting a domain, or root -> leaf
+      [...snapshot.zones].sort((a, b) => b.depth - a.depth);
+
+  const sections = targetZones.map((zone) => {
+    const body = formatZoneAsZonefile(zone, snapshot, {
+      includeDnssecRecords: includeDnssec,
+      includeHeader: false,
+    });
+    return `; --- Zone: ${zone.zoneName} (${zone.status.toUpperCase()} · ${zone.nsecMode}) ---\n${body}`;
+  });
+
+  return headerLines.join('\n') + sections.join('\n');
+}
+
+/**
+ * Triggers a browser download of a text file (such as an RFC 1035 `.zone` master file).
+ */
+export function downloadTextFile(
+  content: string,
+  filename: string,
+  mimeType = 'text/dns;charset=utf-8'
+): void {
+  if (typeof document === 'undefined' || typeof Blob === 'undefined') return;
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

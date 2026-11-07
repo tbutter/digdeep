@@ -1,6 +1,11 @@
+import { useMemo, useState } from 'react';
 import {
   AlertTriangle,
+  Check,
   CheckCircle2,
+  Copy,
+  Download,
+  FileCode2,
   FileText,
   Fingerprint,
   Globe,
@@ -10,6 +15,11 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { formatAlgorithm, formatDigestType } from '../dns/constants';
+import {
+  downloadTextFile,
+  formatSnapshotAsZonefile,
+  formatZoneAsZonefile,
+} from '../dns/digFormat';
 import { displayFqdn } from '../dns/encoding';
 import type { AnalysisSnapshot } from '../dns/types';
 import { IpHoverBadge, RpkiStatusBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
@@ -17,9 +27,111 @@ import { StatusBadge } from './StatusBadge';
 
 export function ZonesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
   seedIpAsnCacheFromSnapshot(snapshot);
+  const [showZonefilePreview, setShowZonefilePreview] = useState(false);
+  const [includeDnssecInZonefile, setIncludeDnssecInZonefile] = useState(true);
+  const [copiedZoneKey, setCopiedZoneKey] = useState<string | null>(null);
+
+  const fullZonefileText = useMemo(
+    () =>
+      formatSnapshotAsZonefile(snapshot, {
+        includeDnssecRecords: includeDnssecInZonefile,
+      }),
+    [snapshot, includeDnssecInZonefile]
+  );
+
+  const snapshotZoneFilename = `${
+    snapshot.displayDomain === '.'
+      ? 'root'
+      : snapshot.displayDomain.replace(/[^a-z0-9.-]/gi, '_')
+  }.zone`;
+
+  const handleCopyZoneText = (key: string, text: string) => {
+    navigator.clipboard?.writeText(text);
+    setCopiedZoneKey(key);
+    setTimeout(() => setCopiedZoneKey((cur) => (cur === key ? null : cur)), 1500);
+  };
+
   return (
     <div className="space-y-5">
-      {snapshot.zones.map((zone) => (
+      {/* RFC 1035 Master Zonefile (.zone) Export & Preview Bar */}
+      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/80 p-3.5 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <FileCode2 className="w-4 h-4 text-cyan-500" />
+            <span className="font-semibold text-xs text-slate-800 dark:text-slate-100">
+              RFC 1035 Master Zonefile Export (<code className="font-mono">{snapshotZoneFilename}</code>)
+            </span>
+            <span className="text-xs text-slate-500 hidden sm:inline">
+              · BIND / NSD / Knot compatible master file across {snapshot.zones.length} discovered zone
+              {snapshot.zones.length === 1 ? '' : 's'}
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={includeDnssecInZonefile}
+                onChange={(e) => setIncludeDnssecInZonefile(e.target.checked)}
+                className="rounded border-slate-300 dark:border-slate-700 text-cyan-500 focus:ring-cyan-500"
+              />
+              <span>Include DNSSEC RRs (DNSKEY/DS/RRSIG/NSEC)</span>
+            </label>
+
+            <button
+              type="button"
+              onClick={() => setShowZonefilePreview((v) => !v)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-cyan-500 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 cursor-pointer"
+            >
+              <FileCode2 className="w-3.5 h-3.5 text-cyan-500" />
+              <span>{showZonefilePreview ? 'Hide Zonefile' : 'Preview Zonefile'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleCopyZoneText('all', fullZonefileText)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-cyan-500 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 cursor-pointer"
+            >
+              {copiedZoneKey === 'all' ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-emerald-500" />
+                  <span>Copied!</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>Copy .zone</span>
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => downloadTextFile(fullZonefileText, snapshotZoneFilename)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 px-2.5 py-1 text-xs font-semibold cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Export Zonefile (.zone)</span>
+            </button>
+          </div>
+        </div>
+
+        {showZonefilePreview && (
+          <div className="rounded-lg border border-slate-800 bg-slate-950 p-3.5 max-h-80 overflow-auto">
+            <pre className="font-mono text-xs text-slate-200 whitespace-pre leading-relaxed">
+              {fullZonefileText}
+            </pre>
+          </div>
+        )}
+      </div>
+
+      {snapshot.zones.map((zone) => {
+        const singleZoneFilename = `${
+          zone.zoneName === '.'
+            ? 'root'
+            : displayFqdn(zone.zoneName).replace(/[^a-z0-9.-]/gi, '_')
+        }.zone`;
+        return (
         <div
           key={zone.zoneName}
           className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 overflow-hidden"
@@ -35,7 +147,50 @@ export function ZonesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
                 {zone.nsecMode}
               </span>
             </div>
-            <StatusBadge status={zone.status} />
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  handleCopyZoneText(
+                    zone.zoneName,
+                    formatZoneAsZonefile(zone, snapshot, {
+                      includeDnssecRecords: includeDnssecInZonefile,
+                    })
+                  )
+                }
+                className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-950 px-2 py-1 text-[11px] font-mono text-slate-600 dark:text-slate-300 cursor-pointer"
+                title={`Copy RFC 1035 zonefile for ${zone.zoneName}`}
+              >
+                {copiedZoneKey === zone.zoneName ? (
+                  <>
+                    <Check className="w-3 h-3 text-emerald-500" />
+                    <span>Copied</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3 h-3" />
+                    <span>Copy .zone</span>
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  downloadTextFile(
+                    formatZoneAsZonefile(zone, snapshot, {
+                      includeDnssecRecords: includeDnssecInZonefile,
+                    }),
+                    singleZoneFilename
+                  )
+                }
+                className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-950 px-2 py-1 text-[11px] font-mono text-cyan-700 dark:text-cyan-300 cursor-pointer"
+                title={`Download ${singleZoneFilename}`}
+              >
+                <Download className="w-3 h-3" />
+                <span>.zone</span>
+              </button>
+              <StatusBadge status={zone.status} />
+            </div>
           </div>
 
           <div className="p-5 space-y-5">
@@ -647,7 +802,8 @@ export function ZonesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
             )}
           </div>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

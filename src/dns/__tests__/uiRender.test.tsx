@@ -4,6 +4,7 @@ import { App } from '../../App';
 import { AuditPanel } from '../../components/AuditPanel';
 import { ChainGraphView, prepareExportSvgElement } from '../../components/ChainGraphView';
 import { ConsensusView } from '../../components/ConsensusView';
+import { GraphInspector } from '../../components/GraphInspector';
 import { HistoryPanel } from '../../components/HistoryPanel';
 import {
   ensureIpAsnInfoLoaded,
@@ -88,12 +89,29 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       const responsesHtml = renderToStaticMarkup(<ResponsesPanel snapshot={cfSnap} />);
       expect(responsesHtml).toContain('HEADER');
       expect(responsesHtml).toContain('application/dns-message');
+      expect(responsesHtml).toContain('Zonefile (.zone)');
+      expect(responsesHtml).toContain('Export .zone');
+      expect(responsesHtml).toContain('dig +dnssec +multi');
 
       const zonesHtml = renderToStaticMarkup(<ZonesPanel snapshot={cfSnap} />);
       expect(zonesHtml).toContain('. (Root Zone)');
       expect(zonesHtml).toContain('RFC 1912 / 2308 OK');
       expect(zonesHtml).toContain('IN SYNC WITH PARENT DS');
       expect(zonesHtml).toContain('AS13335');
+      expect(zonesHtml).toContain('RFC 1035 Master Zonefile Export');
+      expect(zonesHtml).toContain('Export Zonefile (.zone)');
+
+      const inspectorHtml = renderToStaticMarkup(
+        <GraphInspector
+          selection={{ kind: 'zone', zone: cfSnap.zones[0] }}
+          dohEndpoint={cfSnap.dohEndpoint}
+          capturedAt={cfSnap.capturedAt}
+          validatedAt={cfSnap.validatedAt}
+          onClose={() => {}}
+        />
+      );
+      expect(inspectorHtml).toContain('CLI Reproducer');
+      expect(inspectorHtml).toContain('dig +dnssec +multi');
 
       const historyHtml = renderToStaticMarkup(
         <HistoryPanel
@@ -173,7 +191,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v16');
+    expect(swCode).toContain('digdeep-shell-v17');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge when navigator.onLine is false

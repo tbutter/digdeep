@@ -1,6 +1,7 @@
-import { Check, Copy, ExternalLink, KeyRound, Layers, Link2, Shield, X } from 'lucide-react';
+import { Check, Copy, ExternalLink, KeyRound, Layers, Link2, Shield, Terminal, X } from 'lucide-react';
 import { useState } from 'react';
 import { DNSSEC_ALGORITHMS, formatAlgorithm, formatDigestType } from '../dns/constants';
+import { generateCliReproducerCommands } from '../dns/digFormat';
 import { displayFqdn } from '../dns/encoding';
 import type { NegativeProofVerification, ZoneAnalysis } from '../dns/types';
 import type { GraphEdge, GraphNode } from '../graph/layout';
@@ -11,6 +12,64 @@ export type GraphSelection =
   | { kind: 'node'; node: GraphNode }
   | { kind: 'edge'; edge: GraphEdge }
   | { kind: 'zone'; zone: ZoneAnalysis };
+
+function getCliTargetForSelection(
+  selection: GraphSelection
+): { qname: string; qtypeName: string } | null {
+  if (selection.kind === 'zone') {
+    return {
+      qname: selection.zone.zoneName,
+      qtypeName: selection.zone.dnskeys.length > 0 ? 'DNSKEY' : 'SOA',
+    };
+  }
+  if (selection.kind === 'node') {
+    const n = selection.node;
+    if (n.dnskey) {
+      return { qname: n.dnskey.zone, qtypeName: 'DNSKEY' };
+    }
+    if (n.rrset) {
+      return { qname: n.rrset.name, qtypeName: n.rrset.typeName };
+    }
+    if (n.dsVerifications && n.dsVerifications.length > 0) {
+      return { qname: n.zone, qtypeName: 'DS' };
+    }
+    if (n.negativeNode) {
+      return { qname: n.negativeNode.qname, qtypeName: n.negativeNode.qtypeName };
+    }
+    if (n.delegationProof) {
+      return { qname: n.zone, qtypeName: 'DS' };
+    }
+  }
+  if (selection.kind === 'edge') {
+    const e = selection.edge;
+    if (e.rrsigVerification) {
+      return {
+        qname: e.rrsigVerification.rrsig.signerName,
+        qtypeName: e.rrsigVerification.rrsig.typeCoveredName,
+      };
+    }
+    if (e.dsVerification) {
+      const dsMatch = /^ds-(.+)-\d+$/.exec(e.dsVerification.id);
+      return {
+        qname: dsMatch ? dsMatch[1] : '.',
+        qtypeName: 'DS',
+      };
+    }
+    if (e.cnameEdge) {
+      return {
+        qname: e.cnameEdge.fromName,
+        qtypeName: e.cnameEdge.qtypeName,
+      };
+    }
+    if (e.proof) {
+      return {
+        qname: e.proof.qname,
+        qtypeName: e.proof.qtype ?? 'DS',
+      };
+    }
+  }
+  return null;
+}
 
 function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false);
@@ -121,12 +180,31 @@ function ProofDetails({ proof }: { proof: NegativeProofVerification }) {
 
 export function GraphInspector({
   selection,
+  dohEndpoint,
+  capturedAt,
+  validatedAt,
   onClose,
 }: {
   selection: GraphSelection | null;
+  dohEndpoint?: string;
+  capturedAt?: number;
+  validatedAt?: number;
   onClose: () => void;
 }) {
+  const [cliTool, setCliTool] = useState<'dig' | 'delv' | 'kdig'>('dig');
   if (!selection) return null;
+
+  const cliTarget = getCliTargetForSelection(selection);
+  const cliCommands = cliTarget
+    ? generateCliReproducerCommands({
+        qname: cliTarget.qname,
+        qtypeName: cliTarget.qtypeName,
+        dohEndpoint,
+        cd: true,
+        capturedAt,
+        validatedAt,
+      })
+    : null;
 
   return (
     <aside className="w-full lg:w-[390px] shrink-0 rounded-xl border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md shadow-lg flex flex-col sticky bottom-3 lg:top-44 lg:bottom-auto z-20 max-h-[46vh] lg:max-h-[calc(100vh-12rem)] overflow-hidden">
@@ -600,6 +678,42 @@ export function GraphInspector({
             )}
 
             {selection.edge.proof && <ProofDetails proof={selection.edge.proof} />}
+          </div>
+        )}
+
+        {/* CLI Command Reproducer (dig / delv / kdig) */}
+        {cliCommands && (
+          <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                <Terminal className="w-3.5 h-3.5 text-cyan-500" />
+                <span>CLI Reproducer</span>
+              </div>
+              <div className="inline-flex items-center rounded border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-900 p-0.5">
+                {(['dig', 'delv', 'kdig'] as const).map((tool) => (
+                  <button
+                    key={tool}
+                    type="button"
+                    onClick={() => setCliTool(tool)}
+                    className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-semibold transition-colors cursor-pointer ${
+                      cliTool === tool
+                        ? 'bg-cyan-500 text-slate-950'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    {tool}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 p-2">
+              <code className="font-mono text-[11px] text-cyan-800 dark:text-cyan-300 break-all">
+                {cliCommands[cliTool]}
+              </code>
+              <div className="shrink-0">
+                <CopyButton text={cliCommands[cliTool]} label={`Copy ${cliTool}`} />
+              </div>
+            </div>
           </div>
         )}
       </div>
