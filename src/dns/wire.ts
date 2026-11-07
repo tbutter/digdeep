@@ -633,7 +633,30 @@ function parseRecordRdata(
     };
   }
 
-  // 18. SVCB (64) & HTTPS (65) basic presentation
+  // 18. CSYNC (62): SOA Serial (4), Flags (2), Type Bit Maps (RFC 7477 §2.1.1)
+  if (rrtype === RR_TYPES.CSYNC && rdlength >= 6) {
+    const soaSerial = view.getUint32(0, false);
+    const flags = view.getUint16(4, false);
+    const immediate = (flags & 0x0001) !== 0;
+    const soaMinimum = (flags & 0x0002) !== 0;
+    const types = decodeTypeBitmaps(rawRdata.subarray(6));
+    const typeNames = types.map(rrTypeToString);
+    return {
+      canonicalRdata: new Uint8Array(rawRdata),
+      rdataText: `${soaSerial} ${flags}${typeNames.length > 0 ? ` ${typeNames.join(' ')}` : ''}`,
+      parsed: {
+        kind: 'CSYNC',
+        soaSerial,
+        flags,
+        immediate,
+        soaMinimum,
+        types,
+        typeNames,
+      },
+    };
+  }
+
+  // 19. SVCB (64) & HTTPS (65) basic presentation
   if ((rrtype === RR_TYPES.SVCB || rrtype === RR_TYPES.HTTPS) && rdlength >= 3) {
     const svcPriority = view.getUint16(0, false);
     const targetDec = decodeDnsName(packetBuf, rdataOffset + 2);

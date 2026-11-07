@@ -79,6 +79,9 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
 
       const zonesHtml = renderToStaticMarkup(<ZonesPanel snapshot={cfSnap} />);
       expect(zonesHtml).toContain('. (Root Zone)');
+      expect(zonesHtml).toContain('RFC 1912 / 2308 OK');
+      expect(zonesHtml).toContain('IN SYNC WITH PARENT DS');
+      expect(zonesHtml).toContain('AS13335');
 
       const historyHtml = renderToStaticMarkup(
         <HistoryPanel

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { reverifySnapshot, runDnsvizAnalysis } from '../analyzer';
+import { evaluateSnapshotFromLogs, reverifySnapshot, runDnsvizAnalysis } from '../analyzer';
 import {
   DOH_SERVER_PRESETS,
   IANA_ROOT_TRUST_ANCHORS,
@@ -335,5 +335,152 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
       expect(v6Snap.reverseDns?.bgp?.asns.some((a) => a.asn === 13335)).toBe(true);
     },
     30000
+  );
+
+  it(
+    'audits CDS/CDNSKEY rollover sync (RFC 7344/8078), CSYNC wire parsing (RFC 7477), NS BGP ASN diversity, SOA timers, and dangling NS/CNAME',
+    async () => {
+      // 1. Wire parsing test for CDS (59), CDNSKEY (60), and CSYNC (62)
+      const buildSingleRrPacket = (qname: string, rrtype: number, rdata: Uint8Array) => {
+        const header = new Uint8Array([0, 1, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0]);
+        const nameWire = encodeDnsName(qname, true);
+        const qTail = new Uint8Array([rrtype >> 8, rrtype & 0xff, 0, 1]);
+        const ansMeta = new Uint8Array(10);
+        const v = new DataView(ansMeta.buffer);
+        v.setUint16(0, rrtype, false);
+        v.setUint16(2, 1, false);
+        v.setUint32(4, 3600, false);
+        v.setUint16(8, rdata.length, false);
+        return parseDnsPacket(concatBytes(header, nameWire, qTail, nameWire, ansMeta, rdata));
+      };
+
+      // CSYNC: serial=2026110701 (0x78c3feed), flags=3 (immediate + soaminimum), bitmap window 0 len 4 [A(1), NS(2), AAAA(28)]
+      const csyncRdata = new Uint8Array([
+        0x78,
+        0xc3,
+        0xfe,
+        0xed, // 2026110701
+        0x00,
+        0x03, // flags = 3
+        0x00,
+        0x04,
+        0x60,
+        0x00,
+        0x00,
+        0x08, // bit 1 (A), bit 2 (NS), bit 28 (AAAA)
+      ]);
+      const csyncPkt = buildSingleRrPacket('example.com.', RR_TYPES.CSYNC, csyncRdata);
+      const csyncAns = csyncPkt.answers[0];
+      expect(csyncAns.typeName).toBe('CSYNC');
+      expect(csyncAns.parsed.kind).toBe('CSYNC');
+      if (csyncAns.parsed.kind === 'CSYNC') {
+        expect(csyncAns.parsed.soaSerial).toBe(2026110701);
+        expect(csyncAns.parsed.immediate).toBe(true);
+        expect(csyncAns.parsed.soaMinimum).toBe(true);
+        expect(csyncAns.parsed.typeNames).toEqual(['A', 'NS', 'AAAA']);
+      }
+
+      // 2. Live CDS / CDNSKEY KSK rollover sync & NS BGP ASN diversity on cloudflare.com
+      const cfSnap = await runDnsvizAnalysis('cloudflare.com', { queryTypes: ['A'] });
+      const cfLeaf = cfSnap.zones.find((z) => z.zoneName === 'cloudflare.com.');
+      expect(cfLeaf).toBeDefined();
+      expect(cfLeaf?.cdsRollover?.present).toBe(true);
+      expect(cfLeaf?.cdsRollover?.status).toBe('in-sync');
+      expect(cfLeaf?.cdsRollover?.signedByKsk).toBe(true);
+      expect(cfLeaf?.cdsRollover?.cdsRecords[0]?.matchesParentDs).toBe(true);
+      expect(cfSnap.findings.some((f) => f.code === 'CDS_PARENT_IN_SYNC')).toBe(true);
+
+      // Nameserver BGP ASN diversity on cloudflare.com (all in AS13335)
+      expect(cfLeaf?.nsDiversity?.uniqueAsns.some((a) => a.asn === 13335)).toBe(true);
+      expect(cfLeaf?.nsDiversity?.singleAsn).toBe(true);
+      expect(cfLeaf?.nsDiversity?.hasIpv6).toBe(true);
+      expect(cfSnap.findings.some((f) => f.code === 'NS_SINGLE_ASN')).toBe(true);
+      expect(cfLeaf?.soaAudit?.valid).toBe(true);
+
+      // 3. Synthetic evaluation for SOA timer anomalies, RFC 8078 CDS delete signal, dangling NS, and dangling CNAME
+      const firstNsHost = cfLeaf?.nameservers[0]?.hostname ?? 'ns3.cloudflare.com.';
+      const mutatedQueries = cfSnap.queries.map((q) => {
+        // Mutate cloudflare.com SOA to have retry >= refresh and minimum > 86400
+        if (q.qname === 'cloudflare.com.' && q.qtype === RR_TYPES.SOA) {
+          return {
+            ...q,
+            packet: {
+              ...q.packet,
+              answers: q.packet.answers.map((ans) =>
+                ans.type === RR_TYPES.SOA && ans.parsed.kind === 'SOA'
+                  ? {
+                      ...ans,
+                      parsed: {
+                        ...ans.parsed,
+                        refresh: 3600,
+                        retry: 7200, // retry >= refresh
+                        expire: 5000, // expire < refresh + retry
+                        minimum: 172800, // minimum > 86400
+                      },
+                    }
+                  : ans
+              ),
+            },
+          };
+        }
+        // Mutate cloudflare.com CDS to RFC 8078 delete signal (0 0 0 00)
+        if (q.qname === 'cloudflare.com.' && q.qtype === RR_TYPES.CDS) {
+          return {
+            ...q,
+            packet: {
+              ...q.packet,
+              answers: q.packet.answers.map((ans) =>
+                ans.type === RR_TYPES.CDS && ans.parsed.kind === 'DS'
+                  ? {
+                      ...ans,
+                      parsed: {
+                        ...ans.parsed,
+                        keyTag: 0,
+                        algorithm: 0,
+                        digestType: 0,
+                        digestHex: '00',
+                      },
+                    }
+                  : ans
+              ),
+            },
+          };
+        }
+        // Simulate first NS hostname returning NXDOMAIN (rcode=3) with 0 answers
+        if (q.purpose.startsWith('Nameserver IP') && q.qname === firstNsHost) {
+          return {
+            ...q,
+            packet: {
+              ...q.packet,
+              flags: { ...q.packet.flags, rcode: 3 },
+              answers: [],
+            },
+          };
+        }
+        return q;
+      });
+
+      const mutatedSnap = await evaluateSnapshotFromLogs({
+        id: 'test-mutated-resilience',
+        targetName: cfSnap.targetName,
+        queryTypes: cfSnap.queryTypes,
+        dohEndpoint: cfSnap.dohEndpoint,
+        capturedAt: cfSnap.capturedAt,
+        validatedAt: cfSnap.validatedAt,
+        durationMs: cfSnap.durationMs,
+        queries: mutatedQueries,
+        trustAnchors: cfSnap.trustAnchorsUsed,
+      });
+
+      const mutLeaf = mutatedSnap.zones.find((z) => z.zoneName === 'cloudflare.com.');
+      expect(mutLeaf?.soaAudit?.valid).toBe(false);
+      expect(mutLeaf?.soaAudit?.issues.length).toBe(3);
+      expect(mutatedSnap.findings.some((f) => f.code === 'SOA_TIMER_ANOMALY')).toBe(true);
+      expect(mutLeaf?.cdsRollover?.status).toBe('delete-signal');
+      expect(mutatedSnap.findings.some((f) => f.code === 'CDS_DELETE_SIGNAL')).toBe(true);
+      expect(mutLeaf?.nsDiversity?.danglingHosts).toContain(firstNsHost);
+      expect(mutatedSnap.findings.some((f) => f.code === 'DANGLING_NS_TARGET')).toBe(true);
+    },
+    25000
   );
 });

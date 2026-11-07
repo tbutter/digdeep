@@ -172,7 +172,14 @@ export function buildChainGraph(
       if (rr.type === RR_TYPES.NSEC || rr.type === RR_TYPES.NSEC3) {
         return referencedProofRrsetIds.has(rr.id) || rr.isQueryTarget;
       }
-      if ((rr.type === RR_TYPES.SOA || rr.type === RR_TYPES.NS) && !rr.isQueryTarget) {
+      if (
+        (rr.type === RR_TYPES.SOA ||
+          rr.type === RR_TYPES.NS ||
+          rr.type === RR_TYPES.CDS ||
+          rr.type === RR_TYPES.CDNSKEY ||
+          rr.type === RR_TYPES.CSYNC) &&
+        !rr.isQueryTarget
+      ) {
         return filters.showSoaAndNs;
       }
       return true;

@@ -152,6 +152,16 @@ export interface TlsaRdata {
   certAssociationHex: string;
 }
 
+export interface CsyncRdata {
+  kind: 'CSYNC';
+  soaSerial: number;
+  flags: number;
+  immediate: boolean;
+  soaMinimum: boolean;
+  types: number[];
+  typeNames: string[];
+}
+
 export interface GenericRdata {
   kind: 'GENERIC';
   target?: string;
@@ -170,6 +180,7 @@ export type ParsedRdata =
   | CaaRdata
   | TxtRdata
   | TlsaRdata
+  | CsyncRdata
   | GenericRdata;
 
 export interface DnsRecord {
@@ -337,6 +348,71 @@ export interface NameserverEntry {
   hostname: string;
   ipv4: string[];
   ipv6: string[];
+  status?: 'ok' | 'dangling' | 'nodata';
+  asns?: BgpAsnOrganization[];
+  bgpPrefixes?: string[];
+  country?: string;
+  rir?: string;
+}
+
+export interface CdsRecordDetail {
+  keyTag: number;
+  algorithm: number;
+  digestType: number;
+  digestHex: string;
+  isDeleteSignal: boolean;
+  matchesParentDs: boolean;
+  matchesChildDnskey: boolean;
+}
+
+export interface CdnskeyRecordDetail {
+  keyTag: number;
+  flags: number;
+  protocol: number;
+  algorithm: number;
+  publicKeyBase64: string;
+  isDeleteSignal: boolean;
+  matchesChildDnskey: boolean;
+}
+
+export interface CdsRolloverAnalysis {
+  present: boolean;
+  status: 'in-sync' | 'rollover-pending' | 'delete-signal' | 'unsigned-invalid' | 'not-published';
+  cdsRecords: CdsRecordDetail[];
+  cdnskeyRecords: CdnskeyRecordDetail[];
+  cdsDnssecStatus?: ValidationStatus;
+  cdnskeyDnssecStatus?: ValidationStatus;
+  signedByKsk: boolean;
+  parentDsKeyTags: number[];
+  childCdsKeyTags: number[];
+  summary: string;
+}
+
+export interface SoaTimerIssue {
+  parameter: 'refresh' | 'retry' | 'expire' | 'minimum';
+  value: number;
+  severity: 'warning' | 'info';
+  message: string;
+  rfc: string;
+}
+
+export interface SoaAuditSummary {
+  valid: boolean;
+  issues: SoaTimerIssue[];
+  summary: string;
+}
+
+export interface NsDiversityAnalysis {
+  nameserverCount: number;
+  uniqueAsns: BgpAsnOrganization[];
+  uniquePrefixes: string[];
+  hasIpv4: boolean;
+  hasIpv6: boolean;
+  danglingHosts: string[];
+  singleAsn: boolean;
+  singlePrefix: boolean;
+  status: 'diverse' | 'single-asn' | 'single-prefix' | 'dangling' | 'insufficient';
+  summary: string;
 }
 
 export interface ZoneAnalysis {
@@ -365,6 +441,9 @@ export interface ZoneAnalysis {
   negativeNodes: NegativeNode[];
   nameservers: NameserverEntry[];
   soa?: SoaRdata;
+  soaAudit?: SoaAuditSummary;
+  cdsRollover?: CdsRolloverAnalysis;
+  nsDiversity?: NsDiversityAnalysis;
 }
 
 export interface CnameEdge {

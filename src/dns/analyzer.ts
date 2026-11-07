@@ -26,6 +26,7 @@ import {
 } from './encoding';
 import {
   formatCanonicalIpv6,
+  ipToCymruOriginQname,
   parseCymruAsnTxt,
   parseCymruOriginTxt,
   parseIpv4Octets,
@@ -42,6 +43,9 @@ import type {
   AnalyzedRrset,
   AuditFinding,
   BgpAsnOrganization,
+  CdnskeyRecordDetail,
+  CdsRecordDetail,
+  CdsRolloverAnalysis,
   CnameEdge,
   DnsRecord,
   DnskeyRdata,
@@ -49,17 +53,20 @@ import type {
   DsVerification,
   MtaStsPolicyFetchResult,
   NameserverEntry,
+  NsDiversityAnalysis,
   ResolverVerdict,
   ReverseDnsAnalysis,
   ReverseIpBgpInfo,
   ReversePtrTargetEntry,
   RrsigVerification,
+  SoaAuditSummary,
   SoaRdata,
+  SoaTimerIssue,
   ValidationStatus,
   ZoneAnalysis,
 } from './types';
 
-export const SNAPSHOT_ENGINE_VERSION = 7;
+export const SNAPSHOT_ENGINE_VERSION = 8;
 
 export interface AnalyzeOptions extends DohClientOptions {
   queryTypes?: string[];
@@ -357,10 +364,12 @@ export async function runDnsvizAnalysis(
   );
 
   // Phase 4: Resolve IPv4 / IPv6 for the leaf zone(s) authoritative nameservers (up to 6 hosts)
+  // and probe CDS / CDNSKEY (RFC 7344 / RFC 8078) on leaf zone(s)
   currentPhase = 'nameservers';
   const leafZones = zoneList
     .sort((a, b) => getDomainHierarchy(b).length - getDomainHierarchy(a).length)
     .slice(0, 2);
+  const nonRootLeafZones = leafZones.filter((lz) => lz !== '.');
   const nsHosts = new Set<string>();
   const currentLogs = session.getLogs();
   for (const lz of leafZones) {
@@ -373,21 +382,96 @@ export async function runDnsvizAnalysis(
     }
   }
 
-  if (nsHosts.size > 0) {
-    await Promise.all(
-      Array.from(nsHosts).flatMap((host) => [
+  await Promise.all([
+    ...nonRootLeafZones.flatMap((lz) => [
+      session
+        .query(lz, RR_TYPES.CDS, {
+          cd: true,
+          doBit: true,
+          purpose: `Zone CDS (${lz})`,
+        })
+        .catch(() => undefined),
+      session
+        .query(lz, RR_TYPES.CDNSKEY, {
+          cd: true,
+          doBit: true,
+          purpose: `Zone CDNSKEY (${lz})`,
+        })
+        .catch(() => undefined),
+    ]),
+    ...Array.from(nsHosts).flatMap((host) => [
+      session
+        .query(host, RR_TYPES.A, { cd: true, doBit: false, purpose: `Nameserver IP (${host} A)` })
+        .catch(() => undefined),
+      session
+        .query(host, RR_TYPES.AAAA, {
+          cd: true,
+          doBit: false,
+          purpose: `Nameserver IPv6 (${host} AAAA)`,
+        })
+        .catch(() => undefined),
+    ]),
+  ]);
+
+  // Phase 4a: BGP ASN & Prefix Lookup for resolved authoritative nameserver IPs (via Team Cymru DNS)
+  const nsOriginQnames = new Set<string>();
+  for (const log of session.getLogs()) {
+    if (!log.purpose.startsWith('Nameserver IP')) continue;
+    for (const ans of log.packet.answers) {
+      if (ans.type === RR_TYPES.A || ans.type === RR_TYPES.AAAA) {
+        const originQ = ipToCymruOriginQname(ans.rdataText);
+        if (originQ) {
+          nsOriginQnames.add(originQ);
+          if (nsOriginQnames.size >= 12) break;
+        }
+      }
+    }
+    if (nsOriginQnames.size >= 12) break;
+  }
+
+  if (nsOriginQnames.size > 0) {
+    const originLogs = await Promise.all(
+      Array.from(nsOriginQnames).map((originQ) =>
         session
-          .query(host, RR_TYPES.A, { cd: true, doBit: false, purpose: `Nameserver IP (${host} A)` })
-          .catch(() => undefined),
-        session
-          .query(host, RR_TYPES.AAAA, {
-            cd: true,
+          .query(originQ, RR_TYPES.TXT, {
+            cd: false,
             doBit: false,
-            purpose: `Nameserver IPv6 (${host} AAAA)`,
+            purpose: `BGP ASN lookup (${originQ} TXT)`,
           })
-          .catch(() => undefined),
-      ])
+          .catch(() => undefined)
+      )
     );
+    const nsUniqueAsns = new Set<number>();
+    for (const oLog of originLogs) {
+      if (!oLog) continue;
+      const txts: string[] = [];
+      for (const ans of oLog.packet.answers) {
+        if (ans.type === RR_TYPES.TXT && ans.parsed.kind === 'TXT') {
+          txts.push(ans.parsed.joinedText);
+        }
+      }
+      for (const parsed of parseCymruOriginTxt(txts)) {
+        for (const asn of parsed.asns) {
+          nsUniqueAsns.add(asn);
+        }
+      }
+    }
+    if (nsUniqueAsns.size > 0) {
+      await Promise.all(
+        Array.from(nsUniqueAsns)
+          .slice(0, 8)
+          .map((asn) => {
+            const asnQname = `as${asn}.asn.cymru.com.`;
+            return session
+              .query(asnQname, RR_TYPES.TXT, {
+                cd: false,
+                doBit: false,
+                purpose: `BGP ASN lookup (${asnQname} TXT)`,
+              })
+              .catch(() => undefined);
+          })
+      );
+    }
   }
 
   // Phase 4b: Reverse DNS Forward-Confirmed rDNS (FCrDNS) & Team Cymru BGP ASN Lookup
@@ -803,17 +887,113 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
   const zonesByName = new Map<string, ZoneAnalysis>();
   const authenticatedKeyTagsByZone = new Map<string, Set<number>>();
 
-  // Resolve NS IP map from helper logs
-  const nsIpMap = new Map<string, { ipv4: string[]; ipv6: string[] }>();
+  // Build ASN organization lookup table from all Team Cymru AS<n>.asn.cymru.com TXT logs
+  const cymruAsnOrgMap = new Map<number, BgpAsnOrganization>();
+  for (const log of queries) {
+    if (log.qtype === RR_TYPES.TXT && /^as\d+\.asn\.cymru\.com\.$/i.test(log.qname)) {
+      const txts: string[] = [];
+      for (const ans of log.packet.answers) {
+        if (ans.type === RR_TYPES.TXT && ans.parsed.kind === 'TXT') {
+          txts.push(ans.parsed.joinedText);
+        }
+      }
+      const parsedAsn = parseCymruAsnTxt(txts);
+      if (parsedAsn) {
+        cymruAsnOrgMap.set(parsedAsn.asn, {
+          asn: parsedAsn.asn,
+          asName: parsedAsn.asName,
+          country: parsedAsn.country,
+          rir: parsedAsn.rir,
+          allocatedDate: parsedAsn.allocatedDate,
+        });
+      }
+    }
+  }
+
+  const lookupIpBgpMeta = (ip: string) => {
+    const originQname = ipToCymruOriginQname(ip);
+    if (!originQname) return undefined;
+    const originLog = queries.find((q) => q.qname === originQname && q.qtype === RR_TYPES.TXT);
+    if (!originLog) return undefined;
+    const txts: string[] = [];
+    for (const ans of originLog.packet.answers) {
+      if (ans.type === RR_TYPES.TXT && ans.parsed.kind === 'TXT') {
+        txts.push(ans.parsed.joinedText);
+      }
+    }
+    const origins = parseCymruOriginTxt(txts);
+    if (origins.length === 0) return undefined;
+    const primary = origins[0];
+    const uniqueAsnNums = Array.from(new Set(origins.flatMap((o) => o.asns)));
+    const asns: BgpAsnOrganization[] = uniqueAsnNums.map((asn) => {
+      const org = cymruAsnOrgMap.get(asn);
+      return {
+        asn,
+        asName: org?.asName,
+        country: org?.country ?? primary.country,
+        rir: org?.rir ?? primary.rir,
+        allocatedDate: org?.allocatedDate ?? primary.allocatedDate,
+      };
+    });
+    const bgpPrefixes = Array.from(
+      new Set(origins.map((o) => o.bgpPrefix).filter((p): p is string => Boolean(p)))
+    );
+    return {
+      asns,
+      bgpPrefixes,
+      country: primary.country,
+      rir: primary.rir,
+    };
+  };
+
+  // Resolve NS IP map & resolution status from helper logs
+  const nsIpMap = new Map<
+    string,
+    {
+      ipv4: string[];
+      ipv6: string[];
+      probedA: boolean;
+      probedAAAA: boolean;
+      rcodeA?: number;
+      rcodeAAAA?: number;
+    }
+  >();
   for (const log of queries) {
     if (!log.purpose.startsWith('Nameserver IP')) continue;
-    const entry = nsIpMap.get(log.qname) ?? { ipv4: [], ipv6: [] };
+    const entry = nsIpMap.get(log.qname) ?? {
+      ipv4: [],
+      ipv6: [],
+      probedA: false,
+      probedAAAA: false,
+    };
+    if (log.qtype === RR_TYPES.A) {
+      entry.probedA = true;
+      entry.rcodeA = log.packet.flags.rcode;
+    } else if (log.qtype === RR_TYPES.AAAA) {
+      entry.probedAAAA = true;
+      entry.rcodeAAAA = log.packet.flags.rcode;
+    }
+
+    // Follow CNAME hops inside packet if NS hostname aliases to another name
+    let owner = log.qname;
+    const visited = new Set<string>([owner]);
+    for (let hop = 0; hop < 6; hop++) {
+      const cnameAns = log.packet.answers.find(
+        (r) => r.name === owner && r.type === RR_TYPES.CNAME
+      );
+      if (!cnameAns || cnameAns.parsed.kind !== 'GENERIC' || !cnameAns.parsed.target) break;
+      const next = normalizeFqdn(cnameAns.parsed.target);
+      if (visited.has(next)) break;
+      visited.add(next);
+      owner = next;
+    }
+
     for (const ans of log.packet.answers) {
-      if (ans.name === log.qname && ans.type === RR_TYPES.A && !entry.ipv4.includes(ans.rdataText)) {
+      if (ans.name === owner && ans.type === RR_TYPES.A && !entry.ipv4.includes(ans.rdataText)) {
         entry.ipv4.push(ans.rdataText);
       }
       if (
-        ans.name === log.qname &&
+        ans.name === owner &&
         ans.type === RR_TYPES.AAAA &&
         !entry.ipv6.includes(ans.rdataText)
       ) {
@@ -1409,6 +1589,71 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       (r) => r.name === zoneName && r.type === RR_TYPES.SOA && r.parsed.kind === 'SOA'
     );
     const soa = soaRec?.parsed.kind === 'SOA' ? (soaRec.parsed as SoaRdata) : undefined;
+    const isLeafDelegatedZone =
+      depth >= 2 &&
+      !sortedZoneNames.some((other) => other !== zoneName && isSubdomainOrEqual(other, zoneName));
+
+    // Evaluate SOA timers (RFC 1912 §2.2 / RIPE-203 / RFC 2308)
+    let soaAudit: SoaAuditSummary | undefined;
+    if (soa) {
+      const soaIssues: SoaTimerIssue[] = [];
+      if (soa.retry >= soa.refresh && soa.refresh > 0) {
+        soaIssues.push({
+          parameter: 'retry',
+          value: soa.retry,
+          severity: 'warning',
+          message: `SOA retry (${soa.retry}s) >= refresh (${soa.refresh}s); RFC 1912 §2.2 requires retry to be strictly smaller than refresh.`,
+          rfc: 'RFC 1912 §2.2',
+        });
+      }
+      if (soa.expire < soa.refresh + soa.retry) {
+        soaIssues.push({
+          parameter: 'expire',
+          value: soa.expire,
+          severity: 'warning',
+          message: `SOA expire (${soa.expire}s) < refresh + retry (${soa.refresh + soa.retry}s); secondary nameservers may expire the zone before completing a retry cycle.`,
+          rfc: 'RFC 1912 §2.2',
+        });
+      } else if (soa.expire < 604800) {
+        soaIssues.push({
+          parameter: 'expire',
+          value: soa.expire,
+          severity: 'info',
+          message: `SOA expire (${soa.expire}s / ${(soa.expire / 86400).toFixed(1)}d) is shorter than the 7-day (604800s) minimum recommended by RIPE-203 / RFC 1912 §2.2.`,
+          rfc: 'RFC 1912 §2.2 / RIPE-203',
+        });
+      }
+      if (soa.minimum > 86400) {
+        soaIssues.push({
+          parameter: 'minimum',
+          value: soa.minimum,
+          severity: 'warning',
+          message: `SOA minimum / negative caching TTL (${soa.minimum}s) exceeds RFC 2308 §5 / §4 maximum recommendation of 86400s (24h).`,
+          rfc: 'RFC 2308 §4',
+        });
+      }
+      soaAudit = {
+        valid: soaIssues.length === 0,
+        issues: soaIssues,
+        summary:
+          soaIssues.length === 0
+            ? `SOA timers conform to RFC 1912 / RFC 2308 (${soa.refresh}s refresh, ${soa.retry}s retry, ${Math.round(soa.expire / 86400)}d expire, ${soa.minimum}s min TTL).`
+            : soaIssues.map((i) => i.message).join(' '),
+      };
+      if (isLeafDelegatedZone) {
+        for (const issue of soaIssues) {
+          findings.push({
+            id: `${issue.severity}-soa-${issue.parameter}-${zoneName}`,
+            severity: issue.severity,
+            code: 'SOA_TIMER_ANOMALY',
+            title: `SOA ${issue.parameter} timer anomaly (${issue.value}s) in ${zoneName}`,
+            detail: issue.message,
+            rfc: issue.rfc,
+            zone: zoneName,
+          });
+        }
+      }
+    }
 
     const nsLog = findLog(cdLogs, zoneName, RR_TYPES.NS, true);
     const nameservers: NameserverEntry[] = [];
@@ -1417,13 +1662,346 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
         const host = normalizeFqdn(r.parsed.target);
         if (!nameservers.some((n) => n.hostname === host)) {
           const ips = nsIpMap.get(host);
+          const ipv4 = ips?.ipv4 ?? [];
+          const ipv6 = ips?.ipv6 ?? [];
+          let nsStatus: NameserverEntry['status'];
+          if (ipv4.length > 0 || ipv6.length > 0) {
+            nsStatus = 'ok';
+          } else if (ips && (ips.probedA || ips.probedAAAA)) {
+            const aFailed =
+              ips.probedA && (ips.rcodeA === 3 || ips.rcodeA === 2 || ips.rcodeA === 5);
+            const aaaaFailed =
+              !ips.probedAAAA ||
+              ips.rcodeAAAA === 3 ||
+              ips.rcodeAAAA === 2 ||
+              ips.rcodeAAAA === 5 ||
+              ips.rcodeAAAA === 0;
+            nsStatus = aFailed && aaaaFailed ? 'dangling' : 'nodata';
+          }
+
+          // Aggregate BGP ASN & routed prefixes across all resolved IPs for this nameserver
+          const hostAsnsMap = new Map<number, BgpAsnOrganization>();
+          const hostPrefixes = new Set<string>();
+          let hostCountry: string | undefined;
+          let hostRir: string | undefined;
+          for (const ip of [...ipv4, ...ipv6]) {
+            const bgpMeta = lookupIpBgpMeta(ip);
+            if (!bgpMeta) continue;
+            if (!hostCountry && bgpMeta.country) hostCountry = bgpMeta.country;
+            if (!hostRir && bgpMeta.rir) hostRir = bgpMeta.rir;
+            for (const pfx of bgpMeta.bgpPrefixes) hostPrefixes.add(pfx);
+            for (const a of bgpMeta.asns) {
+              if (!hostAsnsMap.has(a.asn)) hostAsnsMap.set(a.asn, a);
+            }
+          }
+
           nameservers.push({
             hostname: host,
-            ipv4: ips?.ipv4 ?? [],
-            ipv6: ips?.ipv6 ?? [],
+            ipv4,
+            ipv6,
+            ...(nsStatus ? { status: nsStatus } : {}),
+            ...(hostAsnsMap.size > 0 ? { asns: Array.from(hostAsnsMap.values()) } : {}),
+            ...(hostPrefixes.size > 0 ? { bgpPrefixes: Array.from(hostPrefixes) } : {}),
+            ...(hostCountry ? { country: hostCountry } : {}),
+            ...(hostRir ? { rir: hostRir } : {}),
           });
         }
       }
+    }
+
+    // Evaluate Nameserver Infrastructure & BGP ASN Diversity
+    let nsDiversity: NsDiversityAnalysis | undefined;
+    if (nameservers.length > 0) {
+      const zoneAsnsMap = new Map<number, BgpAsnOrganization>();
+      const zonePrefixes = new Set<string>();
+      const danglingHosts: string[] = [];
+      let hasIpv4 = false;
+      let hasIpv6 = false;
+      let anyNsProbed = false;
+
+      for (const ns of nameservers) {
+        if (ns.ipv4.length > 0) hasIpv4 = true;
+        if (ns.ipv6.length > 0) hasIpv6 = true;
+        if (ns.status !== undefined) anyNsProbed = true;
+        if (ns.status === 'dangling') danglingHosts.push(ns.hostname);
+        for (const a of ns.asns ?? []) {
+          if (!zoneAsnsMap.has(a.asn)) zoneAsnsMap.set(a.asn, a);
+        }
+        for (const pfx of ns.bgpPrefixes ?? []) {
+          zonePrefixes.add(pfx);
+        }
+      }
+
+      const uniqueAsns = Array.from(zoneAsnsMap.values());
+      const uniquePrefixes = Array.from(zonePrefixes);
+      const singleAsn = nameservers.length >= 2 && uniqueAsns.length === 1;
+      const singlePrefix = nameservers.length >= 2 && uniquePrefixes.length === 1;
+
+      let divStatus: NsDiversityAnalysis['status'] = 'diverse';
+      if (danglingHosts.length > 0) {
+        divStatus = 'dangling';
+      } else if (nameservers.length < 2) {
+        divStatus = 'insufficient';
+      } else if (singlePrefix) {
+        divStatus = 'single-prefix';
+      } else if (singleAsn) {
+        divStatus = 'single-asn';
+      }
+
+      let divSummary = `${nameservers.length} authoritative nameserver${nameservers.length === 1 ? '' : 's'}`;
+      if (uniqueAsns.length > 0) {
+        const asnLabels = uniqueAsns
+          .map((a) => `AS${a.asn}${a.asName ? ` (${a.asName})` : ''}`)
+          .join(', ');
+        divSummary += ` across ${uniqueAsns.length} BGP ASN${uniqueAsns.length === 1 ? '' : 's'} [${asnLabels}]`;
+      }
+      if (uniquePrefixes.length > 0) {
+        divSummary += ` and ${uniquePrefixes.length} routed prefix${uniquePrefixes.length === 1 ? '' : 'es'}`;
+      }
+      divSummary += '.';
+
+      if (anyNsProbed || uniqueAsns.length > 0) {
+        nsDiversity = {
+          nameserverCount: nameservers.length,
+          uniqueAsns,
+          uniquePrefixes,
+          hasIpv4,
+          hasIpv6,
+          danglingHosts,
+          singleAsn,
+          singlePrefix,
+          status: divStatus,
+          summary: divSummary,
+        };
+      }
+
+      if (isLeafDelegatedZone && anyNsProbed) {
+        for (const dHost of danglingHosts) {
+          const dMeta = nsIpMap.get(dHost);
+          const rcodeName =
+            dMeta?.rcodeA !== undefined ? rcodeToString(dMeta.rcodeA) : 'NXDOMAIN/SERVFAIL';
+          findings.push({
+            id: `warn-dangling-ns-${zoneName}-${dHost}`,
+            severity: 'warning',
+            code: 'DANGLING_NS_TARGET',
+            title: `Dangling or unresolvable authoritative NS ${displayFqdn(dHost)} in ${zoneName}`,
+            detail: `Authoritative nameserver ${displayFqdn(dHost)} for ${zoneName} failed to resolve to any IPv4/IPv6 address (${rcodeName}), creating lame delegation or subdomain takeover risk.`,
+            rfc: 'RFC 1912 §2.8 / RFC 2182',
+            zone: zoneName,
+          });
+        }
+        if (singleAsn && uniqueAsns[0]) {
+          const onlyAsn = uniqueAsns[0];
+          findings.push({
+            id: `info-ns-single-asn-${zoneName}`,
+            severity: 'info',
+            code: 'NS_SINGLE_ASN',
+            title: `All ${nameservers.length} authoritative nameservers for ${zoneName} share a single BGP ASN (AS${onlyAsn.asn})`,
+            detail: `All authoritative nameservers (${nameservers.map((n) => displayFqdn(n.hostname)).join(', ')}) route through AS${onlyAsn.asn}${onlyAsn.asName ? ` (${onlyAsn.asName})` : ''}${singlePrefix && uniquePrefixes[0] ? ` in a single BGP prefix (${uniquePrefixes[0]})` : ''}. RFC 2182 §3.1 recommends topological and ASN diversity to avoid a single routing point of failure.`,
+            rfc: 'RFC 2182 §3.1',
+            zone: zoneName,
+          });
+        }
+        if (singlePrefix && uniquePrefixes[0]) {
+          findings.push({
+            id: `info-ns-single-prefix-${zoneName}`,
+            severity: 'info',
+            code: 'NS_SINGLE_PREFIX',
+            title: `All authoritative nameservers for ${zoneName} reside in a single routed BGP prefix (${uniquePrefixes[0]})`,
+            detail: `Every resolved nameserver IP for ${zoneName} is announced within ${uniquePrefixes[0]}. A single BGP route withdrawal or prefix hijack would affect all authoritative nameservers simultaneously.`,
+            rfc: 'RFC 2182 §3.1',
+            zone: zoneName,
+          });
+        }
+        if (hasIpv4 && !hasIpv6) {
+          findings.push({
+            id: `info-ns-no-ipv6-${zoneName}`,
+            severity: 'info',
+            code: 'NS_NO_IPV6',
+            title: `IPv4-only authoritative nameservers for ${zoneName} (no AAAA records)`,
+            detail: `None of the probed authoritative nameservers for ${zoneName} (${nameservers.map((n) => displayFqdn(n.hostname)).join(', ')}) publish IPv6 AAAA glue/addresses.`,
+            rfc: 'RFC 3901',
+            zone: zoneName,
+          });
+        }
+      }
+    }
+
+    // Evaluate Automated DNSSEC Rollover Sync (CDS / CDNSKEY — RFC 7344 & RFC 8078)
+    let cdsRollover: CdsRolloverAnalysis | undefined;
+    const cdsRrset = analyzedRrsets.find((r) => r.name === zoneName && r.type === RR_TYPES.CDS);
+    const cdnskeyRrset = analyzedRrsets.find(
+      (r) => r.name === zoneName && r.type === RR_TYPES.CDNSKEY
+    );
+    const cdsLog = findLog(cdLogs, zoneName, RR_TYPES.CDS, true);
+    const cdnskeyLog = findLog(cdLogs, zoneName, RR_TYPES.CDNSKEY, true);
+
+    if (cdsRrset || cdnskeyRrset || cdsLog || cdnskeyLog) {
+      const parentDsTagSet = new Set(dsVerifications.map((d) => d.ds.keyTag));
+      const childDnskeyTagSet = new Set(
+        analyzedDnskeys.filter((k) => k.role !== 'missing').map((k) => k.keyTag)
+      );
+      const sepKeyTagSet = new Set(
+        analyzedDnskeys
+          .filter((k) => k.role !== 'missing' && (k.isSep || k.matchedByParentDs))
+          .map((k) => k.keyTag)
+      );
+
+      const cdsRecords: CdsRecordDetail[] = [];
+      for (const rec of cdsRrset?.records ?? []) {
+        if (rec.parsed.kind !== 'DS') continue;
+        const parsedCds = rec.parsed;
+        const isDeleteSignal =
+          parsedCds.keyTag === 0 &&
+          parsedCds.algorithm === 0 &&
+          parsedCds.digestType === 0 &&
+          /^0+$/.test(parsedCds.digestHex);
+        const matchesParentDs = dsVerifications.some(
+          (d) =>
+            d.ds.keyTag === parsedCds.keyTag &&
+            d.ds.algorithm === parsedCds.algorithm &&
+            d.ds.digestType === parsedCds.digestType &&
+            d.ds.digestHex.toUpperCase() === parsedCds.digestHex.toUpperCase()
+        );
+        const matchesChildDnskey = childDnskeyTagSet.has(parsedCds.keyTag);
+        cdsRecords.push({
+          keyTag: parsedCds.keyTag,
+          algorithm: parsedCds.algorithm,
+          digestType: parsedCds.digestType,
+          digestHex: parsedCds.digestHex,
+          isDeleteSignal,
+          matchesParentDs,
+          matchesChildDnskey,
+        });
+      }
+
+      const cdnskeyRecords: CdnskeyRecordDetail[] = [];
+      for (const rec of cdnskeyRrset?.records ?? []) {
+        if (rec.parsed.kind !== 'DNSKEY') continue;
+        const isDeleteSignal =
+          rec.parsed.flags === 0 && rec.parsed.protocol === 3 && rec.parsed.algorithm === 0;
+        const matchesChildDnskey = childDnskeyTagSet.has(rec.parsed.keyTag);
+        cdnskeyRecords.push({
+          keyTag: rec.parsed.keyTag,
+          flags: rec.parsed.flags,
+          protocol: rec.parsed.protocol,
+          algorithm: rec.parsed.algorithm,
+          publicKeyBase64: rec.parsed.publicKeyBase64,
+          isDeleteSignal,
+          matchesChildDnskey,
+        });
+      }
+
+      const present = cdsRecords.length > 0 || cdnskeyRecords.length > 0;
+      const signedByKsk =
+        (cdsRrset?.rrsigs.some(
+          (rv) => rv.cryptoValid && rv.timeValid && sepKeyTagSet.has(rv.signerKeyTag)
+        ) ??
+          false) ||
+        (cdnskeyRrset?.rrsigs.some(
+          (rv) => rv.cryptoValid && rv.timeValid && sepKeyTagSet.has(rv.signerKeyTag)
+        ) ??
+          false);
+
+      const parentDsKeyTags = Array.from(parentDsTagSet);
+      const childCdsKeyTags = Array.from(
+        new Set([
+          ...cdsRecords.filter((c) => !c.isDeleteSignal).map((c) => c.keyTag),
+          ...cdnskeyRecords.filter((c) => !c.isDeleteSignal).map((c) => c.keyTag),
+        ])
+      );
+
+      let rolloverStatus: CdsRolloverAnalysis['status'] = 'not-published';
+      let rolloverSummary = `No CDS or CDNSKEY records published at ${zoneName}.`;
+
+      if (present) {
+        const hasDeleteSignal =
+          cdsRecords.some((c) => c.isDeleteSignal) ||
+          cdnskeyRecords.some((c) => c.isDeleteSignal);
+        const isBogusOrUnsigned =
+          cdsRrset?.status === 'bogus' ||
+          cdnskeyRrset?.status === 'bogus' ||
+          !signedByKsk;
+
+        if (hasDeleteSignal) {
+          rolloverStatus = 'delete-signal';
+          rolloverSummary = `${zoneName} publishes an RFC 8078 §4 CDS/CDNSKEY delete signal (algorithm 0), requesting parent ${parentZone ?? '.'} to remove its DS RRset and transition to unsigned.`;
+          findings.push({
+            id: `warn-cds-delete-${zoneName}`,
+            severity: 'warning',
+            code: 'CDS_DELETE_SIGNAL',
+            title: `RFC 8078 CDS/CDNSKEY DS deletion signal published at ${zoneName}`,
+            detail: rolloverSummary,
+            rfc: 'RFC 8078 §4',
+            zone: zoneName,
+            targetId: cdsRrset?.id ?? cdnskeyRrset?.id,
+          });
+        } else if (isBogusOrUnsigned) {
+          rolloverStatus = 'unsigned-invalid';
+          rolloverSummary = `CDS/CDNSKEY RRset at ${zoneName} is not validly signed by an active SEP KSK (RFC 7344 §4.1 requires KSK signature).`;
+          findings.push({
+            id: `warn-cds-invalid-${zoneName}`,
+            severity: 'warning',
+            code: 'CDS_WITHOUT_KSK_RRSIG',
+            title: `CDS/CDNSKEY at ${zoneName} lacks valid KSK signature`,
+            detail: rolloverSummary,
+            rfc: 'RFC 7344 §4.1',
+            zone: zoneName,
+            targetId: cdsRrset?.id ?? cdnskeyRrset?.id,
+          });
+        } else {
+          const allChildTagsInParent =
+            childCdsKeyTags.length > 0 &&
+            childCdsKeyTags.every((t) => parentDsTagSet.has(t)) &&
+            parentDsKeyTags.every((t) => childCdsKeyTags.includes(t));
+
+          if (allChildTagsInParent) {
+            rolloverStatus = 'in-sync';
+            rolloverSummary = `Child CDS/CDNSKEY (${childCdsKeyTags.map((t) => `#${t}`).join(', ')}) is synchronized with parent ${parentZone ?? '.'} DS RRset and signed by KSK.`;
+            findings.push({
+              id: `info-cds-sync-${zoneName}`,
+              severity: 'info',
+              code: 'CDS_PARENT_IN_SYNC',
+              title: `CDS/CDNSKEY synchronized with parent DS at ${zoneName} (${childCdsKeyTags.map((t) => `#${t}`).join(', ')})`,
+              detail: rolloverSummary,
+              rfc: 'RFC 7344 / RFC 8078',
+              zone: zoneName,
+              targetId: cdsRrset?.id ?? cdnskeyRrset?.id,
+            });
+          } else {
+            rolloverStatus = 'rollover-pending';
+            const parentStr =
+              parentDsKeyTags.length > 0
+                ? parentDsKeyTags.map((t) => `#${t}`).join(', ')
+                : 'none (unsigned delegation)';
+            const childStr = childCdsKeyTags.map((t) => `#${t}`).join(', ');
+            rolloverSummary = `Child ${zoneName} publishes CDS/CDNSKEY for key ${childStr}, while parent ${parentZone ?? '.'} currently publishes DS for ${parentStr} — automated KSK rollover or initial DS bootstrap in progress.`;
+            findings.push({
+              id: `warn-cds-mismatch-${zoneName}`,
+              severity: 'warning',
+              code: 'CDS_PARENT_MISMATCH',
+              title: `CDS/CDNSKEY rollover mismatch between ${zoneName} (${childStr}) and parent ${parentZone ?? '.'} DS (${parentStr})`,
+              detail: rolloverSummary,
+              rfc: 'RFC 7344 / RFC 8078',
+              zone: zoneName,
+              targetId: cdsRrset?.id ?? cdnskeyRrset?.id,
+            });
+          }
+        }
+      }
+
+      cdsRollover = {
+        present,
+        status: rolloverStatus,
+        cdsRecords,
+        cdnskeyRecords,
+        cdsDnssecStatus: cdsRrset?.status,
+        cdnskeyDnssecStatus: cdnskeyRrset?.status,
+        signedByKsk,
+        parentDsKeyTags,
+        childCdsKeyTags,
+        summary: rolloverSummary,
+      };
     }
 
     zonesByName.set(zoneName, {
@@ -1442,6 +2020,9 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       negativeNodes: [],
       nameservers,
       soa,
+      ...(soaAudit ? { soaAudit } : {}),
+      ...(cdsRollover ? { cdsRollover } : {}),
+      ...(nsDiversity ? { nsDiversity } : {}),
     });
   }
 
@@ -1658,7 +2239,35 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
                 qtypeName: qt,
               });
             }
+            if (negKind === 'NXDOMAIN' && !curName.endsWith('.in-addr.arpa.')) {
+              const danglingCnameId = `warn-dangling-cname-${lastCnameFrom}-${curName}`;
+              if (!findings.some((f) => f.id === danglingCnameId)) {
+                findings.push({
+                  id: danglingCnameId,
+                  severity: 'warning',
+                  code: 'DANGLING_CNAME',
+                  title: `Dangling CNAME alias: ${displayFqdn(lastCnameFrom)} -> ${displayFqdn(curName)} (NXDOMAIN)`,
+                  detail: `${displayFqdn(lastCnameFrom)} aliases via CNAME to ${displayFqdn(curName)}, which does not exist (NXDOMAIN in ${authZoneName}). Dangling CNAME records pointing to unclaimed external hostnames or cloud resources pose a subdomain takeover risk.`,
+                  rfc: 'RFC 1034 §3.6.2 / RFC 1912 §2.4',
+                  zone: authZoneName,
+                  targetId: negId,
+                });
+              }
+            }
           }
+        }
+      } else if (lastCnameRrsetId && lastCnameFrom && (rcode === 2 || rcode === 5)) {
+        const danglingCnameId = `warn-dangling-cname-${lastCnameFrom}-${curName}`;
+        if (!findings.some((f) => f.id === danglingCnameId)) {
+          findings.push({
+            id: danglingCnameId,
+            severity: 'warning',
+            code: 'DANGLING_CNAME',
+            title: `Broken CNAME target: ${displayFqdn(lastCnameFrom)} -> ${displayFqdn(curName)} (${rcodeToString(rcode)})`,
+            detail: `${displayFqdn(lastCnameFrom)} aliases via CNAME to ${displayFqdn(curName)}, which failed to resolve (${rcodeToString(rcode)}).`,
+            rfc: 'RFC 1034 §3.6.2',
+            targetId: lastCnameRrsetId,
+          });
         }
       }
     }
