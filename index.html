@@ -11,14 +11,14 @@
     <meta name="apple-mobile-web-app-title" content="DigDeep" />
     <meta name="application-name" content="DigDeep" />
 
-    <title>DigDeep — Client-Side DNSSEC, MX, DANE, SPF, DKIM &amp; DMARC Analyzer</title>
+    <title>DigDeep — Client-Side DNSSEC, Mail, Web/HTTPS &amp; Multi-DoH Analyzer</title>
     <meta
       name="description"
-      content="Interactive client-side DNSSEC chain-of-trust visualizer, MX &amp; SMTP DANE (TLSA) validator, SPF 10-lookup auditor, DKIM key &amp; DMARC policy checker, and DNS-over-HTTPS (DoH) wire packet inspector directly in your browser."
+      content="Interactive client-side DNSSEC chain-of-trust visualizer, Mail (MX, SMTP DANE, SPF, DKIM, DMARC, MTA-STS, BIMI) validator, Web/HTTPS (SVCB, TLS ECH, CAA, DANE, SSHFP) auditor, IPv4/IPv6 Reverse DNS + BGP ASN inspector, and Multi-Resolver DoH Consensus (RFC 8914 EDE) analyzer directly in your browser."
     />
     <meta
       name="keywords"
-      content="DNSSEC visualizer, DNSViz alternative, SMTP DANE checker, TLSA validator, SPF checker, DKIM checker, DMARC analyzer, MX analyzer, DNS over HTTPS, DoH inspector, RRSIG verification, dig online"
+      content="DNSSEC visualizer, DNSViz alternative, SMTP DANE checker, TLSA validator, SPF checker, DKIM checker, DMARC analyzer, MTA-STS checker, HTTPS SVCB ECH, CAA checker, RFC 8914 EDE, DNS over HTTPS, DoH inspector, RRSIG verification, reverse DNS PTR FCrDNS"
     />
     <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1" />
     <link rel="canonical" href="https://digdeep.fyi/" />
@@ -30,11 +30,11 @@
     <meta property="og:url" content="https://digdeep.fyi/" />
     <meta
       property="og:title"
-      content="DigDeep — Client-Side DNSSEC Visualizer &amp; DoH Wire Inspector"
+      content="DigDeep — Client-Side DNSSEC, Mail, Web/HTTPS &amp; Multi-DoH Analyzer"
     />
     <meta
       property="og:description"
-      content="Verify DS, DNSKEY, RRSIG, NSEC/NSEC3 &amp; Black Lies cryptographically in your browser via WebCrypto and RFC 8484 DoH (1.1.1.1, 8.8.8.8, 9.9.9.9, DNS4EU). Zero backend."
+      content="Verify DNSSEC (DS/DNSKEY/RRSIG/NSEC3/CDS), Mail (MX/DANE/SPF/DKIM/DMARC/MTA-STS), Web (HTTPS/SVCB/ECH/CAA/SSHFP), Reverse DNS + BGP ASN &amp; 10-Resolver DoH Consensus (RFC 8914 EDE) in your browser."
     />
     <meta property="og:image" content="https://digdeep.fyi/og-card.png" />
     <meta property="og:image:type" content="image/png" />
@@ -42,7 +42,7 @@
     <meta property="og:image:height" content="630" />
     <meta
       property="og:image:alt"
-      content="DigDeep interactive DNSSEC chain-of-trust graph from IANA Root KSK through org. to iana.org verified in-browser via 1.1.1.1 DoH"
+      content="DigDeep client-side DNSSEC, Mail (MX/DANE/SPF/DKIM/DMARC/MTA-STS), Web (HTTPS/ECH/CAA), Reverse DNS &amp; Multi-DoH Consensus analyzer"
     />
 
     <!-- Twitter / X Large Summary Card -->
@@ -50,11 +50,11 @@
     <meta name="twitter:url" content="https://digdeep.fyi/" />
     <meta
       name="twitter:title"
-      content="DigDeep — Client-Side DNSSEC Visualizer &amp; DoH Wire Inspector"
+      content="DigDeep — Client-Side DNSSEC, Mail, Web/HTTPS &amp; Multi-DoH Analyzer"
     />
     <meta
       name="twitter:description"
-      content="100% browser-side DNSSEC chain-of-trust graph, RRSIG WebCrypto validator, snapshot diffing &amp; RFC 8484 DoH packet inspector."
+      content="100% browser-side DNSSEC chain graph, Mail (DANE/SPF/DKIM/DMARC/MTA-STS), Web (HTTPS/ECH/CAA), Reverse DNS + BGP ASN &amp; Multi-DoH RFC 8914 EDE Consensus."
     />
     <meta name="twitter:image" content="https://digdeep.fyi/og-card.png" />
     <meta
@@ -101,11 +101,13 @@
         "featureList": [
           "100% client-side DNSSEC validation using browser SubtleCrypto",
           "Interactive chain-of-trust SVG and high-DPI PNG graph export",
-          "Multi-resolver RFC 8484 DoH wireformat inspection (Cloudflare 1.1.1.1, Google 8.8.8.8, Quad9 9.9.9.9, DNS4EU)",
+          "Multi-resolver RFC 8484 DoH Consensus matrix & RFC 8914 Extended DNS Error (EDE) protective filtering check across 10 public & protective resolvers",
           "RSASHA1, RSASHA256, RSASHA512, ECDSAP256SHA256, ECDSAP384SHA384, and ED25519 signature verification",
           "NSEC, NSEC3 Opt-Out, wildcard synthesis, and Compact Denial of Existence (Black Lies) proofs",
-          "RFC 8914 Extended DNS Error (EDE) diagnostics, time-travel RRSIG clock override, and snapshot diffing",
-          "MX mail routing, RFC 7671/7672 SMTP DANE (_25._tcp TLSA) verification, RFC 7208 recursive SPF 10-lookup auditing, RFC 6376/8301/8463 DKIM key inspection, and RFC 7489/9091 DMARC policy analysis"
+          "CDS / CDNSKEY (RFC 7344/8078) & CSYNC (RFC 7477) rollover synchronization, NS BGP ASN diversity, SOA timer audit, and dangling NS/CNAME takeover detection",
+          "MX mail routing, RFC 7671/7672 SMTP DANE (_25._tcp TLSA) verification, RFC 7208 recursive SPF 10-lookup auditing, RFC 6376/8301/8463 DKIM key inspection, RFC 7489/9091 DMARC policy analysis, MTA-STS (RFC 8461), TLS-RPT (RFC 8460), and BIMI",
+          "Web & HTTPS analysis: HTTPS/SVCB (RFC 9460), TLS ECHConfigList decoding, ipv4hint/ipv6hint drift, tree-walking CAA (RFC 8659/8657 ACME bindings), _443._tcp DANE TLSA, and SSHFP (RFC 4255)",
+          "IPv4 and IPv6 Reverse DNS (in-addr.arpa / ip6.arpa) chain verification, Forward-Confirmed Reverse DNS (FCrDNS), and Team Cymru BGP ASN lookup"
         ],
         "potentialAction": {
           "@type": "SearchAction",
