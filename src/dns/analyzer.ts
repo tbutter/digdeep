@@ -825,7 +825,8 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       !q.purpose.startsWith('PSL lookup') &&
       !q.purpose.startsWith('Wildcard probe') &&
       !q.purpose.startsWith('Zone TXT') &&
-      !q.purpose.startsWith('Consensus probe')
+      !q.purpose.startsWith('Consensus probe') &&
+      !q.purpose.startsWith('CT CAA lookup')
   );
 
   // Reconstruct set of discovered zones from DNSKEY queries + SOA records
@@ -2593,7 +2594,8 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       log.purpose.startsWith('BGP ASN lookup') ||
       log.purpose.startsWith('DNSBL reputation lookup') ||
       log.purpose.startsWith('PSL lookup') ||
-      log.purpose.startsWith('Consensus probe')
+      log.purpose.startsWith('Consensus probe') ||
+      log.purpose.startsWith('CT CAA lookup')
     ) {
       continue;
     }

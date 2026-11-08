@@ -1232,8 +1232,17 @@ export interface CtCertificateEntry {
   issuerPubkeySha256?: string;
   caaAuthorized: 'authorized' | 'unauthorized-ca' | 'unauthorized-wildcard' | 'unrestricted';
   caaNote: string;
+  effectiveCaaOwners?: string[];
   matchesTlsa?: boolean;
   matchedTlsaSummary?: string;
+}
+
+export interface CtSubdomainCaaPolicy {
+  owner: string;
+  displayOwner: string;
+  issueCas: string[];
+  issuewildCas: string[];
+  records: CaaRecordEntry[];
 }
 
 export interface CtIssuerSummary {
@@ -1265,6 +1274,7 @@ export interface WebCtAnalysis {
   issuers: CtIssuerSummary[];
   certificates: CtCertificateEntry[];
   discoveredSubdomains: string[];
+  subdomainCaaPolicies?: CtSubdomainCaaPolicy[];
   tlsaMatchedCertCount: number;
   summary: string;
 }

@@ -1242,6 +1242,83 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
       });
       expect(reverified.webAnalysis?.ctAnalysis?.status).toBe('caa-mismatch');
 
+      // 3b. Verify full CT log domain chain CAA check: when a subdomain in CT logs (e.g. *.app.delegated.cloudflare.com)
+      // has an intermediate parent CAA record (delegated.cloudflare.com. CAA 0 issue "amazon.com"), the certificate is authorized!
+      const subdomainCaaLog = {
+        ...webSnap.queries[0],
+        id: 'ct-caa-delegated',
+        qname: 'delegated.cloudflare.com.',
+        qtype: RR_TYPES.CAA,
+        qtypeName: 'CAA',
+        cd: true,
+        doBit: true,
+        purpose: 'CT CAA lookup (delegated.cloudflare.com. CAA)',
+        packet: {
+          ...webSnap.queries[0].packet,
+          questions: [{ name: 'delegated.cloudflare.com.', type: RR_TYPES.CAA, typeName: 'CAA', qclass: 1 }],
+          answers: [
+            {
+              name: 'delegated.cloudflare.com.',
+              type: RR_TYPES.CAA,
+              typeName: 'CAA',
+              rrclass: 1,
+              ttl: 300,
+              rdataBase64: '',
+              canonicalRdataBase64: '',
+              rdataText: '0 issue "amazon.com"',
+              parsed: { kind: 'CAA' as const, flags: 0, tag: 'issue', value: 'amazon.com' },
+              section: 'answer' as const,
+            },
+          ],
+          authorities: [],
+          additionals: [],
+        },
+      };
+
+      const subChainCtSnap = await evaluateSnapshotFromLogs({
+        id: 'test-ct-subdomain-caa-chain',
+        mode: 'web',
+        targetName: webSnap.targetName,
+        queryTypes: webSnap.queryTypes,
+        ctLogFetch: {
+          source: 'certspotter',
+          url: 'https://api.certspotter.com/v1/issuances?domain=cloudflare.com&include_subdomains=true',
+          fetchedAt: webSnap.capturedAt,
+          ok: true,
+          includeSubdomains: true,
+          entries: [
+            {
+              id: 'cert-sub-delegated',
+              dnsNames: ['*.delegated.cloudflare.com', '*.app.delegated.cloudflare.com'],
+              issuerFriendlyName: 'Amazon',
+              issuerDn: 'C=US, O=Amazon, CN=Amazon RSA 2048 M02',
+              notBefore: '2026-10-01T00:00:00Z',
+              notAfter: '2027-10-01T00:00:00Z',
+              revoked: false,
+            },
+          ],
+        },
+        dohEndpoint: webSnap.dohEndpoint,
+        capturedAt: webSnap.capturedAt,
+        validatedAt: webSnap.validatedAt,
+        durationMs: webSnap.durationMs,
+        queries: [...webSnap.queries, subdomainCaaLog],
+        trustAnchors: webSnap.trustAnchorsUsed,
+      });
+
+      expect(subChainCtSnap.webAnalysis?.ctAnalysis?.status).toBe('caa-compliant');
+      expect(subChainCtSnap.webAnalysis?.ctAnalysis?.mismatchedActiveCertCount).toBe(0);
+      expect(subChainCtSnap.webAnalysis?.ctAnalysis?.certificates[0]?.caaAuthorized).toBe(
+        'authorized'
+      );
+      expect(subChainCtSnap.webAnalysis?.ctAnalysis?.certificates[0]?.effectiveCaaOwners).toContain(
+        'delegated.cloudflare.com'
+      );
+      expect(subChainCtSnap.webAnalysis?.ctAnalysis?.subdomainCaaPolicies).toHaveLength(1);
+      expect(subChainCtSnap.webAnalysis?.ctAnalysis?.subdomainCaaPolicies?.[0]?.displayOwner).toBe(
+        'delegated.cloudflare.com'
+      );
+
       // 4. Verify CLI Command Reproducer (dig / delv / kdig) & RFC 1035 Master Zonefile (.zone) export (#18)
       const cli = generateCliReproducerCommands({
         qname: 'cloudflare.com.',

@@ -886,7 +886,9 @@ export function WebAnalysisView({
                   const isEnforced =
                     web.caa.status === 'enforced' ||
                     web.caa.status === 'inherited' ||
-                    web.caa.issuewildCas.length > 0;
+                    web.caa.issuewildCas.length > 0 ||
+                    (ct.subdomainCaaPolicies?.length ?? 0) > 0 ||
+                    ct.certificates.some((c) => c.caaAuthorized !== 'unrestricted');
                   return (
                     <div
                       key={iss.friendlyName}
@@ -925,6 +927,45 @@ export function WebAnalysisView({
                     </div>
                   );
                 })}
+              </div>
+            </div>
+          )}
+
+          {/* Subdomain CAA Policies Discovered Along CT Log Chains */}
+          {ct.subdomainCaaPolicies && ct.subdomainCaaPolicies.length > 0 && (
+            <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/5 p-3 space-y-2">
+              <div className="text-xs font-semibold text-emerald-800 dark:text-emerald-200">
+                Subdomain CAA Policies Discovered Along CT Log Domain Chains ({ct.subdomainCaaPolicies.length}):
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {ct.subdomainCaaPolicies.map((pol) => (
+                  <div
+                    key={pol.owner}
+                    className="rounded border border-emerald-500/20 bg-white/80 dark:bg-slate-900/80 px-2.5 py-1.5 text-xs font-mono flex flex-wrap items-center justify-between gap-2"
+                  >
+                    <span className="font-bold text-slate-800 dark:text-slate-100">
+                      {pol.displayOwner}
+                    </span>
+                    <div className="flex flex-wrap items-center gap-1">
+                      {pol.issueCas.map((ca) => (
+                        <span
+                          key={`issue-${ca}`}
+                          className="rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 px-1.5 py-0.5 text-[10px] font-semibold"
+                        >
+                          issue &quot;{ca}&quot;
+                        </span>
+                      ))}
+                      {pol.issuewildCas.map((ca) => (
+                        <span
+                          key={`wild-${ca}`}
+                          className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 px-1.5 py-0.5 text-[10px] font-semibold"
+                        >
+                          issuewild &quot;{ca}&quot;
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           )}
@@ -1035,6 +1076,12 @@ export function WebAnalysisView({
                             title={cert.caaNote}
                           >
                             {verdictMeta.label}
+                            {cert.effectiveCaaOwners &&
+                            cert.effectiveCaaOwners.some(
+                              (o) => o.toLowerCase() !== web.displayDomain.toLowerCase()
+                            )
+                              ? ` (${cert.effectiveCaaOwners.join(', ')})`
+                              : ''}
                           </span>
                         </div>
                       </div>

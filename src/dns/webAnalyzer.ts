@@ -15,7 +15,13 @@ import {
   type AnalyzeOptions,
 } from './analyzer';
 import { DohSession } from './doh';
-import { displayFqdn, getDomainHierarchy, normalizeFqdn } from './encoding';
+import {
+  countDnsLabels,
+  displayFqdn,
+  getDomainHierarchy,
+  isSubdomainOrEqual,
+  normalizeFqdn,
+} from './encoding';
 import { formatCanonicalIpv6, parseIpv6Groups } from './ipUtils';
 import type {
   AnalysisProgress,
@@ -28,6 +34,7 @@ import type {
   CtCertificateEntry,
   CtIssuerSummary,
   CtLogFetchResult,
+  CtSubdomainCaaPolicy,
   DaneHostStatus,
   DohQueryLog,
   EchConfigEntry,
@@ -900,13 +907,153 @@ function isValidDiscoveredSubdomain(candidate: string, baseDomain: string): bool
   );
 }
 
+interface ResolvedDomainCaaPolicy {
+  effectiveOwner?: string;
+  records: CaaRecordEntry[];
+  issueCas: string[];
+  issuewildCas: string[];
+  hasEmptyIssueDeny: boolean;
+  issueRestricted: boolean;
+  hasExplicitIssuewild: boolean;
+  wildcardRestricted: boolean;
+  authorizedIssueCas: Set<string>;
+  authorizedWildcardCas: Set<string>;
+}
+
+/**
+ * Evaluates the effective RFC 8659 §3 CAA policy for any domain name (`domainFqdn`) by climbing
+ * from `domainFqdn` (and any CNAME targets) up its full ancestor hierarchy in `queries`, falling back
+ * to the target domain's evaluated `fallbackCaa` when no closer CAA RRset is present in `queries`.
+ */
+function resolveEffectiveCaaForDomain(
+  domainFqdn: string,
+  queries: DohQueryLog[],
+  fallbackCaa: WebCaaAnalysis
+): ResolvedDomainCaaPolicy {
+  const normDomain = normalizeFqdn(domainFqdn);
+  const climbNames: string[] = [];
+  const pushClimb = (n: string) => {
+    const norm = normalizeFqdn(n);
+    if (norm !== '.' && !climbNames.includes(norm)) {
+      climbNames.push(norm);
+    }
+  };
+
+  pushClimb(normDomain);
+  const initialCname = resolveCnameChainInLogs(queries, normDomain, RR_TYPES.CAA);
+  for (const c of initialCname.cnameChain) {
+    pushClimb(c);
+  }
+  const ancestors = getDomainHierarchy(normDomain).slice(1).reverse();
+  for (const anc of ancestors) {
+    pushClimb(anc);
+    const ancCname = resolveCnameChainInLogs(queries, anc, RR_TYPES.CAA);
+    for (const c of ancCname.cnameChain) {
+      pushClimb(c);
+    }
+  }
+  if (initialCname.finalOwner !== normDomain) {
+    const finalAncestors = getDomainHierarchy(initialCname.finalOwner).slice(1).reverse();
+    for (const anc of finalAncestors) {
+      pushClimb(anc);
+    }
+  }
+
+  let effectiveOwner: string | undefined;
+  let effectiveRecords: CaaRecordEntry[] = [];
+
+  for (const hopName of climbNames) {
+    const caaRes = resolveCnameChainInLogs(queries, hopName, RR_TYPES.CAA);
+    const hopOwner = caaRes.finalOwner;
+    const hopLog =
+      findAnyLog(queries, hopOwner, RR_TYPES.CAA) ?? findAnyLog(queries, hopName, RR_TYPES.CAA);
+    const hopRecords: CaaRecordEntry[] = [];
+    for (const ans of hopLog?.packet.answers ?? []) {
+      if (
+        (ans.name === hopOwner || ans.name === hopName) &&
+        ans.type === RR_TYPES.CAA &&
+        ans.parsed.kind === 'CAA'
+      ) {
+        hopRecords.push(
+          parseCaaRecordEntry(ans.name, ans.parsed.flags, ans.parsed.tag, ans.parsed.value)
+        );
+      }
+    }
+    if (hopRecords.length > 0) {
+      effectiveOwner = hopName;
+      effectiveRecords = hopRecords;
+      break;
+    }
+  }
+
+  if (!effectiveOwner && fallbackCaa.effectiveOwner) {
+    const fallbackHop = fallbackCaa.hops.find((h) => h.isEffectivePolicySource);
+    if (fallbackHop && isSubdomainOrEqual(normDomain, fallbackHop.name)) {
+      effectiveOwner = fallbackHop.name;
+      effectiveRecords = fallbackHop.records;
+    }
+  }
+
+  const issueCas: string[] = [];
+  const issuewildCas: string[] = [];
+  let hasEmptyIssueDeny = false;
+
+  for (const rec of effectiveRecords) {
+    if (rec.tag === 'issue') {
+      if (rec.caDomain === '') {
+        hasEmptyIssueDeny = true;
+      } else if (rec.caDomain && !issueCas.includes(rec.caDomain)) {
+        issueCas.push(rec.caDomain);
+      }
+    } else if (rec.tag === 'issuewild') {
+      const val = rec.caDomain || '; (deny all wildcards)';
+      if (rec.caDomain !== undefined && !issuewildCas.includes(val)) {
+        issuewildCas.push(val);
+      }
+    }
+  }
+
+  const issueRestricted =
+    Boolean(effectiveOwner) && (issueCas.length > 0 || hasEmptyIssueDeny);
+  const hasExplicitIssuewild = issuewildCas.length > 0;
+  const wildcardRestricted = hasExplicitIssuewild || issueRestricted;
+
+  const authorizedIssueCas = new Set(
+    issueCas
+      .map((c) => c.trim().toLowerCase().replace(/\.$/, ''))
+      .filter((c) => c && !c.startsWith(';'))
+  );
+  const authorizedWildcardCas = hasExplicitIssuewild
+    ? new Set(
+        issuewildCas
+          .map((c) => c.trim().toLowerCase().replace(/\.$/, ''))
+          .filter((c) => c && !c.startsWith(';'))
+      )
+    : authorizedIssueCas;
+
+  return {
+    effectiveOwner,
+    records: effectiveRecords,
+    issueCas,
+    issuewildCas,
+    hasEmptyIssueDeny,
+    issueRestricted,
+    hasExplicitIssuewild,
+    wildcardRestricted,
+    authorizedIssueCas,
+    authorizedWildcardCas,
+  };
+}
+
 /**
  * Cross-checks Certificate Transparency (`CT`) log issuances against the evaluated RFC 8659 `CAA`
- * policy and `_443._tcp` DANE `TLSA` bindings, and extracts discovered subdomains from SANs.
+ * policy (walking the full domain chain for every CT certificate SAN) and `_443._tcp` DANE `TLSA`
+ * bindings, and extracts discovered subdomains from SANs.
  */
 function evaluateWebCertificateTransparency(params: {
   targetName: string;
   effectiveDomain: string;
+  queries: DohQueryLog[];
   caa: WebCaaAnalysis;
   tlsaRecords: TlsaRecordDetail[];
   ctLogFetch?: CtLogFetchResult;
@@ -916,6 +1063,7 @@ function evaluateWebCertificateTransparency(params: {
   const {
     targetName,
     effectiveDomain,
+    queries,
     caa,
     tlsaRecords,
     ctLogFetch,
@@ -964,9 +1112,31 @@ function evaluateWebCertificateTransparency(params: {
       )
     : authorizedIssueCas;
 
-  const allCandidateCaaDomains = Array.from(
-    new Set([...authorizedIssueCas, ...authorizedWildcardCas])
-  );
+  const domainCaaPolicyCache = new Map<string, ResolvedDomainCaaPolicy>();
+  const subdomainCaaPolicyMap = new Map<string, CtSubdomainCaaPolicy>();
+  const getPolicyForSanBase = (baseFqdn: string): ResolvedDomainCaaPolicy => {
+    const norm = normalizeFqdn(baseFqdn);
+    const cached = domainCaaPolicyCache.get(norm);
+    if (cached) return cached;
+    const resolved = resolveEffectiveCaaForDomain(norm, queries, caa);
+    domainCaaPolicyCache.set(norm, resolved);
+    if (
+      resolved.effectiveOwner &&
+      resolved.effectiveOwner !== targetName &&
+      resolved.effectiveOwner !== effectiveDomain &&
+      isSubdomainOrEqual(resolved.effectiveOwner, targetName) &&
+      !subdomainCaaPolicyMap.has(resolved.effectiveOwner)
+    ) {
+      subdomainCaaPolicyMap.set(resolved.effectiveOwner, {
+        owner: resolved.effectiveOwner,
+        displayOwner: displayFqdn(resolved.effectiveOwner),
+        issueCas: resolved.issueCas,
+        issuewildCas: resolved.issuewildCas,
+        records: resolved.records,
+      });
+    }
+    return resolved;
+  };
 
   // Sort entries newest notBefore first
   const sortedRaw = [...ctLogFetch.entries].sort((a, b) => {
@@ -1019,55 +1189,95 @@ function evaluateWebCertificateTransparency(params: {
         n === `*.${dispEffective}` ||
         (!coversTargetDirectly && n.startsWith('*.'))
     );
-    const hasNonWildcardForTarget = raw.dnsNames.some(
-      (n) => n === dispTarget || n === dispEffective || (!coversTargetDirectly && !n.startsWith('*.'))
-    );
+
+    // Filter SANs to those within targetName / effectiveDomain hierarchy (or all SANs if none match)
+    const inScopeSans = raw.dnsNames.filter((san) => {
+      const baseFqdn = normalizeFqdn(san.replace(/^\*\./, ''));
+      return (
+        isSubdomainOrEqual(baseFqdn, targetName) ||
+        isSubdomainOrEqual(baseFqdn, effectiveDomain)
+      );
+    });
+    const sansToEvaluate = inScopeSans.length > 0 ? inScopeSans : [dispTarget];
+
+    // Collect all candidate CAA domains across the SANs' effective CAA policies
+    const candidateCaaSet = new Set<string>([...authorizedIssueCas, ...authorizedWildcardCas]);
+    const sanPolicies = sansToEvaluate.map((san) => {
+      const isWild = san.startsWith('*.');
+      const baseFqdn = normalizeFqdn(san.replace(/^\*\./, ''));
+      const policy = getPolicyForSanBase(baseFqdn);
+      for (const c of policy.authorizedIssueCas) candidateCaaSet.add(c);
+      for (const c of policy.authorizedWildcardCas) candidateCaaSet.add(c);
+      return { san, isWild, baseFqdn, policy };
+    });
 
     const mappedCaaDomains = mapCtIssuerToCaaDomains(
       raw.issuerFriendlyName,
       raw.issuerDn,
-      allCandidateCaaDomains
+      Array.from(candidateCaaSet)
     );
-
-    const matchesIssue = mappedCaaDomains.some((d) => authorizedIssueCas.has(d));
-    const matchesWildcard = mappedCaaDomains.some((d) => authorizedWildcardCas.has(d));
 
     let caaAuthorized: CtCertificateEntry['caaAuthorized'] = 'unrestricted';
     let caaNote = 'No restricting CAA policy active';
+    const effectiveOwnerDisplaySet = new Set<string>();
+    const authorizedMatchedDomSet = new Set<string>();
+    let firstUnauthNote: string | undefined;
+    let firstUnauthVerdict: 'unauthorized-ca' | 'unauthorized-wildcard' | undefined;
 
-    if (hasWildcardForTarget && wildcardRestricted) {
-      if (!matchesWildcard) {
-        if (matchesIssue && hasExplicitIssuewild) {
-          caaAuthorized = 'unauthorized-wildcard';
-          caaNote = `${raw.issuerFriendlyName} (${mappedCaaDomains.join(', ') || 'unmapped'}) is in CAA issue, but not authorized by explicit issuewild (${Array.from(authorizedWildcardCas).join(', ') || 'deny all'})`;
+    for (const { san, isWild, policy } of sanPolicies) {
+      const ownerDisp = policy.effectiveOwner ? displayFqdn(policy.effectiveOwner) : dispTarget;
+      if (policy.effectiveOwner) {
+        effectiveOwnerDisplaySet.add(ownerDisp);
+      }
+      const matchesSanIssue = mappedCaaDomains.some((d) => policy.authorizedIssueCas.has(d));
+      const matchesSanWild = mappedCaaDomains.some((d) => policy.authorizedWildcardCas.has(d));
+
+      if (isWild && policy.wildcardRestricted) {
+        if (!matchesSanWild) {
+          if (matchesSanIssue && policy.hasExplicitIssuewild) {
+            if (!firstUnauthVerdict) {
+              firstUnauthVerdict = 'unauthorized-wildcard';
+              firstUnauthNote = `${raw.issuerFriendlyName} (${mappedCaaDomains.join(', ') || 'unmapped'}) is in CAA issue at ${ownerDisp}, but not authorized by explicit issuewild (${Array.from(policy.authorizedWildcardCas).join(', ') || 'deny all'}) for ${san}`;
+            }
+          } else if (!firstUnauthVerdict) {
+            firstUnauthVerdict = 'unauthorized-ca';
+            firstUnauthNote = `${raw.issuerFriendlyName} (${mappedCaaDomains.join(', ') || 'unmapped'}) is not authorized by CAA ${policy.hasExplicitIssuewild ? 'issuewild' : 'issue'} policy at ${ownerDisp} (${Array.from(policy.authorizedWildcardCas).join(', ') || 'deny all'}) for ${san}`;
+          }
         } else {
-          caaAuthorized = 'unauthorized-ca';
-          caaNote = `${raw.issuerFriendlyName} (${mappedCaaDomains.join(', ') || 'unmapped'}) is not authorized by CAA ${hasExplicitIssuewild ? 'issuewild' : 'issue'} policy`;
+          const matchedDom = mappedCaaDomains.find((d) => policy.authorizedWildcardCas.has(d));
+          if (matchedDom) authorizedMatchedDomSet.add(matchedDom);
         }
-      } else if (hasNonWildcardForTarget && issueRestricted && !matchesIssue) {
-        caaAuthorized = 'unauthorized-ca';
-        caaNote = `${raw.issuerFriendlyName} (${mappedCaaDomains.join(', ') || 'unmapped'}) is not authorized by CAA issue policy (${Array.from(authorizedIssueCas).join(', ') || 'deny all'})`;
-      } else {
-        caaAuthorized = 'authorized';
-        const matchedDom = mappedCaaDomains.find(
-          (d) => authorizedWildcardCas.has(d) || authorizedIssueCas.has(d)
-        );
-        caaNote = `Authorized by CAA (${matchedDom ?? mappedCaaDomains[0]})`;
+      } else if (!isWild && policy.issueRestricted) {
+        if (!matchesSanIssue) {
+          if (!firstUnauthVerdict) {
+            firstUnauthVerdict = 'unauthorized-ca';
+            firstUnauthNote = `${raw.issuerFriendlyName} (${mappedCaaDomains.join(', ') || 'unmapped'}) is not listed in CAA issue at ${ownerDisp} (${Array.from(policy.authorizedIssueCas).join(', ') || 'deny all'}) for ${san}`;
+          }
+        } else {
+          const matchedDom = mappedCaaDomains.find((d) => policy.authorizedIssueCas.has(d));
+          if (matchedDom) authorizedMatchedDomSet.add(matchedDom);
+        }
       }
-    } else if (issueRestricted) {
-      if (matchesIssue) {
-        caaAuthorized = 'authorized';
-        const matchedDom = mappedCaaDomains.find((d) => authorizedIssueCas.has(d));
-        caaNote = `Authorized by CAA issue "${matchedDom ?? mappedCaaDomains[0]}"`;
-      } else {
-        caaAuthorized = 'unauthorized-ca';
-        caaNote = `${raw.issuerFriendlyName} (${mappedCaaDomains.join(', ') || 'unmapped'}) is not listed in CAA issue (${Array.from(authorizedIssueCas).join(', ') || 'deny all'})`;
-      }
+    }
+
+    const effectiveCaaOwners = Array.from(effectiveOwnerDisplaySet);
+
+    if (firstUnauthVerdict) {
+      caaAuthorized = firstUnauthVerdict;
+      caaNote = firstUnauthNote!;
+    } else if (authorizedMatchedDomSet.size > 0) {
+      caaAuthorized = 'authorized';
+      const matchedList = Array.from(authorizedMatchedDomSet).join(', ');
+      const viaSubdomain = effectiveCaaOwners.some(
+        (o) => o.toLowerCase() !== dispTarget && o.toLowerCase() !== dispEffective
+      );
+      caaNote = viaSubdomain
+        ? `Authorized by CAA at ${effectiveCaaOwners.join(', ')} (${matchedList})`
+        : `Authorized by CAA (${matchedList})`;
     }
 
     if (
       isActive &&
-      coversTargetDirectly &&
       (caaAuthorized === 'unauthorized-ca' || caaAuthorized === 'unauthorized-wildcard')
     ) {
       mismatchedActiveCertCount++;
@@ -1125,6 +1335,7 @@ function evaluateWebCertificateTransparency(params: {
       issuerPubkeySha256: raw.issuerPubkeySha256,
       caaAuthorized,
       caaNote,
+      ...(effectiveCaaOwners.length > 0 ? { effectiveCaaOwners } : {}),
       matchesTlsa,
       matchedTlsaSummary,
     });
@@ -1139,10 +1350,13 @@ function evaluateWebCertificateTransparency(params: {
   for (const cert of certsForIssuerSummary) {
     const key = cert.issuerFriendlyName || cert.issuerDn || 'Unknown CA';
     const existing = issuerMap.get(key);
-    const authIssue = !issueRestricted || cert.mappedCaaDomains.some((d) => authorizedIssueCas.has(d));
-    const authWild =
-      !wildcardRestricted || cert.mappedCaaDomains.some((d) => authorizedWildcardCas.has(d));
     const certAuth = cert.caaAuthorized === 'authorized' || cert.caaAuthorized === 'unrestricted';
+    const authIssue =
+      certAuth || !issueRestricted || cert.mappedCaaDomains.some((d) => authorizedIssueCas.has(d));
+    const authWild =
+      certAuth ||
+      !wildcardRestricted ||
+      cert.mappedCaaDomains.some((d) => authorizedWildcardCas.has(d));
 
     if (!existing) {
       issuerMap.set(key, {
@@ -1173,6 +1387,15 @@ function evaluateWebCertificateTransparency(params: {
       .sort(),
   ].slice(0, 60);
 
+  const subdomainCaaPolicies = Array.from(subdomainCaaPolicyMap.values()).sort((a, b) =>
+    a.displayOwner.localeCompare(b.displayOwner)
+  );
+  const anyCertCaaEnforced =
+    issueRestricted ||
+    wildcardRestricted ||
+    subdomainCaaPolicies.length > 0 ||
+    certificates.some((c) => c.caaAuthorized === 'authorized');
+
   let status: WebCtAnalysis['status'] = 'no-active-certs';
   let summary = '';
 
@@ -1191,7 +1414,6 @@ function evaluateWebCertificateTransparency(params: {
             (c) =>
               !c.isExpired &&
               !c.revoked &&
-              c.coversTargetDirectly &&
               (c.caaAuthorized === 'unauthorized-ca' ||
                 c.caaAuthorized === 'unauthorized-wildcard')
           )
@@ -1210,16 +1432,23 @@ function evaluateWebCertificateTransparency(params: {
       detail: `Active unexpired certificate(s) in Certificate Transparency logs were issued by ${unauthorizedIssuers.join(', ')}, whereas the effective CAA policy at ${displayFqdn(caa.effectiveOwner ?? targetName)} only authorizes: issue=[${caa.issueCas.join(', ') || 'none'}]${caa.issuewildCas.length > 0 ? `, issuewild=[${caa.issuewildCas.join(', ')}]` : ''}. This occurs when CAA records were tightened after certificate issuance (potentially breaking automated ACME renewals) or if a sub-delegation/CA bypassed policy.`,
       rfc: 'RFC 8659 / RFC 6962',
     });
-  } else if (issueRestricted || wildcardRestricted) {
+  } else if (anyCertCaaEnforced) {
     status = 'caa-compliant';
     const issuerNames = issuers.map((i) => i.friendlyName).join(', ');
-    summary = `All ${activeCertCount} active CT certificate(s) for ${dispTarget} (issued by ${issuerNames}) match the enforced CAA policy (${caa.issueCas.join(', ')})${discoveredSubdomains.length > 0 ? ` · ${discoveredSubdomains.length} subdomain${discoveredSubdomains.length === 1 ? '' : 's'} discovered in SANs` : ''}.`;
+    const subPolicySummary =
+      subdomainCaaPolicies.length > 0
+        ? ` (including ${subdomainCaaPolicies.length} subdomain CAA polic${subdomainCaaPolicies.length === 1 ? 'y' : 'ies'} at ${subdomainCaaPolicies
+            .slice(0, 4)
+            .map((p) => `${p.displayOwner}: ${p.issueCas.join(', ') || 'none'}`)
+            .join('; ')}${subdomainCaaPolicies.length > 4 ? ` +${subdomainCaaPolicies.length - 4} more` : ''})`
+        : ` (${caa.issueCas.join(', ')})`;
+    summary = `All ${activeCertCount} active CT certificate(s) for ${dispTarget} (issued by ${issuerNames}) match the enforced RFC 8659 CAA policy chain${subPolicySummary}${discoveredSubdomains.length > 0 ? ` · ${discoveredSubdomains.length} subdomain${discoveredSubdomains.length === 1 ? '' : 's'} discovered in SANs` : ''}.`;
     webFindings.push({
       id: `web-info-ct-caa-compliant-${targetName}`,
       severity: 'info',
       code: 'CT_CAA_COMPLIANT',
       title: `Certificate Transparency (CT) logs match CAA policy for ${dispTarget} (${activeCertCount} active cert${activeCertCount === 1 ? '' : 's'})`,
-      detail: `Verified ${activeCertCount} active unexpired TLS certificate(s) in CT logs (${issuerNames}); every active issuer is authorized by the domain's RFC 8659 CAA policy (${caa.issueCas.join(', ')}).`,
+      detail: `Verified ${activeCertCount} active unexpired TLS certificate(s) in CT logs (${issuerNames}); every active issuer is authorized by the full RFC 8659 CAA hierarchy${subPolicySummary}.`,
       rfc: 'RFC 8659 / RFC 6962',
     });
   } else {
@@ -1240,6 +1469,7 @@ function evaluateWebCertificateTransparency(params: {
     issuers,
     certificates: certificates.slice(0, 25),
     discoveredSubdomains,
+    ...(subdomainCaaPolicies.length > 0 ? { subdomainCaaPolicies } : {}),
     tlsaMatchedCertCount,
     summary,
   };
@@ -1863,6 +2093,7 @@ export function evaluateWebFromSnapshotData(params: {
   const ctAnalysis = evaluateWebCertificateTransparency({
     targetName,
     effectiveDomain,
+    queries,
     caa: caaAnalysis,
     tlsaRecords,
     ctLogFetch,
@@ -2200,10 +2431,112 @@ export async function runWebAnalysis(
 
   // Include any authoritative SOA zones returned in CD=1 responses
   for (const log of session.getLogs()) {
-    if (!log.cd || log.purpose.startsWith('Nameserver IP')) continue;
+    if (
+      !log.cd ||
+      log.purpose.startsWith('Nameserver IP') ||
+      log.purpose.startsWith('CT CAA lookup')
+    ) {
+      continue;
+    }
     for (const auth of log.packet.authorities) {
       if (auth.type === RR_TYPES.SOA) {
         discoveredZones.add(normalizeFqdn(auth.name));
+      }
+    }
+  }
+
+  // Step 3.5: Probe CAA across full domain chains of CT log certificate SANs
+  const ctLogFetch = await ctLogPromise;
+  if (ctLogFetch.ok && ctLogFetch.entries.length > 0) {
+    currentPhase = 'web-caa';
+    const existingCaaQueried = new Set(
+      session
+        .getLogs()
+        .filter((l) => l.qtype === RR_TYPES.CAA)
+        .map((l) => l.qname)
+    );
+    const nowMs = options.validationTimeMs ?? Date.now();
+    const sortedCt = [...ctLogFetch.entries].sort((a, b) => {
+      const ta = Date.parse(a.notBefore) || 0;
+      const tb = Date.parse(b.notBefore) || 0;
+      return tb - ta;
+    });
+    const relevantCtEntries = sortedCt.filter((e, idx) => {
+      const na = Date.parse(e.notAfter);
+      const isActive = (!Number.isFinite(na) || na >= nowMs) && !e.revoked;
+      return isActive || idx < 25;
+    });
+
+    const ctChainCandidates = new Set<string>();
+    for (const entry of relevantCtEntries) {
+      for (const rawSan of entry.dnsNames) {
+        const cleanSan = rawSan.replace(/^\*\./, '').trim().toLowerCase();
+        if (!cleanSan || cleanSan.includes('*') || cleanSan.includes(' ')) continue;
+        const sanFqdn = normalizeFqdn(cleanSan);
+        if (sanFqdn === '.' || !sanFqdn.includes('.')) continue;
+        if (
+          !isSubdomainOrEqual(sanFqdn, targetName) &&
+          !isSubdomainOrEqual(sanFqdn, effectiveDomain)
+        ) {
+          continue;
+        }
+        for (const anc of getDomainHierarchy(sanFqdn).slice(1)) {
+          if (!existingCaaQueried.has(anc)) {
+            ctChainCandidates.add(anc);
+          }
+        }
+      }
+    }
+
+    const sortedCtCaaToProbe = Array.from(ctChainCandidates)
+      .sort((a, b) => countDnsLabels(a) - countDnsLabels(b) || a.localeCompare(b))
+      .slice(0, 50);
+
+    if (sortedCtCaaToProbe.length > 0) {
+      options.onProgress?.({
+        phase: 'web-caa',
+        message: `Probing RFC 8659 CAA chain for ${sortedCtCaaToProbe.length} CT log domain${sortedCtCaaToProbe.length === 1 ? '' : 's'}…`,
+        completedQueries: session.getLogs().length,
+      });
+      for (const d of sortedCtCaaToProbe) {
+        existingCaaQueried.add(d);
+      }
+      await Promise.all(
+        sortedCtCaaToProbe.map((d) =>
+          session.query(d, RR_TYPES.CAA, {
+            cd: true,
+            doBit: true,
+            purpose: `CT CAA lookup (${d} CAA)`,
+          })
+        )
+      );
+
+      // Follow any CNAME chain returned on CT CAA lookups
+      const cnameFollowups = new Set<string>();
+      for (const log of session.getLogs()) {
+        if (!log.purpose.startsWith('CT CAA lookup')) continue;
+        for (const ans of log.packet.answers) {
+          if (ans.type === RR_TYPES.CNAME && ans.parsed.kind === 'GENERIC' && ans.parsed.target) {
+            const cnameTarget = normalizeFqdn(ans.parsed.target);
+            for (const anc of getDomainHierarchy(cnameTarget).slice(1)) {
+              if (!existingCaaQueried.has(anc)) {
+                cnameFollowups.add(anc);
+              }
+            }
+          }
+        }
+      }
+      if (cnameFollowups.size > 0) {
+        const followupList = Array.from(cnameFollowups).slice(0, 20);
+        await Promise.all(
+          followupList.map((d) =>
+            session.query(d, RR_TYPES.CAA, {
+              cd: true,
+              doBit: true,
+              purpose: `CT CAA lookup (${d} CAA)`,
+            })
+          )
+        );
       }
     }
   }
@@ -2239,8 +2572,6 @@ export async function runWebAnalysis(
     message: 'Verifying DNSSEC, HTTPS/SVCB, ECH, CAA, CT logs & Web DANE via WebCrypto…',
     completedQueries: session.getLogs().length,
   });
-
-  const ctLogFetch = await ctLogPromise;
 
   const capturedAt = Date.now();
   const validatedAt = options.validationTimeMs ?? capturedAt;
