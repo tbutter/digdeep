@@ -19,6 +19,12 @@ import {
 } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { displayFqdn } from '../dns/encoding';
+import {
+  collectSpfMacroExpansions,
+  evaluateSpfForSenderIp,
+  expandSpfMacroString,
+  hasSpfMacro,
+} from '../dns/mailAnalyzer';
 import type {
   AnalysisSnapshot,
   DaneHostStatus,
@@ -29,6 +35,8 @@ import type {
   MxHostAnalysis,
   SpfDomainNode,
   SpfPolicyVerdict,
+  SpfSenderEvaluationDisposition,
+  SpfSenderEvaluationResult,
   SpfTerm,
 } from '../dns/types';
 import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
@@ -120,7 +128,109 @@ function getSpfVerdictMeta(verdict: SpfPolicyVerdict): {
   }
 }
 
-function SpfTermPill({ term }: { term: SpfTerm }) {
+function getSpfDispositionMeta(disposition: SpfSenderEvaluationDisposition): {
+  label: string;
+  cls: string;
+  bannerCls: string;
+} {
+  switch (disposition) {
+    case 'pass':
+      return {
+        label: 'PASS (+)',
+        cls: 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/40',
+        bannerCls: 'border-emerald-500/45 bg-emerald-500/10 text-emerald-900 dark:text-emerald-100',
+      };
+    case 'fail':
+      return {
+        label: 'FAIL (-)',
+        cls: 'bg-rose-500/20 text-rose-700 dark:text-rose-300 border border-rose-500/40',
+        bannerCls: 'border-rose-500/45 bg-rose-500/10 text-rose-900 dark:text-rose-100',
+      };
+    case 'softfail':
+      return {
+        label: 'SOFTFAIL (~)',
+        cls: 'bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/40',
+        bannerCls: 'border-amber-500/45 bg-amber-500/10 text-amber-900 dark:text-amber-100',
+      };
+    case 'neutral':
+      return {
+        label: 'NEUTRAL (?)',
+        cls: 'bg-slate-500/20 text-slate-700 dark:text-slate-300 border border-slate-500/40',
+        bannerCls: 'border-slate-400/40 bg-slate-500/10 text-slate-900 dark:text-slate-100',
+      };
+    case 'permerror':
+      return {
+        label: 'PERMERROR',
+        cls: 'bg-rose-500/25 text-rose-800 dark:text-rose-200 border border-rose-500/50',
+        bannerCls: 'border-rose-500/50 bg-rose-500/15 text-rose-900 dark:text-rose-100',
+      };
+    case 'temperror':
+      return {
+        label: 'TEMPERROR',
+        cls: 'bg-rose-500/25 text-rose-800 dark:text-rose-200 border border-rose-500/50',
+        bannerCls: 'border-rose-500/50 bg-rose-500/15 text-rose-900 dark:text-rose-100',
+      };
+    case 'none':
+      return {
+        label: 'NONE',
+        cls: 'bg-slate-500/20 text-slate-600 dark:text-slate-400 border border-slate-500/35',
+        bannerCls: 'border-slate-400/40 bg-slate-500/10 text-slate-800 dark:text-slate-200',
+      };
+  }
+}
+
+function collectSampleSpfIps(
+  rootNode: SpfDomainNode,
+  mxHosts: MxHostAnalysis[]
+): Array<{ label: string; ip: string }> {
+  const chips: Array<{ label: string; ip: string }> = [];
+  const seen = new Set<string>();
+
+  for (const h of mxHosts) {
+    if (h.isNullMx) continue;
+    for (const addr of h.addresses) {
+      if (addr.isPublic && !seen.has(addr.ip) && chips.length < 2) {
+        seen.add(addr.ip);
+        chips.push({ label: `MX (${h.displayExchange})`, ip: addr.ip });
+      }
+    }
+  }
+
+  const walk = (node: SpfDomainNode) => {
+    for (const term of node.terms) {
+      if (chips.length >= 5) return;
+      if ((term.mechanism === 'ip4' || term.mechanism === 'ip6') && term.value && term.syntaxValid) {
+        if (!seen.has(term.value)) {
+          seen.add(term.value);
+          chips.push({ label: `${node.displayDomain} ${term.mechanism}`, ip: term.value });
+        }
+      } else if (term.resolvedIps && term.resolvedIps.length > 0) {
+        const firstIp = term.resolvedIps[0];
+        if (!seen.has(firstIp)) {
+          seen.add(firstIp);
+          chips.push({ label: `${node.displayDomain} ${term.raw}`, ip: firstIp });
+        }
+      }
+      if (term.childNode) walk(term.childNode);
+    }
+  };
+  walk(rootNode);
+
+  if (!seen.has('198.51.100.99')) {
+    chips.push({ label: 'Unauthorized Test IP', ip: '198.51.100.99' });
+  }
+  return chips;
+}
+
+function SpfTermPill({
+  term,
+  isMatched = false,
+  matchedDisposition,
+}: {
+  term: SpfTerm;
+  isMatched?: boolean;
+  matchedDisposition?: SpfSenderEvaluationDisposition;
+}) {
   if (term.kind === 'version') {
     return (
       <span className="inline-flex items-center rounded-md bg-slate-200/80 dark:bg-slate-800 px-2 py-0.5 font-mono text-xs font-semibold text-slate-800 dark:text-slate-200">
@@ -151,9 +261,13 @@ function SpfTermPill({ term }: { term: SpfTerm }) {
     colorCls = 'bg-cyan-500/10 text-cyan-800 dark:text-cyan-200 border-cyan-500/30';
   }
 
+  const matchedRingCls = isMatched
+    ? 'ring-2 ring-cyan-500 dark:ring-cyan-400 font-bold shadow-sm'
+    : '';
+
   return (
     <span
-      className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-xs ${colorCls}`}
+      className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-xs ${colorCls} ${matchedRingCls}`}
       title={term.error ?? term.warning ?? (term.countsTowardLookupLimit ? 'Counts toward 10-DNS-lookup limit' : 'Zero DNS lookups')}
     >
       {term.mechanism === 'ip4' || term.mechanism === 'ip6' ? (
@@ -166,21 +280,78 @@ function SpfTermPill({ term }: { term: SpfTerm }) {
           +1 DNS
         </span>
       )}
+      {term.macros && term.macros.length > 0 && (
+        <span
+          className="rounded bg-purple-500/20 px-1 py-0.1 text-[9px] font-bold text-purple-700 dark:text-purple-300"
+          title={`RFC 7208 §7 SPF macro(s): ${term.macros.join(', ')}`}
+        >
+          MACRO
+        </span>
+      )}
+      {term.broadCidr && (
+        <span
+          className="rounded bg-amber-500/25 px-1 py-0.1 text-[9px] font-bold text-amber-800 dark:text-amber-200"
+          title={term.warning}
+        >
+          BROAD CIDR
+        </span>
+      )}
       {term.isVoidLookup && (
         <span className="rounded bg-amber-500/25 px-1 py-0.1 text-[9px] font-bold text-amber-700 dark:text-amber-200">
           VOID
+        </span>
+      )}
+      {isMatched && matchedDisposition && (
+        <span className="rounded bg-cyan-500 text-slate-950 px-1.5 py-0.1 text-[9px] font-extrabold uppercase">
+          MATCH → {matchedDisposition.toUpperCase()}
         </span>
       )}
     </span>
   );
 }
 
-function SpfTreeBranch({ node }: { node: SpfDomainNode }) {
+function isTermMatchedInNode(
+  node: SpfDomainNode,
+  term: SpfTerm,
+  evalResult?: SpfSenderEvaluationResult
+): boolean {
+  if (!evalResult?.validIp) return false;
+  if (evalResult.matchedDomain !== node.domain) return false;
+  if (!evalResult.matchedTermRaw) return false;
+  return (
+    evalResult.matchedTermRaw === term.raw ||
+    evalResult.matchedTermRaw.endsWith(` -> ${term.raw}`)
+  );
+}
+
+function SpfTreeBranch({
+  node,
+  evalResult,
+  senderInput,
+  ipInput,
+}: {
+  node: SpfDomainNode;
+  evalResult?: SpfSenderEvaluationResult;
+  senderInput?: string;
+  ipInput?: string;
+}) {
   const [expanded, setExpanded] = useState(true);
   const dnsTermsCount = node.terms.filter((t) => t.countsTowardLookupLimit).length;
+  const isNodeMatched = Boolean(evalResult?.validIp && evalResult.matchedDomain === node.domain);
+  const isNodeInPath = Boolean(
+    evalResult?.validIp && evalResult.tracePath.includes(node.displayDomain)
+  );
 
   return (
-    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-3 space-y-2.5">
+    <div
+      className={`rounded-xl border p-3 space-y-2.5 transition-colors ${
+        isNodeMatched
+          ? 'border-cyan-500 dark:border-cyan-400 bg-cyan-500/5 ring-1 ring-cyan-500/30'
+          : isNodeInPath
+            ? 'border-cyan-500/40 bg-slate-50/70 dark:bg-slate-950/60'
+            : 'border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60'
+      }`}
+    >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <button
@@ -205,6 +376,16 @@ function SpfTreeBranch({ node }: { node: SpfDomainNode }) {
           {dnsTermsCount > 0 && (
             <span className="font-mono text-[11px] text-cyan-600 dark:text-cyan-400">
               {dnsTermsCount} direct DNS {dnsTermsCount === 1 ? 'query' : 'queries'}
+            </span>
+          )}
+
+          {isNodeMatched && evalResult && (
+            <span
+              className={`rounded-full px-2 py-0.5 font-mono text-[10px] font-bold ${
+                getSpfDispositionMeta(evalResult.disposition).cls
+              }`}
+            >
+              MATCHED HERE: {getSpfDispositionMeta(evalResult.disposition).label}
             </span>
           )}
         </div>
@@ -240,63 +421,101 @@ function SpfTreeBranch({ node }: { node: SpfDomainNode }) {
         <div className="space-y-2">
           <div className="flex flex-wrap gap-1.5">
             {node.terms.map((t, idx) => (
-              <SpfTermPill key={`${node.domain}-term-${idx}-${t.raw}`} term={t} />
+              <SpfTermPill
+                key={`${node.domain}-term-${idx}-${t.raw}`}
+                term={t}
+                isMatched={isTermMatchedInNode(node, t, evalResult)}
+                matchedDisposition={evalResult?.disposition}
+              />
             ))}
           </div>
 
-          {/* Detailed breakdown of mechanisms that resolve IPs, warnings, errors, or nested includes */}
+          {/* Detailed breakdown of mechanisms that resolve IPs, macros, warnings, errors, or nested includes */}
           <div className="space-y-2 pl-3 border-l-2 border-slate-200 dark:border-slate-800">
             {node.terms
               .filter(
                 (t) =>
                   t.childNode ||
                   (t.resolvedIps && t.resolvedIps.length > 0) ||
+                  (t.macros && t.macros.length > 0) ||
                   t.isVoidLookup ||
                   t.error ||
                   t.warning
               )
-              .map((t, idx) => (
-                <div key={`${node.domain}-sub-${idx}-${t.raw}`} className="space-y-1.5 text-xs">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono font-semibold text-slate-700 dark:text-slate-200">
-                      {t.raw}
-                    </span>
-                    {t.resolvedIps && t.resolvedIps.length > 0 && (
-                      <div className="flex flex-wrap gap-1">
-                        {t.resolvedIps.slice(0, 8).map((ip) => (
-                          <span
-                            key={ip}
-                            className="rounded bg-slate-200/70 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-700 dark:text-slate-300"
-                          >
-                            <IpHoverBadge ip={ip} />
-                          </span>
-                        ))}
-                        {t.resolvedIps.length > 8 && (
-                          <span className="font-mono text-[10px] text-slate-500">
-                            +{t.resolvedIps.length - 8} more
-                          </span>
-                        )}
-                      </div>
-                    )}
-                    {t.isVoidLookup && (
-                      <span className="text-[11px] text-amber-600 dark:text-amber-400">
-                        Void lookup (0 records / NXDOMAIN)
+              .map((t, idx) => {
+                const termMatched = isTermMatchedInNode(node, t, evalResult);
+                const macroExpanded =
+                  t.value && hasSpfMacro(t.value)
+                    ? expandSpfMacroString(t.value, {
+                        ip: evalResult?.normalizedIp ?? (ipInput?.trim() || '192.0.2.1'),
+                        sender: senderInput,
+                        domain: node.domain,
+                      }).expanded
+                    : undefined;
+
+                return (
+                  <div
+                    key={`${node.domain}-sub-${idx}-${t.raw}`}
+                    className={`space-y-1.5 text-xs ${
+                      termMatched
+                        ? 'rounded-lg bg-cyan-500/10 border border-cyan-500/40 p-2'
+                        : ''
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-mono font-semibold text-slate-700 dark:text-slate-200">
+                        {t.raw}
                       </span>
-                    )}
-                    {t.error && (
-                      <span className="text-[11px] text-rose-600 dark:text-rose-400">
-                        {t.error}
-                      </span>
-                    )}
-                    {!t.error && t.warning && (
-                      <span className="text-[11px] text-amber-600 dark:text-amber-400">
-                        {t.warning}
-                      </span>
+                      {macroExpanded && (
+                        <span className="inline-flex items-center gap-1 rounded bg-purple-500/15 border border-purple-500/30 px-1.5 py-0.5 font-mono text-[10px] text-purple-700 dark:text-purple-300">
+                          <span>RFC 7208 §7 Macro →</span>
+                          <span className="font-bold">{macroExpanded}</span>
+                        </span>
+                      )}
+                      {t.resolvedIps && t.resolvedIps.length > 0 && (
+                        <div className="flex flex-wrap gap-1">
+                          {t.resolvedIps.slice(0, 8).map((ip) => (
+                            <span
+                              key={ip}
+                              className="rounded bg-slate-200/70 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-700 dark:text-slate-300"
+                            >
+                              <IpHoverBadge ip={ip} />
+                            </span>
+                          ))}
+                          {t.resolvedIps.length > 8 && (
+                            <span className="font-mono text-[10px] text-slate-500">
+                              +{t.resolvedIps.length - 8} more
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {t.isVoidLookup && (
+                        <span className="text-[11px] text-amber-600 dark:text-amber-400">
+                          Void lookup (0 records / NXDOMAIN)
+                        </span>
+                      )}
+                      {t.error && (
+                        <span className="text-[11px] text-rose-600 dark:text-rose-400">
+                          {t.error}
+                        </span>
+                      )}
+                      {!t.error && t.warning && (
+                        <span className="text-[11px] text-amber-600 dark:text-amber-400">
+                          {t.warning}
+                        </span>
+                      )}
+                    </div>
+                    {t.childNode && (
+                      <SpfTreeBranch
+                        node={t.childNode}
+                        evalResult={evalResult}
+                        senderInput={senderInput}
+                        ipInput={ipInput}
+                      />
                     )}
                   </div>
-                  {t.childNode && <SpfTreeBranch node={t.childNode} />}
-                </div>
-              ))}
+                );
+              })}
           </div>
         </div>
       )}
@@ -798,6 +1017,8 @@ export function MailAnalysisView({
   const [dkimInput, setDkimInput] = useState(() =>
     (snapshot.customDkimSelectors ?? []).join(', ')
   );
+  const [spfTestIp, setSpfTestIp] = useState('');
+  const [spfTestSender, setSpfTestSender] = useState('');
 
   if (!mail) {
     return (
@@ -835,6 +1056,23 @@ export function MailAnalysisView({
       onProbeDkimSelectors(dkimInput);
     }
   };
+
+  const spfSampleChips = mail.spf.present
+    ? collectSampleSpfIps(mail.spf.rootNode, mail.mxHosts)
+    : [];
+  const spfEvalResult =
+    mail.spf.present && spfTestIp.trim().length > 0
+      ? evaluateSpfForSenderIp(mail.spf.rootNode, spfTestIp, {
+          sender: spfTestSender,
+        })
+      : undefined;
+  const spfMacroPreviews = mail.spf.present
+    ? spfEvalResult?.macroExpansions ??
+      collectSpfMacroExpansions(mail.spf.rootNode, {
+        ip: spfTestIp.trim() || '192.0.2.1',
+        sender: spfTestSender.trim() || `postmaster@${snapshot.displayDomain}`,
+      })
+    : [];
 
   return (
     <div className="space-y-5">
@@ -1178,7 +1416,193 @@ export function MailAnalysisView({
               </div>
             )}
 
-            <SpfTreeBranch node={mail.spf.rootNode} />
+            {/* Interactive SPF Sender IP Evaluator & RFC 7208 §7 Macro Expander */}
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/70 p-3.5 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs font-bold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
+                    <Search className="w-3.5 h-3.5 text-cyan-500" />
+                    <span>Interactive SPF Sender IP Evaluator &amp; RFC 7208 §7 Macro Expander</span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Test any IPv4 or IPv6 sender address against the recursive SPF policy tree using
+                    exact 32-bit / 128-bit CIDR bitmask matching and preview RFC 7208 §7 macro
+                    expansions.
+                  </p>
+                </div>
+                {spfTestIp.trim().length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSpfTestIp('');
+                      setSpfTestSender('');
+                    }}
+                    className="rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-0.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:border-cyan-500 cursor-pointer"
+                  >
+                    Clear Test IP
+                  </button>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                <div className="md:col-span-2">
+                  <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-1">
+                    Test Sender IPv4 / IPv6 Address
+                  </label>
+                  <input
+                    type="text"
+                    value={spfTestIp}
+                    onChange={(e) => setSpfTestIp(e.target.value)}
+                    placeholder="Enter candidate sender IPv4 or IPv6 (e.g. 192.0.2.1 or 2001:db8::1)…"
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 font-mono text-xs text-slate-900 dark:text-slate-100 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-1">
+                    Envelope Sender (MAIL FROM for %{`{s}`} / %{`{l}`})
+                  </label>
+                  <input
+                    type="text"
+                    value={spfTestSender}
+                    onChange={(e) => setSpfTestSender(e.target.value)}
+                    placeholder={`postmaster@${snapshot.displayDomain}`}
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 font-mono text-xs text-slate-900 dark:text-slate-100 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+              </div>
+
+              {spfSampleChips.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                    Quick-Fill:
+                  </span>
+                  {spfSampleChips.map((chip) => (
+                    <button
+                      key={`${chip.label}-${chip.ip}`}
+                      type="button"
+                      onClick={() => setSpfTestIp(chip.ip)}
+                      className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 font-mono text-[11px] transition-colors cursor-pointer ${
+                        spfTestIp.trim() === chip.ip
+                          ? 'border-cyan-500 bg-cyan-500/15 text-cyan-800 dark:text-cyan-200 font-bold'
+                          : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:border-cyan-500/60'
+                      }`}
+                    >
+                      <span className="text-[10px] text-slate-400">{chip.label}:</span>
+                      <span>{chip.ip}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {spfEvalResult && (
+                <div
+                  className={`rounded-lg border p-3 space-y-2 text-xs ${
+                    !spfEvalResult.validIp
+                      ? 'border-rose-500/40 bg-rose-500/10 text-rose-800 dark:text-rose-200'
+                      : getSpfDispositionMeta(spfEvalResult.disposition).bannerCls
+                  }`}
+                >
+                  {!spfEvalResult.validIp ? (
+                    <div className="flex items-center gap-2 font-medium">
+                      <AlertTriangle className="w-4 h-4 shrink-0 text-rose-500" />
+                      <span>{spfEvalResult.summary}</span>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span
+                            className={`rounded-full px-2.5 py-0.5 font-mono text-xs font-extrabold ${
+                              getSpfDispositionMeta(spfEvalResult.disposition).cls
+                            }`}
+                          >
+                            SPF {getSpfDispositionMeta(spfEvalResult.disposition).label}
+                          </span>
+                          <span className="font-mono font-bold">
+                            {spfEvalResult.normalizedIp} (IPv{spfEvalResult.family})
+                          </span>
+                          {spfEvalResult.matchedTermRaw && (
+                            <span className="rounded bg-white/80 dark:bg-slate-900/80 border border-current/20 px-2 py-0.5 font-mono text-[11px] font-semibold">
+                              Matched: {spfEvalResult.matchedTermRaw}
+                            </span>
+                          )}
+                          {spfEvalResult.matchedNetworkOrHost && (
+                            <span className="font-mono text-[11px] opacity-80">
+                              [{spfEvalResult.matchedNetworkOrHost}]
+                            </span>
+                          )}
+                        </div>
+                        <span className="font-mono text-[11px] opacity-85">
+                          Path: {spfEvalResult.tracePath.join(' → ')}
+                        </span>
+                      </div>
+                      <p className="text-[11px] leading-relaxed">{spfEvalResult.summary}</p>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {spfMacroPreviews.length > 0 && (
+                <div className="space-y-2 pt-2 border-t border-slate-200/80 dark:border-slate-800">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-purple-600 dark:text-purple-400">
+                    RFC 7208 §7 Macro Expansion Preview (IP:{' '}
+                    <span className="font-mono">
+                      {spfEvalResult?.normalizedIp ?? (spfTestIp.trim() || '192.0.2.1')}
+                    </span>{' '}
+                    · Sender:{' '}
+                    <span className="font-mono">
+                      {spfTestSender.trim() || `postmaster@${snapshot.displayDomain}`}
+                    </span>
+                    )
+                  </div>
+                  <div className="space-y-1.5">
+                    {spfMacroPreviews.map((m, idx) => (
+                      <div
+                        key={`macro-prev-${idx}-${m.domain}-${m.termRaw}`}
+                        className="rounded-lg border border-purple-500/30 bg-purple-500/5 p-2.5 space-y-1.5 text-xs"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2 font-mono">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="rounded bg-purple-500/20 text-purple-800 dark:text-purple-200 px-1.5 py-0.5 text-[10px] font-bold">
+                              {m.displayDomain}
+                            </span>
+                            <span className="font-semibold text-slate-800 dark:text-slate-200">
+                              {m.termRaw}
+                            </span>
+                          </div>
+                          <div className="inline-flex items-center gap-1.5 text-purple-700 dark:text-purple-300 font-bold break-all">
+                            <ArrowRight className="w-3.5 h-3.5 shrink-0" />
+                            <span>{m.expandedSpec}</span>
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {m.tokens.map((tok, tIdx) => (
+                            <span
+                              key={`macro-tok-${idx}-${tIdx}-${tok.raw}`}
+                              title={tok.description}
+                              className="rounded bg-white dark:bg-slate-900 border border-purple-500/25 px-1.5 py-0.5 font-mono text-[10px] text-slate-700 dark:text-slate-300"
+                            >
+                              <span className="font-bold text-purple-600 dark:text-purple-400">
+                                {tok.raw}
+                              </span>{' '}
+                              = <span className="font-semibold">{tok.replacement}</span>{' '}
+                              <span className="text-slate-400">({tok.description})</span>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <SpfTreeBranch
+              node={mail.spf.rootNode}
+              evalResult={spfEvalResult}
+              senderInput={spfTestSender}
+              ipInput={spfTestIp}
+            />
           </div>
         )}
       </section>

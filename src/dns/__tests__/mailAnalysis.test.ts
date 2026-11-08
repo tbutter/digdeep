@@ -6,11 +6,17 @@ import {
   buildPslQueryName,
   classifyIpAddress,
   clearPublicSuffixCache,
+  collectSpfMacroExpansions,
   decodeDkimPublicKey,
   estimateOrganizationalDomain,
   evaluateMailFromSnapshotData,
+  evaluateSpfForSenderIp,
+  expandSpfMacroString,
+  extractSpfMacros,
   ipToReverseArpa,
   matchesMtaStsMxPattern,
+  matchIpv4Cidr,
+  matchIpv6Cidr,
   parseDkimSelectorInput,
   parseMtaStsPolicyFile,
   parseSpfTerms,
@@ -289,6 +295,224 @@ describe('RFC 7505, RFC 7672 (SMTP DANE), and RFC 7208 (SPF) Audit Scenarios', (
     expect(res.mailFindings.some((f) => f.code === 'SPF_DNS_LOOKUP_LIMIT_EXCEEDED')).toBe(true);
     expect(res.mailFindings.some((f) => f.code === 'SPF_DEPRECATED_PTR')).toBe(true);
     expect(res.overallStatus).toBe('bogus');
+  });
+
+  it('performs exact 32-bit IPv4 and 128-bit IPv6 CIDR bitmask matching for SPF mechanisms', () => {
+    expect(matchIpv4Cidr('192.0.2.45', '192.0.2.0', 24)).toBe(true);
+    expect(matchIpv4Cidr('192.0.3.1', '192.0.2.0', 24)).toBe(false);
+    expect(matchIpv4Cidr('10.255.255.254', '10.0.0.0', 8)).toBe(true);
+    expect(matchIpv4Cidr('198.51.100.1', '198.51.100.1', 32)).toBe(true);
+    expect(matchIpv4Cidr('198.51.100.2', '198.51.100.1', 32)).toBe(false);
+    expect(matchIpv4Cidr('203.0.113.99', '0.0.0.0', 0)).toBe(true);
+    expect(matchIpv4Cidr('172.16.15.255', '172.16.0.0', 20)).toBe(true);
+    expect(matchIpv4Cidr('172.16.16.0', '172.16.0.0', 20)).toBe(false);
+
+    expect(matchIpv6Cidr('2001:db8:abcd:0012::1', '2001:db8:abcd::', 48)).toBe(true);
+    expect(matchIpv6Cidr('2001:db8:abce::1', '2001:db8:abcd::', 48)).toBe(false);
+    expect(matchIpv6Cidr('2a00:1450:4000::beef', '2a00:1450:4000::', 36)).toBe(true);
+    expect(matchIpv6Cidr('2a00:1450:5000::beef', '2a00:1450:4000::', 36)).toBe(false);
+    expect(matchIpv6Cidr('2001:db8::1', '2001:db8::1', 128)).toBe(true);
+    expect(matchIpv6Cidr('2001:db8::2', '2001:db8::1', 128)).toBe(false);
+  });
+
+  it('detects and expands RFC 7208 §7 SPF macros (including transformers, delimiters & IPv6 nibbles)', () => {
+    const terms = parseSpfTerms(
+      'v=spf1 exists:%{ir}.%{v}._spf.%{d2} include:%{l-}.%{o}.spf.%{d} exp=explain._spf.%{d} -all'
+    );
+    expect(terms[1].macros).toEqual(['%{ir}', '%{v}', '%{d2}']);
+    expect(terms[2].macros).toEqual(['%{l-}', '%{o}', '%{d}']);
+    expect(terms[3].macros).toEqual(['%{d}']);
+
+    expect(extractSpfMacros('%{ir}.%{v}._spf.%{d2}.%%.%_.%-')).toEqual([
+      '%{ir}',
+      '%{v}',
+      '%{d2}',
+      '%%',
+      '%_',
+      '%-',
+    ]);
+
+    // IPv4 reverse + domain right-hand parts + sender local-part delimiter split
+    const v4Exp = expandSpfMacroString('%{ir}.%{v}.%{l-}.%{d2}.example.net', {
+      ip: '192.0.2.25',
+      sender: 'alice-bob@mail.sub.example.com',
+      domain: 'mail.sub.example.com',
+    });
+    expect(v4Exp.expanded).toBe('25.2.0.192.in-addr.alice.bob.example.com.example.net');
+
+    // IPv6 32-nibble dot-separated reverse format per RFC 7208 §7.3
+    const v6Exp = expandSpfMacroString('%{ir}.%{v}._spf.%{d}', {
+      ip: '2001:db8::1',
+      sender: 'postmaster@example.org',
+      domain: 'example.org',
+    });
+    expect(v6Exp.expanded).toBe(
+      '1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6._spf.example.org'
+    );
+
+    // Uppercase URL-encoding macro letter %{S} and escape tokens %%, %_, %-
+    const escExp = expandSpfMacroString('%{S}%%20%_test%-end', {
+      ip: '192.0.2.1',
+      sender: 'user+tag@example.org',
+      domain: 'example.org',
+    });
+    expect(escExp.expanded).toBe('user%2Btag%40example.org%20 test%20end');
+  });
+
+  it('audits overly broad IPv4 (< /16) and IPv6 (< /32) SPF CIDR blocks and evaluates candidate sender IPs across recursive trees', () => {
+    const terms = parseSpfTerms('v=spf1 ip4:192.0.0.0/8 ip6:2001::/16 -ip4:10.0.0.0/8 ip4:198.51.100.0/24 ~all');
+    expect(terms[1].broadCidr).toBe(true);
+    expect(terms[1].warning).toContain('/8');
+    expect(terms[1].warning).toContain('16,777,216');
+    expect(terms[2].broadCidr).toBe(true);
+    expect(terms[2].warning).toContain('/16');
+    // Negative qualifier (-ip4:10.0.0.0/8) does not authorize senders so should not trigger broadCidr
+    expect(terms[3].broadCidr).toBeUndefined();
+    // /24 is narrow and valid
+    expect(terms[4].broadCidr).toBeUndefined();
+
+    const queries: DohQueryLog[] = [
+      makeLog(
+        'spf-eval.example.',
+        RR_TYPES.MX,
+        'MX',
+        buildSyntheticResponsePacket({
+          qname: 'spf-eval.example.',
+          qtype: RR_TYPES.MX,
+          answers: [
+            {
+              name: 'spf-eval.example.',
+              type: RR_TYPES.MX,
+              rdata: encodeMxRdata(10, 'mx1.spf-eval.example.'),
+            },
+          ],
+        })
+      ),
+      makeLog(
+        'mx1.spf-eval.example.',
+        RR_TYPES.A,
+        'A',
+        buildSyntheticResponsePacket({
+          qname: 'mx1.spf-eval.example.',
+          qtype: RR_TYPES.A,
+          answers: [
+            {
+              name: 'mx1.spf-eval.example.',
+              type: RR_TYPES.A,
+              rdata: new Uint8Array([198, 51, 100, 10]),
+            },
+          ],
+        })
+      ),
+      makeLog(
+        'spf-eval.example.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: 'spf-eval.example.',
+          qtype: RR_TYPES.TXT,
+          answers: [
+            {
+              name: 'spf-eval.example.',
+              type: RR_TYPES.TXT,
+              rdata: encodeTxtRdata([
+                'v=spf1 mx/28 ip4:203.0.0.0/8 -ip4:192.0.2.99 include:_spf.partner.example exists:%{ir}._spf.%{d} ~all',
+              ]),
+            },
+          ],
+        })
+      ),
+      makeLog(
+        '_spf.partner.example.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: '_spf.partner.example.',
+          qtype: RR_TYPES.TXT,
+          answers: [
+            {
+              name: '_spf.partner.example.',
+              type: RR_TYPES.TXT,
+              rdata: encodeTxtRdata(['v=spf1 ip4:192.0.2.0/24 ip6:2001:db8:abcd::/48 -all']),
+            },
+          ],
+        })
+      ),
+    ];
+
+    const zone: ZoneAnalysis = {
+      zoneName: 'spf-eval.example.',
+      parentZone: '.',
+      depth: 2,
+      status: 'insecure',
+      statusReason: 'Unsigned',
+      nsecMode: 'UNSIGNED',
+      dnskeys: [],
+      dsVerifications: [],
+      trustAnchorMatches: [],
+      rrsets: [],
+      negativeNodes: [],
+      nameservers: [],
+    };
+
+    const res = evaluateMailFromSnapshotData({
+      targetName: 'spf-eval.example.',
+      queries,
+      zones: [zone],
+      cnameEdges: [],
+      targetDomainStatus: 'insecure',
+    });
+
+    // Broad CIDR audit finding emitted for ip4:203.0.0.0/8
+    const broadFinding = res.mailFindings.find((f) => f.code === 'SPF_BROAD_CIDR');
+    expect(broadFinding).toBeDefined();
+    expect(broadFinding?.title).toContain('ip4:203.0.0.0/8');
+
+    const rootNode = res.mailAnalysis.spf.rootNode;
+
+    // 1. Candidate matching MX /28 netblock (198.51.100.10/28 covers 198.51.100.0..15)
+    const mxMatch = evaluateSpfForSenderIp(rootNode, '198.51.100.14');
+    expect(mxMatch.disposition).toBe('pass');
+    expect(mxMatch.matchedMechanism).toBe('mx');
+    expect(mxMatch.matchedTermRaw).toBe('mx/28');
+    expect(mxMatch.matchedNetworkOrHost).toBe('198.51.100.10/28');
+
+    // 2. Candidate explicitly rejected by -ip4:192.0.2.99 before reaching include:_spf.partner.example
+    const explicitDeny = evaluateSpfForSenderIp(rootNode, '192.0.2.99');
+    expect(explicitDeny.disposition).toBe('fail');
+    expect(explicitDeny.qualifier).toBe('-');
+    expect(explicitDeny.matchedTermRaw).toBe('-ip4:192.0.2.99');
+
+    // 3. Candidate matching nested include:_spf.partner.example (IPv4 192.0.2.42)
+    const incV4 = evaluateSpfForSenderIp(rootNode, '192.0.2.42', {
+      sender: 'billing@spf-eval.example',
+    });
+    expect(incV4.disposition).toBe('pass');
+    expect(incV4.matchedDomain).toBe('_spf.partner.example.');
+    expect(incV4.matchedTermRaw).toBe('ip4:192.0.2.0/24');
+    expect(incV4.tracePath).toEqual(['spf-eval.example', '_spf.partner.example']);
+    expect(incV4.macroExpansions).toHaveLength(1);
+    expect(incV4.macroExpansions[0].expandedSpec).toBe('42.2.0.192._spf.spf-eval.example');
+
+    // 4. Candidate matching nested include:_spf.partner.example (IPv6 2001:db8:abcd:1::5)
+    const incV6 = evaluateSpfForSenderIp(rootNode, '2001:db8:abcd:1::5');
+    expect(incV6.disposition).toBe('pass');
+    expect(incV6.matchedDomain).toBe('_spf.partner.example.');
+    expect(incV6.matchedTermRaw).toBe('ip6:2001:db8:abcd::/48');
+
+    // 5. Unauthorized IPv4 falling through to terminal ~all
+    const softFail = evaluateSpfForSenderIp(rootNode, '198.51.100.200');
+    expect(softFail.disposition).toBe('softfail');
+    expect(softFail.qualifier).toBe('~');
+    expect(softFail.matchedTermRaw).toBe('~all');
+
+    // 6. Invalid IP input handled gracefully
+    const badIp = evaluateSpfForSenderIp(rootNode, '999.999.999.999');
+    expect(badIp.validIp).toBe(false);
+    expect(badIp.error).toContain('Invalid IPv4 or IPv6');
+    expect(collectSpfMacroExpansions(rootNode, { ip: '198.51.100.200' })[0].expandedSpec).toBe(
+      '200.100.51.198._spf.spf-eval.example'
+    );
   });
 
   it('recognizes RFC 7505 Null MX (0 .) paired with strict SPF (-all) as SECURE on a signed zone', () => {

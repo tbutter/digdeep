@@ -768,7 +768,75 @@ export interface SpfTerm {
   resolvedIps?: string[];
   isVoidLookup?: boolean;
   unreachableAfterAll?: boolean;
+  macros?: string[];
+  broadCidr?: boolean;
   childNode?: SpfDomainNode;
+}
+
+export interface SpfMacroTokenDetail {
+  raw: string;
+  letter?: string;
+  keepRightParts?: number;
+  reverse?: boolean;
+  delimiters?: string;
+  urlEncoded?: boolean;
+  replacement: string;
+  description: string;
+}
+
+export interface SpfMacroExpansionPreview {
+  domain: string;
+  displayDomain: string;
+  termRaw: string;
+  mechanismOrModifier: string;
+  originalSpec: string;
+  expandedSpec: string;
+  tokens: SpfMacroTokenDetail[];
+}
+
+export type SpfSenderEvaluationDisposition =
+  | 'pass'
+  | 'fail'
+  | 'softfail'
+  | 'neutral'
+  | 'permerror'
+  | 'temperror'
+  | 'none';
+
+export interface SpfSenderEvaluationStep {
+  domain: string;
+  displayDomain: string;
+  termRaw: string;
+  mechanismOrModifier: string;
+  outcome:
+    | 'matched'
+    | 'not-matched'
+    | 'entered-include'
+    | 'entered-redirect'
+    | 'macro-runtime'
+    | 'error';
+  detail: string;
+}
+
+export interface SpfSenderEvaluationResult {
+  validIp: boolean;
+  candidateIp: string;
+  normalizedIp?: string;
+  family?: 4 | 6;
+  sender: string;
+  helo: string;
+  disposition: SpfSenderEvaluationDisposition;
+  qualifier?: SpfQualifier;
+  matchedDomain?: string;
+  matchedDisplayDomain?: string;
+  matchedTermRaw?: string;
+  matchedMechanism?: string;
+  matchedNetworkOrHost?: string;
+  tracePath: string[];
+  steps: SpfSenderEvaluationStep[];
+  macroExpansions: SpfMacroExpansionPreview[];
+  summary: string;
+  error?: string;
 }
 
 export interface SpfDomainNode {

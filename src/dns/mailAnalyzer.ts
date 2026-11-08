@@ -21,7 +21,14 @@ import {
   normalizeFqdn,
   splitPresentationLabels,
 } from './encoding';
-import { evaluateDnsblAuditForIp, parseReverseIpInput, queryDnsblForIp } from './ipUtils';
+import {
+  evaluateDnsblAuditForIp,
+  formatCanonicalIpv6,
+  parseIpv4Octets,
+  parseIpv6Groups,
+  parseReverseIpInput,
+  queryDnsblForIp,
+} from './ipUtils';
 import type {
   AnalysisProgress,
   AnalysisSnapshot,
@@ -46,8 +53,13 @@ import type {
   MxHostAnalysis,
   NegativeNode,
   SpfDomainNode,
+  SpfMacroExpansionPreview,
+  SpfMacroTokenDetail,
   SpfPolicyVerdict,
   SpfQualifier,
+  SpfSenderEvaluationDisposition,
+  SpfSenderEvaluationResult,
+  SpfSenderEvaluationStep,
   SpfTerm,
   SrvDiscoveredService,
   SrvDiscoveryAnalysis,
@@ -1030,6 +1042,279 @@ export function hasSpfMacro(domainSpec: string): boolean {
   return /%[{_%-]/.test(domainSpec);
 }
 
+/**
+ * Extracts RFC 7208 §7 macro tokens (e.g. `%{i}`, `%{ir}`, `%{d2}`, `%%`, `%_`, `%-`) from a domain-spec.
+ */
+export function extractSpfMacros(domainSpec: string): string[] {
+  const matches: string[] = [];
+  const re = /%(?:\{[a-zA-Z][0-9]*r?[.\-+,/_=]*\}|[%_-])/g;
+  let m: RegExpExecArray | null = re.exec(domainSpec);
+  while (m !== null) {
+    if (!matches.includes(m[0])) {
+      matches.push(m[0]);
+    }
+    m = re.exec(domainSpec);
+  }
+  return matches;
+}
+
+const SPF_MACRO_LETTER_DESCRIPTIONS: Record<string, string> = {
+  s: 'Envelope sender (<sender>)',
+  l: 'Local-part of <sender>',
+  o: 'Domain of <sender>',
+  d: 'Current SPF authoritative <domain>',
+  i: 'Sender IP (dotted-quad IPv4 or 32-nibble dotted IPv6)',
+  p: 'PTR-validated client domain name',
+  v: 'IP version literal ("in-addr" for IPv4, "ip6" for IPv6)',
+  h: 'SMTP HELO/EHLO domain identity',
+  c: 'SMTP client IP (human-readable presentation)',
+  r: 'Receiving MTA hostname performing check',
+  t: 'Current UTC Unix epoch timestamp',
+};
+
+function urlEncodeSpfMacroValue(val: string): string {
+  // RFC 7208 §7.3: Uppercase macro letters encode any character not in RFC 3986 `unreserved`
+  return val.replace(/[^A-Za-z0-9\-._~]/g, (ch) =>
+    Array.from(new TextEncoder().encode(ch))
+      .map((b) => `%${b.toString(16).toUpperCase().padStart(2, '0')}`)
+      .join('')
+  );
+}
+
+/**
+ * Expands RFC 7208 §7 macros (`%{i}`, `%{ir}`, `%{v}`, `%{d}`, `%{d2}`, `%{s}`, `%{l}`, `%{o}`, `%{h}`, `%%`, `%_`, `%-`)
+ * inside an SPF `<domain-spec>` or `exp=` explanation string for a given sender IP and envelope context.
+ */
+export function expandSpfMacroString(
+  domainSpec: string,
+  context: {
+    ip?: string;
+    sender?: string;
+    domain: string;
+    helo?: string;
+    ptrDomain?: string;
+    receiverHost?: string;
+    nowSec?: number;
+  }
+): { expanded: string; tokens: SpfMacroTokenDetail[] } {
+  const dispDom = displayFqdn(normalizeFqdn(context.domain || 'example.com'));
+  const rawSender = (context.sender ?? '').trim();
+  const normalizedSender =
+    rawSender.includes('@') && !rawSender.startsWith('@')
+      ? rawSender
+      : rawSender.length > 0 && !rawSender.includes('@')
+        ? `${rawSender}@${dispDom}`
+        : `postmaster@${dispDom}`;
+  const atPos = normalizedSender.lastIndexOf('@');
+  const localPart = atPos > 0 ? normalizedSender.slice(0, atPos) : 'postmaster';
+  const senderDomain = atPos > 0 ? normalizedSender.slice(atPos + 1) : dispDom;
+
+  const rawIp = (context.ip ?? '').trim() || '192.0.2.1';
+  const v4Octets = parseIpv4Octets(rawIp);
+  const v6Groups = v4Octets ? null : parseIpv6Groups(rawIp);
+
+  let ipMacroI = '192.0.2.1';
+  let ipMacroV = 'in-addr';
+  let ipMacroC = '192.0.2.1';
+
+  if (v4Octets) {
+    ipMacroI = v4Octets.join('.');
+    ipMacroV = 'in-addr';
+    ipMacroC = ipMacroI;
+  } else if (v6Groups) {
+    // RFC 7208 §7.3: For IPv6, %{i} expands to 32 lowercase hex nibbles separated by dots
+    const hex32 = v6Groups.map((g) => g.toString(16).toLowerCase().padStart(4, '0')).join('');
+    ipMacroI = hex32.split('').join('.');
+    ipMacroV = 'ip6';
+    ipMacroC = formatCanonicalIpv6(v6Groups);
+  }
+
+  const heloHost = (context.helo ?? '').trim() || `mail.${dispDom}`;
+  const ptrHost = (context.ptrDomain ?? '').trim() || 'unknown';
+  const recvHost = (context.receiverHost ?? '').trim() || 'digdeep.dns';
+  const epochStr = String(context.nowSec ?? 1700000000);
+
+  const tokens: SpfMacroTokenDetail[] = [];
+  const macroRegex = /%(?:\{([slodipvhcrtSLODIPVHCRT])(\d*)(r?)([.\-+,/_=]*)\}|([%_-]))/g;
+
+  const expanded = domainSpec.replace(
+    macroRegex,
+    (
+      fullMatch,
+      letterRaw: string | undefined,
+      digitsRaw: string | undefined,
+      revRaw: string | undefined,
+      delimsRaw: string | undefined,
+      escapeChar: string | undefined
+    ) => {
+      if (escapeChar !== undefined) {
+        const rep = escapeChar === '%' ? '%' : escapeChar === '_' ? ' ' : '%20';
+        const desc =
+          escapeChar === '%'
+            ? 'Literal percent sign ("%)'
+            : escapeChar === '_'
+              ? 'Literal space (" ")'
+              : 'URL-encoded space ("%20")';
+        tokens.push({
+          raw: fullMatch,
+          replacement: rep,
+          description: desc,
+        });
+        return rep;
+      }
+
+      const letter = (letterRaw ?? 'd').toLowerCase();
+      const isUpper = letterRaw !== letter;
+      let baseVal = '';
+      switch (letter) {
+        case 's':
+          baseVal = normalizedSender;
+          break;
+        case 'l':
+          baseVal = localPart;
+          break;
+        case 'o':
+          baseVal = senderDomain;
+          break;
+        case 'd':
+          baseVal = dispDom;
+          break;
+        case 'i':
+          baseVal = ipMacroI;
+          break;
+        case 'p':
+          baseVal = ptrHost;
+          break;
+        case 'v':
+          baseVal = ipMacroV;
+          break;
+        case 'h':
+          baseVal = heloHost;
+          break;
+        case 'c':
+          baseVal = ipMacroC;
+          break;
+        case 'r':
+          baseVal = recvHost;
+          break;
+        case 't':
+          baseVal = epochStr;
+          break;
+      }
+
+      const reverse = revRaw === 'r';
+      const keepRightParts =
+        digitsRaw && digitsRaw.length > 0 ? Number.parseInt(digitsRaw, 10) : undefined;
+      const delimiters = delimsRaw && delimsRaw.length > 0 ? delimsRaw : undefined;
+
+      let transformed = baseVal;
+      if (reverse || keepRightParts !== undefined || delimiters !== undefined) {
+        const splitChars = delimiters ?? '.';
+        const escapedChars = splitChars.replace(/[\\\]^-]/g, '\\$&');
+        const splitRe = new RegExp(`[${escapedChars}]`);
+        let parts = transformed.split(splitRe);
+        if (reverse) {
+          parts = [...parts].reverse();
+        }
+        if (keepRightParts !== undefined && keepRightParts > 0) {
+          parts = parts.slice(-keepRightParts);
+        }
+        transformed = parts.join('.');
+      }
+
+      if (isUpper) {
+        transformed = urlEncodeSpfMacroValue(transformed);
+      }
+
+      const transformNotes: string[] = [];
+      if (delimiters) transformNotes.push(`split on "${delimiters}"`);
+      if (reverse) transformNotes.push('reversed');
+      if (keepRightParts !== undefined && keepRightParts > 0) {
+        transformNotes.push(`rightmost ${keepRightParts} part(s)`);
+      }
+      if (isUpper) transformNotes.push('URL-encoded');
+
+      const baseDesc = SPF_MACRO_LETTER_DESCRIPTIONS[letter] ?? `Macro %${letter}`;
+      tokens.push({
+        raw: fullMatch,
+        letter: letterRaw,
+        keepRightParts,
+        reverse,
+        delimiters,
+        urlEncoded: isUpper,
+        replacement: transformed,
+        description:
+          transformNotes.length > 0 ? `${baseDesc} (${transformNotes.join(', ')})` : baseDesc,
+      });
+
+      return transformed;
+    }
+  );
+
+  return { expanded, tokens };
+}
+
+/**
+ * Exact 32-bit IPv4 CIDR bitmask match (`0 <= prefixLen <= 32`).
+ */
+export function matchIpv4Cidr(candidateIp: string, networkIp: string, prefixLen = 32): boolean {
+  if (prefixLen < 0 || prefixLen > 32) return false;
+  const cand = parseIpv4Octets(candidateIp);
+  const net = parseIpv4Octets(networkIp);
+  if (!cand || !net) return false;
+  if (prefixLen === 0) return true;
+  const candU32 = ((cand[0] << 24) | (cand[1] << 16) | (cand[2] << 8) | cand[3]) >>> 0;
+  const netU32 = ((net[0] << 24) | (net[1] << 16) | (net[2] << 8) | net[3]) >>> 0;
+  const mask = prefixLen === 32 ? 0xffffffff : (~((1 << (32 - prefixLen)) - 1)) >>> 0;
+  return ((candU32 & mask) >>> 0) === ((netU32 & mask) >>> 0);
+}
+
+/**
+ * Exact 128-bit IPv6 CIDR bitmask match (`0 <= prefixLen <= 128`).
+ */
+export function matchIpv6Cidr(candidateIp: string, networkIp: string, prefixLen = 128): boolean {
+  if (prefixLen < 0 || prefixLen > 128) return false;
+  const cand = parseIpv6Groups(candidateIp);
+  const net = parseIpv6Groups(networkIp);
+  if (!cand || !net) return false;
+  if (prefixLen === 0) return true;
+  const fullGroups = Math.floor(prefixLen / 16);
+  const remBits = prefixLen % 16;
+  for (let i = 0; i < fullGroups; i++) {
+    if (cand[i] !== net[i]) return false;
+  }
+  if (remBits > 0) {
+    const mask = (0xffff << (16 - remBits)) & 0xffff;
+    if ((cand[fullGroups] & mask) !== (net[fullGroups] & mask)) return false;
+  }
+  return true;
+}
+
+function formatBroadCidrWarning(
+  qualifier: SpfQualifier | undefined,
+  cidr4: number | undefined,
+  cidr6: number | undefined
+): { broadCidr: boolean; warning?: string } {
+  const q = qualifier ?? '+';
+  if (q === '-' || q === '?') {
+    return { broadCidr: false };
+  }
+  if (cidr4 !== undefined && cidr4 >= 0 && cidr4 < 16) {
+    const hosts = (2 ** (32 - cidr4)).toLocaleString('en-US');
+    return {
+      broadCidr: true,
+      warning: `Overly broad IPv4 prefix /${cidr4} authorizes ${hosts} IPv4 addresses (RFC 7208 best practice: use /16 or narrower)`,
+    };
+  }
+  if (cidr6 !== undefined && cidr6 >= 0 && cidr6 < 32) {
+    return {
+      broadCidr: true,
+      warning: `Overly broad IPv6 prefix /${cidr6} authorizes a wider-than-/32 RIR allocation (RFC 7208 best practice: use /32 or narrower)`,
+    };
+  }
+  return { broadCidr: false };
+}
+
 function isValidIpv4Address(addr: string): boolean {
   const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(addr);
   if (!m) return false;
@@ -1276,6 +1561,7 @@ export function parseSpfTerms(recordText: string): SpfTerm[] {
           if (cidr4 < 0 || cidr4 > 32) err = `IPv4 CIDR /${cidr4} out of range (0..32)`;
         }
       }
+      const broad = !err ? formatBroadCidrWarning(qualifier, cidr4, undefined) : { broadCidr: false };
       terms.push({
         raw: tok,
         kind: 'mechanism',
@@ -1286,8 +1572,9 @@ export function parseSpfTerms(recordText: string): SpfTerm[] {
         countsTowardLookupLimit: false,
         syntaxValid: !err,
         unreachableAfterAll: afterAll,
+        broadCidr: broad.broadCidr || undefined,
         error: err,
-        warning: afterAll ? 'Unreachable mechanism after "all"' : undefined,
+        warning: afterAll ? 'Unreachable mechanism after "all"' : broad.warning,
       });
       return;
     }
@@ -1322,6 +1609,7 @@ export function parseSpfTerms(recordText: string): SpfTerm[] {
           if (cidr6 < 0 || cidr6 > 128) err = `IPv6 CIDR /${cidr6} out of range (0..128)`;
         }
       }
+      const broad = !err ? formatBroadCidrWarning(qualifier, undefined, cidr6) : { broadCidr: false };
       terms.push({
         raw: tok,
         kind: 'mechanism',
@@ -1332,14 +1620,18 @@ export function parseSpfTerms(recordText: string): SpfTerm[] {
         countsTowardLookupLimit: false,
         syntaxValid: !err,
         unreachableAfterAll: afterAll,
+        broadCidr: broad.broadCidr || undefined,
         error: err,
-        warning: afterAll ? 'Unreachable mechanism after "all"' : undefined,
+        warning: afterAll ? 'Unreachable mechanism after "all"' : broad.warning,
       });
       return;
     }
 
     if (mechLower === 'a' || mechLower === 'mx') {
       const parsed = parseDualCidrSuffix(arg);
+      const broad = !parsed.error
+        ? formatBroadCidrWarning(qualifier, parsed.cidr4, parsed.cidr6)
+        : { broadCidr: false };
       terms.push({
         raw: tok,
         kind: 'mechanism',
@@ -1351,8 +1643,9 @@ export function parseSpfTerms(recordText: string): SpfTerm[] {
         countsTowardLookupLimit: !parsed.error && !afterAll,
         syntaxValid: !parsed.error,
         unreachableAfterAll: afterAll,
+        broadCidr: broad.broadCidr || undefined,
         error: parsed.error,
-        warning: afterAll ? 'Unreachable mechanism after "all"' : undefined,
+        warning: afterAll ? 'Unreachable mechanism after "all"' : broad.warning,
       });
       return;
     }
@@ -1414,7 +1707,654 @@ export function parseSpfTerms(recordText: string): SpfTerm[] {
     });
   });
 
+  // Populate RFC 7208 §7 macro token lists for any term containing macros in its domain-spec value
+  for (const term of terms) {
+    if (term.value && hasSpfMacro(term.value)) {
+      const extracted = extractSpfMacros(term.value);
+      if (extracted.length > 0) {
+        term.macros = extracted;
+      }
+    }
+  }
+
   return terms;
+}
+
+function qualifierToDisposition(q: SpfQualifier | undefined): SpfSenderEvaluationDisposition {
+  switch (q ?? '+') {
+    case '+':
+      return 'pass';
+    case '-':
+      return 'fail';
+    case '~':
+      return 'softfail';
+    case '?':
+      return 'neutral';
+  }
+}
+
+/**
+ * Collects all RFC 7208 §7 macro terms across the SPF tree and computes their expanded preview
+ * for the given sender IP and envelope sender context.
+ */
+export function collectSpfMacroExpansions(
+  rootNode: SpfDomainNode,
+  context: {
+    ip?: string;
+    sender?: string;
+    helo?: string;
+    nowSec?: number;
+  } = {}
+): SpfMacroExpansionPreview[] {
+  const results: SpfMacroExpansionPreview[] = [];
+  const walk = (node: SpfDomainNode) => {
+    for (const term of node.terms) {
+      if (term.value && hasSpfMacro(term.value)) {
+        const exp = expandSpfMacroString(term.value, {
+          ip: context.ip,
+          sender: context.sender,
+          domain: node.domain,
+          helo: context.helo,
+          nowSec: context.nowSec,
+        });
+        results.push({
+          domain: node.domain,
+          displayDomain: node.displayDomain,
+          termRaw: term.raw,
+          mechanismOrModifier:
+            term.kind === 'mechanism' ? (term.mechanism ?? 'unknown') : (term.modifier ?? 'modifier'),
+          originalSpec: term.value,
+          expandedSpec: exp.expanded,
+          tokens: exp.tokens,
+        });
+      }
+      if (term.childNode) {
+        walk(term.childNode);
+      }
+    }
+  };
+  walk(rootNode);
+  return results;
+}
+
+/**
+ * Evaluates a candidate IPv4 or IPv6 sender address top-down against a resolved `SpfDomainNode` tree
+ * per RFC 7208 §4 / §5 / §6, returning the final SPF disposition (`pass`, `fail`, `softfail`, `neutral`, `permerror`, `temperror`, `none`),
+ * the exact matching mechanism and branch path, and any RFC 7208 §7 macro expansions.
+ */
+export function evaluateSpfForSenderIp(
+  rootNode: SpfDomainNode,
+  rawCandidateIp: string,
+  options: {
+    sender?: string;
+    helo?: string;
+    nowSec?: number;
+  } = {}
+): SpfSenderEvaluationResult {
+  const trimmedIp = rawCandidateIp.trim();
+  const dispRoot = rootNode.displayDomain;
+  const sender =
+    options.sender && options.sender.trim().length > 0
+      ? options.sender.trim().includes('@')
+        ? options.sender.trim()
+        : `${options.sender.trim()}@${dispRoot}`
+      : `postmaster@${dispRoot}`;
+  const helo = options.helo && options.helo.trim().length > 0 ? options.helo.trim() : `mail.${dispRoot}`;
+
+  const v4 = parseIpv4Octets(trimmedIp);
+  const v6 = v4 ? null : parseIpv6Groups(trimmedIp);
+
+  if (!v4 && !v6) {
+    const macroExpansions = collectSpfMacroExpansions(rootNode, {
+      ip: '192.0.2.1',
+      sender,
+      helo,
+      nowSec: options.nowSec,
+    });
+    return {
+      validIp: false,
+      candidateIp: trimmedIp,
+      sender,
+      helo,
+      disposition: 'none',
+      tracePath: [dispRoot],
+      steps: [],
+      macroExpansions,
+      summary: trimmedIp
+        ? `"${trimmedIp}" is not a valid IPv4 or IPv6 address.`
+        : 'Enter an IPv4 or IPv6 sender address to evaluate against the SPF tree.',
+      error: trimmedIp ? `Invalid IPv4 or IPv6 literal "${trimmedIp}"` : undefined,
+    };
+  }
+
+  const family: 4 | 6 = v4 ? 4 : 6;
+  const normalizedIp = v4 ? v4.join('.') : formatCanonicalIpv6(v6!);
+  const macroExpansions = collectSpfMacroExpansions(rootNode, {
+    ip: normalizedIp,
+    sender,
+    helo,
+    nowSec: options.nowSec,
+  });
+
+  const steps: SpfSenderEvaluationStep[] = [];
+
+  if (rootNode.spfRecords.length === 0) {
+    const isTemp = Boolean(rootNode.error?.includes('SERVFAIL'));
+    const disp: SpfSenderEvaluationDisposition = isTemp ? 'temperror' : 'none';
+    return {
+      validIp: true,
+      candidateIp: trimmedIp,
+      normalizedIp,
+      family,
+      sender,
+      helo,
+      disposition: disp,
+      tracePath: [dispRoot],
+      steps,
+      macroExpansions,
+      summary: isTemp
+        ? `SPF evaluation aborted with TEMPERROR (SERVFAIL on ${dispRoot} TXT).`
+        : `No SPF policy published at ${dispRoot} (returns NONE).`,
+    };
+  }
+
+  type NodeEvalOutcome = {
+    disposition: SpfSenderEvaluationDisposition;
+    qualifier?: SpfQualifier;
+    matchedDomain?: string;
+    matchedDisplayDomain?: string;
+    matchedTermRaw?: string;
+    matchedMechanism?: string;
+    matchedNetworkOrHost?: string;
+    tracePath: string[];
+    error?: string;
+  };
+
+  const evaluateNode = (node: SpfDomainNode, currentPath: string[]): NodeEvalOutcome => {
+    if (node.loopDetected) {
+      steps.push({
+        domain: node.domain,
+        displayDomain: node.displayDomain,
+        termRaw: node.via,
+        mechanismOrModifier: node.via,
+        outcome: 'error',
+        detail: node.error ?? `Circular SPF loop at ${node.displayDomain}`,
+      });
+      return {
+        disposition: 'permerror',
+        tracePath: currentPath,
+        error: node.error ?? `Circular SPF loop at ${node.displayDomain}`,
+      };
+    }
+
+    if (node.error?.includes('SERVFAIL')) {
+      steps.push({
+        domain: node.domain,
+        displayDomain: node.displayDomain,
+        termRaw: 'TXT',
+        mechanismOrModifier: node.via,
+        outcome: 'error',
+        detail: node.error,
+      });
+      return {
+        disposition: 'temperror',
+        tracePath: currentPath,
+        error: node.error,
+      };
+    }
+
+    if (node.spfRecords.length !== 1) {
+      const errMsg =
+        node.error ??
+        (node.spfRecords.length > 1
+          ? `Multiple v=spf1 TXT records at ${node.displayDomain} (permerror)`
+          : `No v=spf1 TXT record at ${node.displayDomain} (permerror)`);
+      steps.push({
+        domain: node.domain,
+        displayDomain: node.displayDomain,
+        termRaw: 'TXT',
+        mechanismOrModifier: node.via,
+        outcome: 'error',
+        detail: errMsg,
+      });
+      return {
+        disposition: 'permerror',
+        tracePath: currentPath,
+        error: errMsg,
+      };
+    }
+
+    const syntaxErrTerm = node.terms.find((t) => !t.syntaxValid || Boolean(t.error));
+    if (syntaxErrTerm) {
+      const errMsg =
+        syntaxErrTerm.error ??
+        `Syntax error in "${syntaxErrTerm.raw}" at ${node.displayDomain} (RFC 7208 §4.6.1 permerror)`;
+      steps.push({
+        domain: node.domain,
+        displayDomain: node.displayDomain,
+        termRaw: syntaxErrTerm.raw,
+        mechanismOrModifier: syntaxErrTerm.mechanism ?? syntaxErrTerm.modifier ?? 'unknown',
+        outcome: 'error',
+        detail: errMsg,
+      });
+      return {
+        disposition: 'permerror',
+        matchedDomain: node.domain,
+        matchedDisplayDomain: node.displayDomain,
+        matchedTermRaw: syntaxErrTerm.raw,
+        tracePath: currentPath,
+        error: errMsg,
+      };
+    }
+
+    for (const term of node.terms) {
+      if (term.kind === 'version' || term.unreachableAfterAll) continue;
+      if (term.kind !== 'mechanism' || !term.mechanism) continue;
+
+      const q: SpfQualifier = term.qualifier ?? '+';
+      const disp = qualifierToDisposition(q);
+
+      if (term.mechanism === 'all') {
+        steps.push({
+          domain: node.domain,
+          displayDomain: node.displayDomain,
+          termRaw: term.raw,
+          mechanismOrModifier: 'all',
+          outcome: 'matched',
+          detail: `Terminal "${term.raw}" matches all IPv4/IPv6 addresses -> ${disp.toUpperCase()} (${q})`,
+        });
+        return {
+          disposition: disp,
+          qualifier: q,
+          matchedDomain: node.domain,
+          matchedDisplayDomain: node.displayDomain,
+          matchedTermRaw: term.raw,
+          matchedMechanism: 'all',
+          matchedNetworkOrHost: '0.0.0.0/0 & ::/0 (all)',
+          tracePath: currentPath,
+        };
+      }
+
+      if (term.mechanism === 'ip4') {
+        const prefix = term.cidr4 ?? 32;
+        const netSpec = `${term.value}/${prefix}`;
+        if (family === 4 && term.value && matchIpv4Cidr(normalizedIp, term.value, prefix)) {
+          steps.push({
+            domain: node.domain,
+            displayDomain: node.displayDomain,
+            termRaw: term.raw,
+            mechanismOrModifier: 'ip4',
+            outcome: 'matched',
+            detail: `${normalizedIp} matches IPv4 CIDR ${netSpec} -> ${disp.toUpperCase()} (${q})`,
+          });
+          return {
+            disposition: disp,
+            qualifier: q,
+            matchedDomain: node.domain,
+            matchedDisplayDomain: node.displayDomain,
+            matchedTermRaw: term.raw,
+            matchedMechanism: 'ip4',
+            matchedNetworkOrHost: netSpec,
+            tracePath: currentPath,
+          };
+        }
+        steps.push({
+          domain: node.domain,
+          displayDomain: node.displayDomain,
+          termRaw: term.raw,
+          mechanismOrModifier: 'ip4',
+          outcome: 'not-matched',
+          detail:
+            family === 6
+              ? `Skipped IPv4 mechanism for IPv6 candidate ${normalizedIp}`
+              : `${normalizedIp} outside ${netSpec}`,
+        });
+        continue;
+      }
+
+      if (term.mechanism === 'ip6') {
+        const prefix = term.cidr6 ?? 128;
+        const netSpec = `${term.value}/${prefix}`;
+        if (family === 6 && term.value && matchIpv6Cidr(normalizedIp, term.value, prefix)) {
+          steps.push({
+            domain: node.domain,
+            displayDomain: node.displayDomain,
+            termRaw: term.raw,
+            mechanismOrModifier: 'ip6',
+            outcome: 'matched',
+            detail: `${normalizedIp} matches IPv6 CIDR ${netSpec} -> ${disp.toUpperCase()} (${q})`,
+          });
+          return {
+            disposition: disp,
+            qualifier: q,
+            matchedDomain: node.domain,
+            matchedDisplayDomain: node.displayDomain,
+            matchedTermRaw: term.raw,
+            matchedMechanism: 'ip6',
+            matchedNetworkOrHost: netSpec,
+            tracePath: currentPath,
+          };
+        }
+        steps.push({
+          domain: node.domain,
+          displayDomain: node.displayDomain,
+          termRaw: term.raw,
+          mechanismOrModifier: 'ip6',
+          outcome: 'not-matched',
+          detail:
+            family === 4
+              ? `Skipped IPv6 mechanism for IPv4 candidate ${normalizedIp}`
+              : `${normalizedIp} outside ${netSpec}`,
+        });
+        continue;
+      }
+
+      if (term.mechanism === 'a' || term.mechanism === 'mx') {
+        if (term.value && hasSpfMacro(term.value)) {
+          const exp = expandSpfMacroString(term.value, {
+            ip: normalizedIp,
+            sender,
+            domain: node.domain,
+            helo,
+            nowSec: options.nowSec,
+          });
+          steps.push({
+            domain: node.domain,
+            displayDomain: node.displayDomain,
+            termRaw: term.raw,
+            mechanismOrModifier: term.mechanism,
+            outcome: 'macro-runtime',
+            detail: `Macro target expands to "${exp.expanded}" (requires live DNS ${term.mechanism.toUpperCase()} query for ${exp.expanded})`,
+          });
+          continue;
+        }
+
+        const resolvedIps = term.resolvedIps ?? [];
+        let matchedHostIp: string | undefined;
+        for (const rIp of resolvedIps) {
+          if (family === 4 && parseIpv4Octets(rIp)) {
+            const p4 = term.cidr4 ?? 32;
+            if (matchIpv4Cidr(normalizedIp, rIp, p4)) {
+              matchedHostIp = p4 < 32 ? `${rIp}/${p4}` : rIp;
+              break;
+            }
+          } else if (family === 6 && parseIpv6Groups(rIp)) {
+            const p6 = term.cidr6 ?? 128;
+            if (matchIpv6Cidr(normalizedIp, rIp, p6)) {
+              matchedHostIp = p6 < 128 ? `${rIp}/${p6}` : rIp;
+              break;
+            }
+          }
+        }
+
+        if (matchedHostIp) {
+          steps.push({
+            domain: node.domain,
+            displayDomain: node.displayDomain,
+            termRaw: term.raw,
+            mechanismOrModifier: term.mechanism,
+            outcome: 'matched',
+            detail: `${normalizedIp} matched ${term.mechanism.toUpperCase()} address ${matchedHostIp} -> ${disp.toUpperCase()} (${q})`,
+          });
+          return {
+            disposition: disp,
+            qualifier: q,
+            matchedDomain: node.domain,
+            matchedDisplayDomain: node.displayDomain,
+            matchedTermRaw: term.raw,
+            matchedMechanism: term.mechanism,
+            matchedNetworkOrHost: matchedHostIp,
+            tracePath: currentPath,
+          };
+        }
+
+        steps.push({
+          domain: node.domain,
+          displayDomain: node.displayDomain,
+          termRaw: term.raw,
+          mechanismOrModifier: term.mechanism,
+          outcome: 'not-matched',
+          detail:
+            resolvedIps.length === 0
+              ? `No ${term.mechanism.toUpperCase()} addresses resolved`
+              : `${normalizedIp} did not match ${resolvedIps.length} resolved ${term.mechanism.toUpperCase()} IP(s)`,
+        });
+        continue;
+      }
+
+      if (term.mechanism === 'exists') {
+        if (term.value && hasSpfMacro(term.value)) {
+          const exp = expandSpfMacroString(term.value, {
+            ip: normalizedIp,
+            sender,
+            domain: node.domain,
+            helo,
+            nowSec: options.nowSec,
+          });
+          steps.push({
+            domain: node.domain,
+            displayDomain: node.displayDomain,
+            termRaw: term.raw,
+            mechanismOrModifier: 'exists',
+            outcome: 'macro-runtime',
+            detail: `RFC 7208 §5.7 exists: macro expands to "${exp.expanded}" (matches if "${exp.expanded}" A record exists)`,
+          });
+          continue;
+        }
+        if ((term.resolvedIps ?? []).length > 0) {
+          steps.push({
+            domain: node.domain,
+            displayDomain: node.displayDomain,
+            termRaw: term.raw,
+            mechanismOrModifier: 'exists',
+            outcome: 'matched',
+            detail: `exists:${term.value} resolved A record (${term.resolvedIps![0]}) -> ${disp.toUpperCase()} (${q})`,
+          });
+          return {
+            disposition: disp,
+            qualifier: q,
+            matchedDomain: node.domain,
+            matchedDisplayDomain: node.displayDomain,
+            matchedTermRaw: term.raw,
+            matchedMechanism: 'exists',
+            matchedNetworkOrHost: term.value,
+            tracePath: currentPath,
+          };
+        }
+        steps.push({
+          domain: node.domain,
+          displayDomain: node.displayDomain,
+          termRaw: term.raw,
+          mechanismOrModifier: 'exists',
+          outcome: 'not-matched',
+          detail: `exists:${term.value} returned no A record`,
+        });
+        continue;
+      }
+
+      if (term.mechanism === 'ptr') {
+        const expTarget =
+          term.value && hasSpfMacro(term.value)
+            ? expandSpfMacroString(term.value, {
+                ip: normalizedIp,
+                sender,
+                domain: node.domain,
+                helo,
+                nowSec: options.nowSec,
+              }).expanded
+            : term.value ?? node.displayDomain;
+        steps.push({
+          domain: node.domain,
+          displayDomain: node.displayDomain,
+          termRaw: term.raw,
+          mechanismOrModifier: 'ptr',
+          outcome: 'macro-runtime',
+          detail: `Deprecated ptr mechanism (requires runtime reverse PTR validation under ${expTarget})`,
+        });
+        continue;
+      }
+
+      if (term.mechanism === 'include') {
+        if (term.value && hasSpfMacro(term.value)) {
+          const exp = expandSpfMacroString(term.value, {
+            ip: normalizedIp,
+            sender,
+            domain: node.domain,
+            helo,
+            nowSec: options.nowSec,
+          });
+          steps.push({
+            domain: node.domain,
+            displayDomain: node.displayDomain,
+            termRaw: term.raw,
+            mechanismOrModifier: 'include',
+            outcome: 'macro-runtime',
+            detail: `Macro include expands to "${exp.expanded}" TXT`,
+          });
+          continue;
+        }
+
+        if (term.childNode) {
+          steps.push({
+            domain: node.domain,
+            displayDomain: node.displayDomain,
+            termRaw: term.raw,
+            mechanismOrModifier: 'include',
+            outcome: 'entered-include',
+            detail: `Evaluating recursive ${term.raw} (${term.childNode.displayDomain})`,
+          });
+          const childRes = evaluateNode(term.childNode, [
+            ...currentPath,
+            term.childNode.displayDomain,
+          ]);
+          // RFC 7208 §5.2 recursive include evaluation table:
+          if (childRes.disposition === 'pass') {
+            return {
+              disposition: disp,
+              qualifier: q,
+              matchedDomain: childRes.matchedDomain ?? term.childNode.domain,
+              matchedDisplayDomain: childRes.matchedDisplayDomain ?? term.childNode.displayDomain,
+              matchedTermRaw: q === '+' ? childRes.matchedTermRaw : `${term.raw} -> ${childRes.matchedTermRaw}`,
+              matchedMechanism: childRes.matchedMechanism ?? 'include',
+              matchedNetworkOrHost: childRes.matchedNetworkOrHost,
+              tracePath: childRes.tracePath,
+            };
+          }
+          if (
+            childRes.disposition === 'permerror' ||
+            childRes.disposition === 'temperror'
+          ) {
+            return childRes;
+          }
+          if (childRes.disposition === 'none') {
+            return {
+              disposition: 'permerror',
+              matchedDomain: term.childNode.domain,
+              matchedDisplayDomain: term.childNode.displayDomain,
+              matchedTermRaw: term.raw,
+              tracePath: childRes.tracePath,
+              error: `Included domain ${term.childNode.displayDomain} returned none (RFC 7208 §5.2 permerror)`,
+            };
+          }
+          // Child returned fail, softfail, or neutral -> include does NOT match; continue in parent!
+        }
+      }
+    }
+
+    // Check active redirect= modifier if no mechanism in `node` matched (RFC 7208 §6.1)
+    const redirectTerm = node.terms.find(
+      (t) =>
+        t.kind === 'modifier' &&
+        t.modifier === 'redirect' &&
+        t.syntaxValid &&
+        !t.warning?.includes('Ignored')
+    );
+    if (redirectTerm) {
+      if (redirectTerm.value && hasSpfMacro(redirectTerm.value)) {
+        const exp = expandSpfMacroString(redirectTerm.value, {
+          ip: normalizedIp,
+          sender,
+          domain: node.domain,
+          helo,
+          nowSec: options.nowSec,
+        });
+        steps.push({
+          domain: node.domain,
+          displayDomain: node.displayDomain,
+          termRaw: redirectTerm.raw,
+          mechanismOrModifier: 'redirect',
+          outcome: 'macro-runtime',
+          detail: `Macro redirect= expands to "${exp.expanded}" TXT`,
+        });
+      } else if (redirectTerm.childNode) {
+        steps.push({
+          domain: node.domain,
+          displayDomain: node.displayDomain,
+          termRaw: redirectTerm.raw,
+          mechanismOrModifier: 'redirect',
+          outcome: 'entered-redirect',
+          detail: `No mechanism matched in ${node.displayDomain}; following ${redirectTerm.raw}`,
+        });
+        const redirRes = evaluateNode(redirectTerm.childNode, [
+          ...currentPath,
+          redirectTerm.childNode.displayDomain,
+        ]);
+        if (redirRes.disposition === 'none') {
+          return {
+            disposition: 'permerror',
+            matchedDomain: redirectTerm.childNode.domain,
+            matchedDisplayDomain: redirectTerm.childNode.displayDomain,
+            matchedTermRaw: redirectTerm.raw,
+            tracePath: redirRes.tracePath,
+            error: `Redirect target ${redirectTerm.childNode.displayDomain} returned none (RFC 7208 §6.1 permerror)`,
+          };
+        }
+        return redirRes;
+      }
+    }
+
+    // RFC 7208 §4.7: Default result when reaching the end of an SPF record without matching is Neutral
+    return {
+      disposition: 'neutral',
+      qualifier: '?',
+      matchedDomain: node.domain,
+      matchedDisplayDomain: node.displayDomain,
+      tracePath: currentPath,
+    };
+  };
+
+  const finalOutcome = evaluateNode(rootNode, [dispRoot]);
+
+  let summary = '';
+  if (finalOutcome.disposition === 'permerror' || finalOutcome.disposition === 'temperror') {
+    summary = `SPF ${finalOutcome.disposition.toUpperCase()} for ${normalizedIp}: ${finalOutcome.error ?? 'evaluation failed'}.`;
+  } else if (finalOutcome.matchedTermRaw) {
+    const pathStr = finalOutcome.tracePath.join(' → ');
+    summary = `SPF ${finalOutcome.disposition.toUpperCase()} (${finalOutcome.qualifier ?? '+'}) — ${normalizedIp} matched "${finalOutcome.matchedTermRaw}" in ${finalOutcome.matchedDisplayDomain} (${pathStr}).`;
+  } else {
+    summary = `SPF ${finalOutcome.disposition.toUpperCase()} (?) — ${normalizedIp} did not match any mechanism in ${dispRoot} (RFC 7208 §4.7 default neutral).`;
+  }
+
+  return {
+    validIp: true,
+    candidateIp: trimmedIp,
+    normalizedIp,
+    family,
+    sender,
+    helo,
+    disposition: finalOutcome.disposition,
+    qualifier: finalOutcome.qualifier,
+    matchedDomain: finalOutcome.matchedDomain,
+    matchedDisplayDomain: finalOutcome.matchedDisplayDomain,
+    matchedTermRaw: finalOutcome.matchedTermRaw,
+    matchedMechanism: finalOutcome.matchedMechanism,
+    matchedNetworkOrHost: finalOutcome.matchedNetworkOrHost,
+    tracePath: finalOutcome.tracePath,
+    steps,
+    macroExpansions,
+    summary,
+    error: finalOutcome.error,
+  };
 }
 
 /**
@@ -4828,6 +5768,17 @@ export function evaluateMailFromSnapshotData(params: {
             title: `SPF "redirect=" modifier in ${node.displayDomain} is ignored because "all" is present`,
             detail: t.warning,
             rfc: 'RFC 7208 §6.1',
+          });
+        }
+        if (t.broadCidr && !t.unreachableAfterAll && t.warning) {
+          mailFindings.push({
+            id: `mail-warn-spf-broad-cidr-${node.domain}-${t.raw}`,
+            severity: 'warning',
+            code: 'SPF_BROAD_CIDR',
+            title: `Overly broad SPF netblock "${t.raw}" in ${node.displayDomain}`,
+            detail: `${t.warning}. Authorizing excessively wide public IPv4 (< /16) or IPv6 (< /32) prefixes allows unrelated hosts in the sameISP/cloud allocation to spoof mail for ${dispTarget}.`,
+            rfc: 'RFC 7208 §5.6',
+            targetId: node.via === 'root' ? rootTxtDnssec.rrset?.id : undefined,
           });
         }
         if (t.childNode) collectSpfNodeIssues(t.childNode);

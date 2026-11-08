@@ -191,7 +191,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v19');
+    expect(swCode).toContain('digdeep-shell-v20');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge when navigator.onLine is false
@@ -530,6 +530,8 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(mailHtml).toContain('v=BIMI1');
       expect(mailHtml).toContain('_25._tcp.');
       expect(mailHtml).toContain('v=spf1');
+      expect(mailHtml).toContain('Interactive SPF Sender IP Evaluator');
+      expect(mailHtml).toContain('Test Sender IPv4 / IPv6 Address');
       expect(mailHtml).toContain('_dmarc.ietf.org');
       expect(mailHtml).toContain('mail._domainkey.ietf.org');
 
