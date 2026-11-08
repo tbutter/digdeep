@@ -38,7 +38,14 @@ import { reverifySnapshot, runDnsvizAnalysis, SNAPSHOT_ENGINE_VERSION } from './
 import { runConsensusAnalysis } from './dns/consensusAnalyzer';
 import { ANALYSIS_MODES, formatDohShortLabel, QUERYABLE_RR_TYPES } from './dns/constants';
 import { parseReverseIpInput } from './dns/ipUtils';
-import { parseDkimSelectorInput, runMailAnalysis } from './dns/mailAnalyzer';
+import {
+  parseDkimSelectorInput,
+  queryPublicSuffix,
+  runMailAnalysis,
+  seedPublicSuffixCacheFromLogs,
+  splitDomainByPublicSuffix,
+  subscribePublicSuffixCache,
+} from './dns/mailAnalyzer';
 import type { AnalysisMode, AnalysisProgress, AnalysisSnapshot } from './dns/types';
 import { runWebAnalysis } from './dns/webAnalyzer';
 import { usePwaInstall } from './pwa/usePwaInstall';
@@ -222,7 +229,15 @@ export function App() {
   const { canInstall, isOffline, promptInstall } = usePwaInstall();
 
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const inputOverlayRef = useRef<HTMLDivElement | null>(null);
   const didBootRef = useRef(false);
+  const [, setPslCacheVersion] = useState(0);
+
+  useEffect(() => {
+    return subscribePublicSuffixCache(() => {
+      setPslCacheVersion((v) => v + 1);
+    });
+  }, []);
 
   // Sync dark/light class on <html>
   useEffect(() => {
@@ -329,6 +344,8 @@ export function App() {
           setSelectedTypes(['PTR']);
           setShowExtraTypes(true);
         }
+      } else if (cleanDomain !== '.') {
+        void queryPublicSuffix(cleanDomain, { endpoint: endpointToUse });
       }
 
       if (!options?.preserveFocus) {
@@ -736,7 +753,10 @@ export function App() {
 
   if (activeSnapshot) {
     seedIpAsnCacheFromSnapshot(activeSnapshot);
+    seedPublicSuffixCacheFromLogs(activeSnapshot.queries);
   }
+
+  const searchSuffixParts = splitDomainByPublicSuffix(domainInput);
 
   return (
     <div className="min-h-screen bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col">
@@ -821,16 +841,48 @@ export function App() {
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 pb-3.5 space-y-2.5">
           <form onSubmit={handleSubmit} className="flex flex-col sm:flex-row gap-2">
             <div ref={examplesContainerRef} className="relative flex-1">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none z-20" />
+              {searchSuffixParts && (
+                <div
+                  ref={inputOverlayRef}
+                  aria-hidden="true"
+                  data-testid="search-psl-overlay"
+                  className="pointer-events-none absolute inset-0 flex items-center rounded-xl border border-transparent pl-10 pr-16 py-2.5 font-mono text-sm whitespace-pre overflow-hidden select-none z-10"
+                >
+                  <span className="text-slate-900 dark:text-slate-100">
+                    {searchSuffixParts.leadingWhitespace}
+                    {searchSuffixParts.prefix}
+                  </span>
+                  <span
+                    data-testid="search-public-suffix"
+                    title={`Public Suffix (${searchSuffixParts.publicSuffix})`}
+                    className="text-cyan-600 dark:text-cyan-400"
+                  >
+                    {searchSuffixParts.publicSuffix}
+                  </span>
+                  <span className="text-slate-900 dark:text-slate-100">
+                    {searchSuffixParts.trailingDotAndWhitespace}
+                  </span>
+                </div>
+              )}
               <input
                 ref={inputRef}
                 type="text"
                 value={domainInput}
                 onChange={(e) => setDomainInput(e.target.value)}
+                onScroll={(e) => {
+                  if (inputOverlayRef.current) {
+                    inputOverlayRef.current.scrollLeft = e.currentTarget.scrollLeft;
+                  }
+                }}
                 placeholder="Enter domain or IPv4/IPv6 address (e.g. digdeep.butter.eu, 1.1.1.1, 2606:4700:4700::1111, .) — press / to focus"
-                className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 pl-10 pr-16 py-2.5 font-mono text-sm text-slate-900 dark:text-slate-100 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20"
+                className={`w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 pl-10 pr-16 py-2.5 font-mono text-sm placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20 ${
+                  searchSuffixParts
+                    ? 'text-transparent caret-slate-900 dark:caret-slate-100 selection:bg-cyan-500/25 selection:text-transparent'
+                    : 'text-slate-900 dark:text-slate-100'
+                }`}
               />
-              <div className="absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1">
+              <div className="absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1 z-20">
                 <kbd
                   title="Press / to focus search"
                   className="hidden sm:inline-block rounded border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-400 select-none"

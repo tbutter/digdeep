@@ -390,6 +390,7 @@ export function formatZoneAsZonefile(
         q.packet.flags.rcode !== 0 ||
         q.purpose.startsWith('BGP ASN lookup') ||
         q.purpose.startsWith('DNSBL reputation lookup') ||
+        q.purpose.startsWith('PSL lookup') ||
         q.purpose.startsWith('Wildcard probe')
       ) {
         continue;

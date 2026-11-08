@@ -21,7 +21,7 @@ import {
   normalizeFqdn,
   splitPresentationLabels,
 } from './encoding';
-import { evaluateDnsblAuditForIp, queryDnsblForIp } from './ipUtils';
+import { evaluateDnsblAuditForIp, parseReverseIpInput, queryDnsblForIp } from './ipUtils';
 import type {
   AnalysisProgress,
   AnalysisSnapshot,
@@ -83,152 +83,373 @@ export const WELL_KNOWN_DKIM_SELECTORS: readonly string[] = [
   'protonmail',
 ] as const;
 
-const MULTI_LABEL_PUBLIC_SUFFIXES = new Set([
-  'co.uk',
-  'org.uk',
-  'me.uk',
-  'ac.uk',
-  'gov.uk',
-  'ltd.uk',
-  'plc.uk',
-  'net.uk',
-  'sch.uk',
-  'com.au',
-  'net.au',
-  'org.au',
-  'edu.au',
-  'gov.au',
-  'asn.au',
-  'id.au',
-  'co.nz',
-  'net.nz',
-  'org.nz',
-  'govt.nz',
-  'ac.nz',
-  'co.jp',
-  'ne.jp',
-  'or.jp',
-  'ac.jp',
-  'go.jp',
-  'ed.jp',
-  'lg.jp',
-  'com.br',
-  'net.br',
-  'org.br',
-  'gov.br',
-  'edu.br',
-  'co.za',
-  'org.za',
-  'net.za',
-  'gov.za',
-  'ac.za',
-  'co.in',
-  'net.in',
-  'org.in',
-  'gen.in',
-  'firm.in',
-  'ind.in',
-  'ac.in',
-  'edu.in',
-  'res.in',
-  'gov.in',
-  'com.cn',
-  'net.cn',
-  'org.cn',
-  'gov.cn',
-  'edu.cn',
-  'ac.cn',
-  'com.tw',
-  'org.tw',
-  'net.tw',
-  'edu.tw',
-  'gov.tw',
-  'com.hk',
-  'org.hk',
-  'net.hk',
-  'edu.hk',
-  'gov.hk',
-  'com.sg',
-  'org.sg',
-  'net.sg',
-  'edu.sg',
-  'gov.sg',
-  'co.kr',
-  'or.kr',
-  'ne.kr',
-  're.kr',
-  'go.kr',
-  'ac.kr',
-  'com.mx',
-  'org.mx',
-  'gob.mx',
-  'edu.mx',
-  'net.mx',
-  'com.ar',
-  'org.ar',
-  'gob.ar',
-  'edu.ar',
-  'co.il',
-  'org.il',
-  'net.il',
-  'ac.il',
-  'gov.il',
-  'com.tr',
-  'org.tr',
-  'gov.tr',
-  'edu.tr',
-  'gv.at',
-  'co.at',
-  'or.at',
-  'ac.at',
-  'com.pl',
-  'net.pl',
-  'org.pl',
-  'edu.pl',
-  'gov.pl',
-  'co.id',
-  'or.id',
-  'ac.id',
-  'go.id',
-  'com.my',
-  'org.my',
-  'net.my',
-  'gov.my',
-  'edu.my',
-  'com.ph',
-  'org.ph',
-  'net.ph',
-  'gov.ph',
-  'edu.ph',
-  'co.th',
-  'or.th',
-  'in.th',
-  'ac.th',
-  'go.th',
-  'com.vn',
-  'net.vn',
-  'org.vn',
-  'edu.vn',
-  'gov.vn',
-  'com.ua',
-  'org.ua',
-  'net.ua',
-  'gov.ua',
-  'edu.ua',
-]);
+export const PSL_DNS_ZONE = 'psl.digdeep.fyi';
+const PSL_FALLBACK_DOH_ENDPOINT = 'https://dns.google/dns-query';
+
+const pslSuffixCache = new Map<string, string>();
+const pslInflightLookups = new Map<string, Promise<string | null>>();
+const pslCacheListeners = new Set<() => void>();
+
+function notifyPslCacheListeners(): void {
+  for (const listener of pslCacheListeners) {
+    listener();
+  }
+}
+
+export function subscribePublicSuffixCache(listener: () => void): () => void {
+  pslCacheListeners.add(listener);
+  return () => {
+    pslCacheListeners.delete(listener);
+  };
+}
+
+export function clearPublicSuffixCache(): void {
+  pslSuffixCache.clear();
+  pslInflightLookups.clear();
+}
 
 /**
- * Estimates the RFC 7489 §3.2 Organizational Domain for DMARC fallback and external report URI checks.
+ * Builds the `DOMAIN.psl.digdeep.fyi.` TXT query name for a domain name.
  */
-export function estimateOrganizationalDomain(fqdn: string): string {
+export function buildPslQueryName(fqdn: string): string | null {
+  const trimmed = fqdn.trim();
+  if (!trimmed || trimmed === '.') return null;
+  if (parseReverseIpInput(trimmed)?.wasRawIpInput) return null;
+  const norm = normalizeFqdn(trimmed);
+  if (norm === '.') return null;
+  const disp = displayFqdn(norm).toLowerCase();
+  if (
+    !disp ||
+    /\s/.test(disp) ||
+    disp === PSL_DNS_ZONE ||
+    disp.endsWith(`.${PSL_DNS_ZONE}`)
+  ) {
+    return null;
+  }
+  return normalizeFqdn(`${disp}.${PSL_DNS_ZONE}`);
+}
+
+/**
+ * Normalizes a TXT response string from `DOMAIN.psl.digdeep.fyi` and verifies it matches the trailing labels of `targetFqdn`.
+ */
+export function normalizePublicSuffixText(rawTxt: string, targetFqdn?: string): string | null {
+  const cleaned = rawTxt
+    .trim()
+    .replace(/^"+|"+$/g, '')
+    .trim()
+    .replace(/^\.+|\.+$/g, '')
+    .toLowerCase();
+  if (!cleaned || /\s/.test(cleaned)) return null;
+  if (targetFqdn) {
+    const normTarget = normalizeFqdn(targetFqdn);
+    if (normTarget === '.') return null;
+    const dispTarget = displayFqdn(normTarget).toLowerCase();
+    if (dispTarget !== cleaned && !dispTarget.endsWith(`.${cleaned}`)) {
+      return null;
+    }
+  }
+  return cleaned;
+}
+
+/**
+ * Seeds the in-memory Public Suffix cache for `fqdn` (and its derived organizational domain and suffix apex).
+ */
+export function seedPublicSuffixCache(fqdn: string, publicSuffix: string): string | null {
+  const norm = normalizeFqdn(fqdn);
+  if (norm === '.') return null;
+  const suffix = normalizePublicSuffixText(publicSuffix, norm);
+  if (!suffix) return null;
+
+  let changed = false;
+  if (pslSuffixCache.get(norm) !== suffix) {
+    pslSuffixCache.set(norm, suffix);
+    changed = true;
+  }
+
+  const suffixNorm = normalizeFqdn(suffix);
+  if (pslSuffixCache.get(suffixNorm) !== suffix) {
+    pslSuffixCache.set(suffixNorm, suffix);
+    changed = true;
+  }
+
+  const labels = splitPresentationLabels(norm);
+  const suffixLabels = splitPresentationLabels(suffixNorm);
+  if (labels.length > suffixLabels.length) {
+    const orgNorm = `${labels.slice(-(suffixLabels.length + 1)).join('.')}.`;
+    if (pslSuffixCache.get(orgNorm) !== suffix) {
+      pslSuffixCache.set(orgNorm, suffix);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    notifyPslCacheListeners();
+  }
+  return suffix;
+}
+
+/**
+ * Harvests any `*.psl.digdeep.fyi.` TXT responses present in `DohQueryLog[]` into the in-memory PSL cache.
+ */
+export function seedPublicSuffixCacheFromLogs(queries?: DohQueryLog[]): void {
+  if (!queries || queries.length === 0) return;
+  const suffixMarker = `.${PSL_DNS_ZONE}.`;
+  for (const log of queries) {
+    if (log.qtype !== RR_TYPES.TXT) continue;
+    const normQ = normalizeFqdn(log.qname);
+    if (!normQ.endsWith(suffixMarker)) continue;
+    const domainPart = normQ.slice(0, -suffixMarker.length);
+    if (!domainPart) continue;
+    const targetFqdn = `${domainPart}.`;
+    for (const ans of log.packet.answers) {
+      if (ans.type !== RR_TYPES.TXT) continue;
+      const rawTxt = ans.parsed.kind === 'TXT' ? ans.parsed.joinedText : ans.rdataText;
+      const seeded = seedPublicSuffixCache(targetFqdn, rawTxt);
+      if (seeded) break;
+    }
+  }
+}
+
+/**
+ * Returns the cached `DOMAIN.psl.digdeep.fyi` public suffix for `fqdn` if already resolved via DNS.
+ */
+export function getCachedPublicSuffix(fqdn: string, queries?: DohQueryLog[]): string | null {
+  if (queries) {
+    seedPublicSuffixCacheFromLogs(queries);
+  }
+  const trimmed = fqdn.trim();
+  if (!trimmed || trimmed === '.' || parseReverseIpInput(trimmed)?.wasRawIpInput) {
+    return null;
+  }
+  const norm = normalizeFqdn(trimmed);
+  if (norm === '.') return null;
+  const direct = pslSuffixCache.get(norm);
+  if (direct) return direct;
+
+  const disp = displayFqdn(norm).toLowerCase();
+  for (const [cachedFqdn, cachedSuffix] of pslSuffixCache.entries()) {
+    if (
+      cachedFqdn.endsWith(`.${norm}`) &&
+      (disp === cachedSuffix || disp.endsWith(`.${cachedSuffix}`))
+    ) {
+      return cachedSuffix;
+    }
+  }
+  return null;
+}
+
+/**
+ * Returns the public suffix for `fqdn` using cached `DOMAIN.psl.digdeep.fyi` TXT records when available,
+ * falling back to the trailing TLD label when offline or before the DNS query completes.
+ */
+export function estimatePublicSuffix(fqdn: string, queries?: DohQueryLog[]): string {
+  const cached = getCachedPublicSuffix(fqdn, queries);
+  if (cached) return cached;
+
+  const trimmed = fqdn.trim();
+  if (!trimmed || trimmed === '.' || parseReverseIpInput(trimmed)?.wasRawIpInput) {
+    return '';
+  }
+  const norm = normalizeFqdn(trimmed);
+  if (norm === '.') return '';
+  const labels = splitPresentationLabels(norm);
+  if (labels.length === 0) return '';
+  return labels[labels.length - 1].toLowerCase();
+}
+
+/**
+ * Queries `DOMAIN.psl.digdeep.fyi` for `TXT` over DoH to resolve the authoritative Public Suffix List entry.
+ */
+export async function queryPublicSuffix(
+  fqdn: string,
+  options?: {
+    session?: DohSession;
+    endpoint?: string;
+    timeoutMs?: number;
+    fetchImpl?: typeof fetch;
+  }
+): Promise<string | null> {
+  const pslQname = buildPslQueryName(fqdn);
+  if (!pslQname) return null;
+  const norm = normalizeFqdn(fqdn);
+
+  const extractAndSeed = (log: DohQueryLog | undefined): string | null => {
+    if (!log || log.packet.flags.rcode !== 0) return null;
+    for (const ans of log.packet.answers) {
+      if (ans.type !== RR_TYPES.TXT) continue;
+      const rawTxt = ans.parsed.kind === 'TXT' ? ans.parsed.joinedText : ans.rdataText;
+      const seeded = seedPublicSuffixCache(norm, rawTxt);
+      if (seeded) return seeded;
+    }
+    return null;
+  };
+
+  if (options?.session) {
+    try {
+      const log = await Promise.race([
+        options.session.query(pslQname, RR_TYPES.TXT, {
+          cd: false,
+          doBit: false,
+          purpose: `PSL lookup (${pslQname} TXT)`,
+        }),
+        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), options.timeoutMs ?? 2500)),
+      ]);
+      const found = extractAndSeed(log);
+      if (found) return found;
+    } catch {
+      // Fall through to fallback or cached check
+    }
+
+    if (!options.fetchImpl) {
+      const fallbackCached = pslSuffixCache.get(norm);
+      if (fallbackCached) return fallbackCached;
+      try {
+        const fbSession = new DohSession({
+          endpoint: PSL_FALLBACK_DOH_ENDPOINT,
+          timeoutMs: options.timeoutMs ?? 2500,
+        });
+        const fbLog = await fbSession.query(pslQname, RR_TYPES.TXT, {
+          cd: false,
+          doBit: false,
+          purpose: `PSL lookup (${pslQname} TXT)`,
+        });
+        const foundFb = extractAndSeed(fbLog);
+        if (foundFb) return foundFb;
+      } catch {
+        // Ignore network errors
+      }
+    }
+    return pslSuffixCache.get(norm) ?? null;
+  }
+
+  const existingCached = pslSuffixCache.get(norm);
+  if (existingCached) return existingCached;
+
+  const inflightKey = `${norm}|${options?.endpoint ?? DEFAULT_DOH_ENDPOINT}`;
+  const existingInflight = pslInflightLookups.get(inflightKey);
+  if (existingInflight) return existingInflight;
+
+  const task = (async (): Promise<string | null> => {
+    const primaryEndpoint = options?.endpoint ?? DEFAULT_DOH_ENDPOINT;
+    try {
+      const session = new DohSession({
+        endpoint: primaryEndpoint,
+        timeoutMs: options?.timeoutMs ?? 2500,
+        fetchImpl: options?.fetchImpl,
+      });
+      const log = await session.query(pslQname, RR_TYPES.TXT, {
+        cd: false,
+        doBit: false,
+        purpose: `PSL lookup (${pslQname} TXT)`,
+      });
+      const found = extractAndSeed(log);
+      if (found) return found;
+    } catch {
+      // Fall through to fallback endpoint if applicable
+    }
+
+    if (!options?.fetchImpl && primaryEndpoint !== PSL_FALLBACK_DOH_ENDPOINT) {
+      try {
+        const fbSession = new DohSession({
+          endpoint: PSL_FALLBACK_DOH_ENDPOINT,
+          timeoutMs: options?.timeoutMs ?? 2500,
+        });
+        const fbLog = await fbSession.query(pslQname, RR_TYPES.TXT, {
+          cd: false,
+          doBit: false,
+          purpose: `PSL lookup (${pslQname} TXT)`,
+        });
+        const foundFb = extractAndSeed(fbLog);
+        if (foundFb) return foundFb;
+      } catch {
+        // Ignore fallback failure
+      }
+    }
+
+    return pslSuffixCache.get(norm) ?? null;
+  })().finally(() => {
+    pslInflightLookups.delete(inflightKey);
+  });
+
+  pslInflightLookups.set(inflightKey, task);
+  return task;
+}
+
+export interface SearchFieldPublicSuffixSplit {
+  leadingWhitespace: string;
+  prefix: string;
+  publicSuffix: string;
+  trailingDotAndWhitespace: string;
+  isDnsVerified: boolean;
+}
+
+/**
+ * Splits a raw domain search input string into its leading labels and its Public Suffix
+ * so the search input overlay can color the public suffix while preserving exact character alignment.
+ */
+export function splitDomainByPublicSuffix(
+  rawInput: string,
+  resolvedSuffix?: string | null
+): SearchFieldPublicSuffixSplit | null {
+  if (!rawInput) return null;
+  const trimmed = rawInput.trim();
+  if (!trimmed || trimmed === '.') return null;
+  if (parseReverseIpInput(trimmed)?.wasRawIpInput) return null;
+
+  const match = /^(\s*)(.*?)(\.?\s*)$/.exec(rawInput);
+  if (!match) return null;
+  const leadingWhitespace = match[1] ?? '';
+  const coreDomain = match[2] ?? '';
+  const trailingDotAndWhitespace = match[3] ?? '';
+
+  if (!coreDomain || /\s/.test(coreDomain) || coreDomain.includes('://')) {
+    return null;
+  }
+
+  const cachedDnsSuffix = getCachedPublicSuffix(coreDomain);
+  const effectiveSuffix = (
+    resolvedSuffix ? normalizePublicSuffixText(resolvedSuffix, coreDomain) : null
+  ) ??
+    cachedDnsSuffix ??
+    estimatePublicSuffix(coreDomain);
+
+  if (!effectiveSuffix) return null;
+
+  const coreLower = coreDomain.toLowerCase();
+  if (coreLower !== effectiveSuffix && !coreLower.endsWith(`.${effectiveSuffix}`)) {
+    return null;
+  }
+
+  const splitIdx = coreDomain.length - effectiveSuffix.length;
+  return {
+    leadingWhitespace,
+    prefix: coreDomain.slice(0, splitIdx),
+    publicSuffix: coreDomain.slice(splitIdx),
+    trailingDotAndWhitespace,
+    isDnsVerified: Boolean(
+      (resolvedSuffix && normalizePublicSuffixText(resolvedSuffix, coreDomain)) || cachedDnsSuffix
+    ),
+  };
+}
+
+/**
+ * Estimates the RFC 7489 §3.2 Organizational Domain for DMARC fallback and external report URI checks,
+ * using the `DOMAIN.psl.digdeep.fyi` TXT Public Suffix lookup.
+ */
+export function estimateOrganizationalDomain(fqdn: string, queries?: DohQueryLog[]): string {
   const norm = normalizeFqdn(fqdn);
   if (norm === '.') return '.';
   const labels = splitPresentationLabels(norm);
-  if (labels.length <= 2) return norm;
-  const lastTwo = `${labels[labels.length - 2]}.${labels[labels.length - 1]}`;
-  if (MULTI_LABEL_PUBLIC_SUFFIXES.has(lastTwo)) {
-    return labels.length <= 3 ? norm : `${labels.slice(-3).join('.')}.`;
+  const suffix = estimatePublicSuffix(norm, queries);
+  if (suffix) {
+    const suffixLabels = splitPresentationLabels(normalizeFqdn(suffix));
+    if (suffixLabels.length > 0) {
+      return labels.length <= suffixLabels.length + 1
+        ? norm
+        : `${labels.slice(-(suffixLabels.length + 1)).join('.')}.`;
+    }
   }
+  if (labels.length <= 2) return norm;
   return `${labels.slice(-2).join('.')}.`;
 }
 
@@ -1428,7 +1649,7 @@ function parseDmarcUri(
       };
     }
 
-    const reportOrg = estimateOrganizationalDomain(normReportDom);
+    const reportOrg = estimateOrganizationalDomain(normReportDom, queries);
     const isExternalDomain = reportOrg !== targetOrgDomain;
     let externalAuthorized: DmarcUriDetail['externalAuthorized'];
     let externalVerifyQname: string | undefined;
@@ -1541,7 +1762,7 @@ function evaluateDmarcFromLogs(params: {
   const { effectiveMailDomain, isDomainNxdomain, queries, zones, mailFindings } = params;
   const dispTarget = displayFqdn(effectiveMailDomain);
   const directQname = normalizeFqdn(`_dmarc.${effectiveMailDomain}`);
-  const orgDomain = estimateOrganizationalDomain(effectiveMailDomain);
+  const orgDomain = estimateOrganizationalDomain(effectiveMailDomain, queries);
   const isSubdomain = orgDomain !== effectiveMailDomain && orgDomain !== '.';
   const orgQname = isSubdomain ? normalizeFqdn(`_dmarc.${orgDomain}`) : undefined;
 
@@ -1673,7 +1894,7 @@ function evaluateDmarcFromLogs(params: {
   const seenTags = new Set<string>();
   let syntaxFatal = false;
   const policyDomainForReports = usedOrgFallback ? orgDomain : effectiveMailDomain;
-  const policyOrgDomain = estimateOrganizationalDomain(policyDomainForReports);
+  const policyOrgDomain = estimateOrganizationalDomain(policyDomainForReports, queries);
 
   for (let idx = 0; idx < segments.length; idx++) {
     const seg = segments[idx];
@@ -3194,7 +3415,7 @@ function evaluateBimiFromLogs(params: {
   const { effectiveMailDomain, dmarc, queries, zones, mailFindings } = params;
   const selector = 'default';
   const directQname = normalizeFqdn(`${selector}._bimi.${effectiveMailDomain}`);
-  const orgDomain = estimateOrganizationalDomain(effectiveMailDomain);
+  const orgDomain = estimateOrganizationalDomain(effectiveMailDomain, queries);
   const isSubdomain = orgDomain !== effectiveMailDomain && orgDomain !== '.';
   const orgQname = isSubdomain ? normalizeFqdn(`${selector}._bimi.${orgDomain}`) : undefined;
 
@@ -3594,6 +3815,7 @@ export function evaluateMailFromSnapshotData(params: {
   } = params;
   const mailFindings: AuditFinding[] = [];
   const dispTarget = displayFqdn(targetName);
+  seedPublicSuffixCacheFromLogs(queries);
 
   // 1. Check CNAME at targetName itself & MX RRset
   const mxResolution = resolveCnameChainInLogs(queries, targetName, RR_TYPES.MX);
@@ -5085,9 +5307,10 @@ export async function runMailAnalysis(
   const discoveredZones = new Set<string>(['.']);
   const checkedCandidates = new Set<string>(['.']);
 
-  // Step 1: Query MX, TXT, legacy SPF (TYPE99), zone cuts, and CD=0 validating check
+  // Step 1: Query MX, TXT, legacy SPF (TYPE99), PSL public suffix, zone cuts, and CD=0 validating check
   await Promise.all([
     discoverZoneCutsForName(session, targetName, discoveredZones, checkedCandidates),
+    queryPublicSuffix(targetName, { session, fetchImpl: options.fetchImpl }).catch(() => null),
     session.query(targetName, RR_TYPES.MX, {
       cd: true,
       doBit: true,
@@ -5127,6 +5350,7 @@ export async function runMailAnalysis(
     effectiveMailDomain = nextUnvisited;
     await Promise.all([
       discoverZoneCutsForName(session, nextUnvisited, discoveredZones, checkedCandidates),
+      queryPublicSuffix(nextUnvisited, { session, fetchImpl: options.fetchImpl }).catch(() => null),
       session.query(nextUnvisited, RR_TYPES.MX, {
         cd: true,
         doBit: true,
@@ -5399,7 +5623,7 @@ export async function runMailAnalysis(
     RR_TYPES.TXT
   ).filter(isDmarcRecordText);
 
-  const orgDomain = estimateOrganizationalDomain(effectiveMailDomain);
+  const orgDomain = estimateOrganizationalDomain(effectiveMailDomain, session.getLogs());
   let activeDmarcDomainForReports = effectiveMailDomain;
   let activeDmarcRecordText = directDmarcTxts[0];
 
@@ -5441,7 +5665,10 @@ export async function runMailAnalysis(
 
   // RFC 7489 §7.1: Verify external report authorization (<domain>._report._dmarc.<report-host> TXT)
   if (activeDmarcRecordText) {
-    const reportPolicyOrg = estimateOrganizationalDomain(activeDmarcDomainForReports);
+    const reportPolicyOrg = estimateOrganizationalDomain(
+      activeDmarcDomainForReports,
+      session.getLogs()
+    );
     const extVerifyQnames: string[] = [];
     for (const seg of activeDmarcRecordText.split(';')) {
       const eq = seg.indexOf('=');
@@ -5771,6 +5998,7 @@ export async function runMailAnalysis(
         !log.packet.answers.some((r) => r.type === RR_TYPES.SRV)) ||
       log.purpose.startsWith('MX rDNS lookup') ||
       log.purpose.startsWith('DNSBL reputation lookup') ||
+      log.purpose.startsWith('PSL lookup') ||
       log.purpose.startsWith('Nameserver IP')
     ) {
       continue;

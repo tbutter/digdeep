@@ -3,7 +3,9 @@ import { reverifySnapshot } from '../analyzer';
 import { RR_TYPES } from '../constants';
 import { bytesToBase64, concatBytes, hexToBytes } from '../encoding';
 import {
+  buildPslQueryName,
   classifyIpAddress,
+  clearPublicSuffixCache,
   decodeDkimPublicKey,
   estimateOrganizationalDomain,
   evaluateMailFromSnapshotData,
@@ -13,6 +15,7 @@ import {
   parseMtaStsPolicyFile,
   parseSpfTerms,
   runMailAnalysis,
+  splitDomainByPublicSuffix,
 } from '../mailAnalyzer';
 import type { DohQueryLog, ZoneAnalysis } from '../types';
 import { encodeDnsName, parseDnsPacket } from '../wire';
@@ -465,9 +468,59 @@ describe('RFC 7505, RFC 7672 (SMTP DANE), and RFC 7208 (SPF) Audit Scenarios', (
       return bytesToBase64(derTlv(0x30, concatBytes(algId, bitStr)));
     };
 
-    // 1. Organizational domain estimation
+    // 1. Organizational domain estimation (including DOMAIN.psl.digdeep.fyi TXT lookup)
+    clearPublicSuffixCache();
+    expect(buildPslQueryName('supertux.github.io')).toBe('supertux.github.io.psl.digdeep.fyi.');
+    expect(buildPslQueryName('1.1.1.1')).toBeNull();
     expect(estimateOrganizationalDomain('sub.mail.example.com.')).toBe('example.com.');
-    expect(estimateOrganizationalDomain('a.b.example.co.uk.')).toBe('example.co.uk.');
+
+    const pslLogs: DohQueryLog[] = [
+      makeLog(
+        'a.b.example.co.uk.psl.digdeep.fyi.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: 'a.b.example.co.uk.psl.digdeep.fyi.',
+          qtype: RR_TYPES.TXT,
+          answers: [
+            {
+              name: 'a.b.example.co.uk.psl.digdeep.fyi.',
+              type: RR_TYPES.TXT,
+              rdata: encodeTxtRdata(['co.uk']),
+            },
+          ],
+        })
+      ),
+      makeLog(
+        'app.supertux.github.io.psl.digdeep.fyi.',
+        RR_TYPES.TXT,
+        'TXT',
+        buildSyntheticResponsePacket({
+          qname: 'app.supertux.github.io.psl.digdeep.fyi.',
+          qtype: RR_TYPES.TXT,
+          answers: [
+            {
+              name: 'app.supertux.github.io.psl.digdeep.fyi.',
+              type: RR_TYPES.TXT,
+              rdata: encodeTxtRdata(['github.io']),
+            },
+          ],
+        })
+      ),
+    ];
+    expect(estimateOrganizationalDomain('a.b.example.co.uk.', pslLogs)).toBe('example.co.uk.');
+    expect(estimateOrganizationalDomain('app.supertux.github.io.', pslLogs)).toBe(
+      'supertux.github.io.'
+    );
+    expect(estimateOrganizationalDomain('supertux.github.io.')).toBe('supertux.github.io.');
+    expect(splitDomainByPublicSuffix('app.supertux.github.io')).toEqual({
+      leadingWhitespace: '',
+      prefix: 'app.supertux.',
+      publicSuffix: 'github.io',
+      trailingDotAndWhitespace: '',
+      isDnsVerified: true,
+    });
+    expect(splitDomainByPublicSuffix('1.1.1.1')).toBeNull();
 
     // 2. DKIM selector input & DKIM-Signature header extraction
     expect(

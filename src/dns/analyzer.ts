@@ -822,6 +822,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       !q.purpose.startsWith('Reverse FCrDNS lookup') &&
       !q.purpose.startsWith('BGP ASN lookup') &&
       !q.purpose.startsWith('DNSBL reputation lookup') &&
+      !q.purpose.startsWith('PSL lookup') &&
       !q.purpose.startsWith('Wildcard probe') &&
       !q.purpose.startsWith('Zone TXT') &&
       !q.purpose.startsWith('Consensus probe')
@@ -2591,6 +2592,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       log.purpose.startsWith('Reverse FCrDNS lookup') ||
       log.purpose.startsWith('BGP ASN lookup') ||
       log.purpose.startsWith('DNSBL reputation lookup') ||
+      log.purpose.startsWith('PSL lookup') ||
       log.purpose.startsWith('Consensus probe')
     ) {
       continue;
@@ -2633,7 +2635,8 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
         !q.purpose.startsWith('SPF lookup') &&
         !q.purpose.startsWith('Reverse FCrDNS lookup') &&
         !q.purpose.startsWith('BGP ASN lookup') &&
-        !q.purpose.startsWith('DNSBL reputation lookup')
+        !q.purpose.startsWith('DNSBL reputation lookup') &&
+        !q.purpose.startsWith('PSL lookup')
     );
   const resolverVerdict: ResolverVerdict | undefined = valQuery
     ? {
