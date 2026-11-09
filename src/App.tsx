@@ -1000,7 +1000,7 @@ export function App() {
             <div
               role="tablist"
               aria-label="DNS Analysis Mode"
-              className="inline-flex items-center gap-1 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-100/90 dark:bg-slate-900/90 p-1 self-start"
+              className="grid grid-cols-4 sm:inline-flex sm:flex-wrap items-center gap-1 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-100/90 dark:bg-slate-900/90 p-1 w-full sm:w-auto max-w-full self-start"
             >
               {ANALYSIS_MODES.map((m) => {
                 const active = analysisMode === m.id;
@@ -1020,14 +1020,15 @@ export function App() {
                     aria-selected={active}
                     onClick={() => handleSwitchMode(m.id)}
                     title={m.description}
-                    className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer ${
+                    className={`inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-lg px-2 sm:px-2.5 py-1.5 sm:py-1 text-[11px] sm:text-xs font-medium whitespace-nowrap transition-colors cursor-pointer ${
                       active
                         ? 'bg-white dark:bg-slate-800 text-cyan-700 dark:text-cyan-300 font-semibold shadow-sm border border-slate-200/80 dark:border-slate-700'
                         : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
                     }`}
                   >
-                    <ModeIcon className="w-3.5 h-3.5" />
-                    <span>{m.label}</span>
+                    <ModeIcon className="w-3.5 h-3.5 shrink-0" />
+                    <span className="xl:hidden">{m.mobileLabel}</span>
+                    <span className="hidden xl:inline">{m.label}</span>
                   </button>
                 );
               })}

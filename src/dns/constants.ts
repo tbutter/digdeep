@@ -221,6 +221,7 @@ export const TLSA_MATCHING_TYPES: Record<
 export interface AnalysisModeDescriptor {
   id: 'dnssec' | 'mail' | 'web' | 'consensus';
   label: string;
+  mobileLabel: string;
   shortLabel: string;
   actionLabel: string;
   description: string;
@@ -230,6 +231,7 @@ export const ANALYSIS_MODES: readonly AnalysisModeDescriptor[] = [
   {
     id: 'dnssec',
     label: 'DNSSEC Chain',
+    mobileLabel: 'DNSSEC',
     shortLabel: 'DNSSEC',
     actionLabel: 'Analyze DNSSEC',
     description: 'Cryptographic chain-of-trust graph (DS, DNSKEY, RRSIG, NSEC/NSEC3)',
@@ -237,6 +239,7 @@ export const ANALYSIS_MODES: readonly AnalysisModeDescriptor[] = [
   {
     id: 'mail',
     label: 'Mail · MX, DANE, SPF, DKIM & DMARC',
+    mobileLabel: 'Mail',
     shortLabel: 'Mail (MX · DANE · SPF · DKIM · DMARC)',
     actionLabel: 'Analyze Mail DNS',
     description:
@@ -245,6 +248,7 @@ export const ANALYSIS_MODES: readonly AnalysisModeDescriptor[] = [
   {
     id: 'web',
     label: 'Web · HTTPS/SVCB, ECH, CAA & DANE',
+    mobileLabel: 'Web',
     shortLabel: 'Web (HTTPS · ECH · CAA · DANE · SSHFP)',
     actionLabel: 'Analyze Web & TLS DNS',
     description:
@@ -253,6 +257,7 @@ export const ANALYSIS_MODES: readonly AnalysisModeDescriptor[] = [
   {
     id: 'consensus',
     label: 'Multi-Resolver · Consensus, EDE & Filtering',
+    mobileLabel: 'Consensus',
     shortLabel: 'Consensus (Multi-DoH · EDE · Filtering)',
     actionLabel: 'Compare DoH Resolvers',
     description:
