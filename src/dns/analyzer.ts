@@ -43,6 +43,10 @@ import {
   type ParsedReverseIpTarget,
 } from './ipUtils';
 import { evaluateConsensusFromSnapshotData } from './consensusAnalyzer';
+import {
+  deriveEmailDaneTargets,
+  evaluateEmailDaneFromSnapshotData,
+} from './emailDane';
 import { evaluateMailFromSnapshotData } from './mailAnalyzer';
 import { evaluateWebFromSnapshotData } from './webAnalyzer';
 import type {
@@ -62,6 +66,7 @@ import type {
   DnskeyRdata,
   DohQueryLog,
   DsVerification,
+  EmailDaneAnalysis,
   MtaStsPolicyFetchResult,
   NameserverEntry,
   NsDiversityAnalysis,
@@ -85,7 +90,7 @@ import type {
   ZonemdRecordDetail,
 } from './types';
 
-export const SNAPSHOT_ENGINE_VERSION = 13;
+export const SNAPSHOT_ENGINE_VERSION = 14;
 
 export interface AnalyzeOptions extends DohClientOptions {
   queryTypes?: string[];
@@ -234,21 +239,38 @@ export async function runDnsvizAnalysis(
   options: AnalyzeOptions = {}
 ): Promise<AnalysisSnapshot> {
   const startedAt = Date.now();
-  const reverseIpTarget = parseReverseIpInput(rawDomain);
-  const targetName = reverseIpTarget ? reverseIpTarget.arpaFqdn : normalizeFqdn(rawDomain);
+  const emailTarget = await deriveEmailDaneTargets(rawDomain);
+  const reverseIpTarget = emailTarget ? null : parseReverseIpInput(rawDomain);
+  const targetName = emailTarget
+    ? emailTarget.inputKind === 'openpgpkey-owner'
+      ? emailTarget.openpgpkeyQname!
+      : emailTarget.inputKind === 'smimea-owner'
+        ? emailTarget.smimeaQname!
+        : emailTarget.domain
+    : reverseIpTarget
+      ? reverseIpTarget.arpaFqdn
+      : normalizeFqdn(rawDomain);
   const displayDomain = displayFqdn(targetName);
   const requestedTypes =
     options.queryTypes && options.queryTypes.length > 0
       ? Array.from(new Set(options.queryTypes.map((t) => t.toUpperCase())))
       : ['A', 'AAAA'];
+  const defaultAddrTypesOnly = requestedTypes.every((t) => t === 'A' || t === 'AAAA');
   const queryTypes =
-    reverseIpTarget &&
-    (!options.queryTypes ||
-      options.queryTypes.length === 0 ||
-      (reverseIpTarget.wasRawIpInput &&
-        requestedTypes.every((t) => t === 'A' || t === 'AAAA')))
-      ? ['PTR']
-      : requestedTypes;
+    emailTarget?.inputKind === 'email'
+      ? ['OPENPGPKEY', 'SMIMEA']
+      : emailTarget?.inputKind === 'openpgpkey-owner' &&
+          (!options.queryTypes || options.queryTypes.length === 0 || defaultAddrTypesOnly)
+        ? ['OPENPGPKEY']
+        : emailTarget?.inputKind === 'smimea-owner' &&
+            (!options.queryTypes || options.queryTypes.length === 0 || defaultAddrTypesOnly)
+          ? ['SMIMEA']
+          : reverseIpTarget &&
+              (!options.queryTypes ||
+                options.queryTypes.length === 0 ||
+                (reverseIpTarget.wasRawIpInput && defaultAddrTypesOnly))
+            ? ['PTR']
+            : requestedTypes;
   const trustAnchors = options.trustAnchors ?? IANA_ROOT_TRUST_ANCHORS;
   const endpoint = options.endpoint ?? DEFAULT_DOH_ENDPOINT;
 
@@ -269,7 +291,10 @@ export async function runDnsvizAnalysis(
 
   options.onProgress?.({
     phase: 'zone-cuts',
-    message: `Discovering zone cuts from root (.) to ${displayDomain}…`,
+    message:
+      emailTarget?.inputKind === 'email'
+        ? `Deriving RFC 7929 / 8162 SHA-256-224 hashes for ${emailTarget.canonicalInput} & discovering zone cuts…`
+        : `Discovering zone cuts from root (.) to ${displayDomain}…`,
     completedQueries: 0,
   });
 
@@ -277,75 +302,144 @@ export async function runDnsvizAnalysis(
   const checkedCandidates = new Set<string>(['.']);
 
   // Phase 1 & 2: Discover initial zone cuts AND query target RRsets in parallel
-  const primaryTypeNum = stringToRrType(queryTypes[0]);
-  await Promise.all([
-    discoverZoneCutsForName(session, targetName, discoveredZones, checkedCandidates),
-    ...queryTypes.map((t) =>
-      session.query(targetName, stringToRrType(t), {
+  const initialProbePairs: Array<{ owner: string; qt: string }> = [];
+  if (emailTarget?.inputKind === 'email') {
+    const pgpOwner = emailTarget.openpgpkeyQname!;
+    const smimeOwner = emailTarget.smimeaQname!;
+    initialProbePairs.push(
+      { owner: pgpOwner, qt: 'OPENPGPKEY' },
+      { owner: smimeOwner, qt: 'SMIMEA' }
+    );
+    await Promise.all([
+      discoverZoneCutsForName(session, pgpOwner, discoveredZones, checkedCandidates),
+      discoverZoneCutsForName(session, smimeOwner, discoveredZones, checkedCandidates),
+      session.query(pgpOwner, RR_TYPES.OPENPGPKEY, {
         cd: true,
         doBit: true,
-        purpose: `Target RRset (${targetName} ${t})`,
-      })
-    ),
-    // Also perform one validating query (CD=0, DO=1) so we capture 1.1.1.1's own AD bit & RCODE
-    session.query(targetName, primaryTypeNum, {
-      cd: false,
-      doBit: true,
-      purpose: `1.1.1.1 validating check (${targetName} ${queryTypes[0]}, CD=0)`,
-    }),
-  ]);
+        purpose: `Email DANE target (${pgpOwner} OPENPGPKEY)`,
+      }),
+      session.query(smimeOwner, RR_TYPES.SMIMEA, {
+        cd: true,
+        doBit: true,
+        purpose: `Email DANE target (${smimeOwner} SMIMEA)`,
+      }),
+      session.query(pgpOwner, RR_TYPES.OPENPGPKEY, {
+        cd: false,
+        doBit: true,
+        purpose: `1.1.1.1 validating check (${pgpOwner} OPENPGPKEY, CD=0)`,
+      }),
+    ]);
+
+    // RFC 7929 §4 lowercase local-part fallback probe when uppercase ASCII characters are present
+    const fallbackTasks: Promise<unknown>[] = [];
+    const curLogs = session.getLogs();
+    if (emailTarget.lowercaseOpenpgpkeyQname) {
+      const exactPgp = findLog(curLogs, pgpOwner, RR_TYPES.OPENPGPKEY, true);
+      if ((exactPgp?.packet.answers.length ?? 0) === 0) {
+        const lowerPgp = emailTarget.lowercaseOpenpgpkeyQname;
+        initialProbePairs.push({ owner: lowerPgp, qt: 'OPENPGPKEY' });
+        fallbackTasks.push(
+          discoverZoneCutsForName(session, lowerPgp, discoveredZones, checkedCandidates),
+          session.query(lowerPgp, RR_TYPES.OPENPGPKEY, {
+            cd: true,
+            doBit: true,
+            purpose: `Email DANE fallback (${lowerPgp} OPENPGPKEY)`,
+          })
+        );
+      }
+    }
+    if (emailTarget.lowercaseSmimeaQname) {
+      const exactSmime = findLog(curLogs, smimeOwner, RR_TYPES.SMIMEA, true);
+      if ((exactSmime?.packet.answers.length ?? 0) === 0) {
+        const lowerSmime = emailTarget.lowercaseSmimeaQname;
+        initialProbePairs.push({ owner: lowerSmime, qt: 'SMIMEA' });
+        fallbackTasks.push(
+          discoverZoneCutsForName(session, lowerSmime, discoveredZones, checkedCandidates),
+          session.query(lowerSmime, RR_TYPES.SMIMEA, {
+            cd: true,
+            doBit: true,
+            purpose: `Email DANE fallback (${lowerSmime} SMIMEA)`,
+          })
+        );
+      }
+    }
+    if (fallbackTasks.length > 0) {
+      await Promise.all(fallbackTasks);
+    }
+  } else {
+    for (const qt of queryTypes) {
+      initialProbePairs.push({ owner: targetName, qt });
+    }
+    const primaryTypeNum = stringToRrType(queryTypes[0]);
+    await Promise.all([
+      discoverZoneCutsForName(session, targetName, discoveredZones, checkedCandidates),
+      ...queryTypes.map((t) =>
+        session.query(targetName, stringToRrType(t), {
+          cd: true,
+          doBit: true,
+          purpose: `Target RRset (${targetName} ${t})`,
+        })
+      ),
+      // Also perform one validating query (CD=0, DO=1) so we capture 1.1.1.1's own AD bit & RCODE
+      session.query(targetName, primaryTypeNum, {
+        cd: false,
+        doBit: true,
+        purpose: `1.1.1.1 validating check (${targetName} ${queryTypes[0]}, CD=0)`,
+      }),
+    ]);
+  }
 
   // Phase 2b: Follow any CNAME chains (including cross-zone CNAME targets!)
   currentPhase = 'targets';
-  const visitedTargets = new Set<string>([targetName]);
-  let frontier = [targetName];
-  for (let hop = 0; hop < 6 && frontier.length > 0; hop++) {
-    const nextFrontier: string[] = [];
+  const visitedTargetPairs = new Set<string>(
+    initialProbePairs.map((p) => `${p.owner}|${p.qt}`)
+  );
+  let frontierPairs = [...initialProbePairs];
+  for (let hop = 0; hop < 6 && frontierPairs.length > 0; hop++) {
+    const nextFrontierPairs: Array<{ owner: string; qt: string }> = [];
     const logsSnapshot = session.getLogs();
 
-    for (const name of frontier) {
-      for (const qt of queryTypes) {
-        const qtypeNum = stringToRrType(qt);
-        const log = findLog(logsSnapshot, name, qtypeNum, true);
-        if (!log) continue;
+    for (const { owner: name, qt } of frontierPairs) {
+      const qtypeNum = stringToRrType(qt);
+      const log = findLog(logsSnapshot, name, qtypeNum, true);
+      if (!log) continue;
 
-        let curOwner = name;
-        for (let step = 0; step < 8; step++) {
-          const cnameRec = log.packet.answers.find(
-            (r) => r.name === curOwner && r.type === RR_TYPES.CNAME
-          );
-          if (!cnameRec || cnameRec.parsed.kind !== 'GENERIC' || !cnameRec.parsed.target) {
-            break;
-          }
-          const target = normalizeFqdn(cnameRec.parsed.target);
-          if (!visitedTargets.has(target)) {
-            visitedTargets.add(target);
-            nextFrontier.push(target);
-          }
-          curOwner = target;
+      let curOwner = name;
+      for (let step = 0; step < 8; step++) {
+        const cnameRec = log.packet.answers.find(
+          (r) => r.name === curOwner && r.type === RR_TYPES.CNAME
+        );
+        if (!cnameRec || cnameRec.parsed.kind !== 'GENERIC' || !cnameRec.parsed.target) {
+          break;
         }
+        const target = normalizeFqdn(cnameRec.parsed.target);
+        const pairKey = `${target}|${qt}`;
+        if (!visitedTargetPairs.has(pairKey)) {
+          visitedTargetPairs.add(pairKey);
+          nextFrontierPairs.push({ owner: target, qt });
+        }
+        curOwner = target;
       }
     }
 
-    if (nextFrontier.length > 0) {
+    if (nextFrontierPairs.length > 0) {
+      const uniqueOwners = Array.from(new Set(nextFrontierPairs.map((p) => p.owner)));
       await Promise.all([
-        ...nextFrontier.map((cnameTarget) =>
+        ...uniqueOwners.map((cnameTarget) =>
           discoverZoneCutsForName(session, cnameTarget, discoveredZones, checkedCandidates)
         ),
-        ...nextFrontier.flatMap((cnameTarget) =>
-          queryTypes
-            .filter((qt) => qt !== 'CNAME')
-            .map((qt) =>
-              session.query(cnameTarget, stringToRrType(qt), {
-                cd: true,
-                doBit: true,
-                purpose: `CNAME target (${cnameTarget} ${qt})`,
-              })
-            )
-        ),
+        ...nextFrontierPairs
+          .filter((p) => p.qt !== 'CNAME')
+          .map((p) =>
+            session.query(p.owner, stringToRrType(p.qt), {
+              cd: true,
+              doBit: true,
+              purpose: `CNAME target (${p.owner} ${p.qt})`,
+            })
+          ),
       ]);
     }
-    frontier = nextFrontier;
+    frontierPairs = nextFrontierPairs;
   }
 
   // Also ensure any SOA authority owner names returned in responses are included in discoveredZones
@@ -666,6 +760,7 @@ export async function runDnsvizAnalysis(
     id: `snap-${capturedAt}-${Math.random().toString(36).slice(2, 8)}`,
     targetName,
     queriedIp: reverseIpTarget?.ip,
+    queriedEmail: emailTarget?.inputKind === 'email' ? emailTarget.canonicalInput : undefined,
     queryTypes,
     dohEndpoint: endpoint,
     capturedAt,
@@ -707,6 +802,7 @@ export async function reverifySnapshot(
     mode: snapshot.mode,
     targetName: snapshot.targetName,
     queriedIp: snapshot.queriedIp,
+    queriedEmail: snapshot.queriedEmail,
     queryTypes: snapshot.queryTypes,
     customDkimSelectors: snapshot.customDkimSelectors,
     mtaStsPolicyFetch: snapshot.mtaStsPolicyFetch,
@@ -730,6 +826,7 @@ interface EvaluateInput {
   mode?: AnalysisMode;
   targetName: string;
   queriedIp?: string;
+  queriedEmail?: string;
   queryTypes: string[];
   customDkimSelectors?: string[];
   mtaStsPolicyFetch?: MtaStsPolicyFetchResult;
@@ -787,6 +884,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     mode = 'dnssec',
     targetName,
     queriedIp,
+    queriedEmail,
     queryTypes,
     customDkimSelectors,
     mtaStsPolicyFetch,
@@ -810,6 +908,10 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       !q.purpose.startsWith('DMARC lookup') &&
       !q.purpose.startsWith('DKIM probe') &&
       !q.purpose.startsWith('Mail probe') &&
+      !(
+        q.purpose.startsWith('Email DANE fallback') &&
+        q.packet.answers.length === 0
+      ) &&
       !(
         q.purpose.startsWith('Mail SRV probe') &&
         !q.packet.answers.some((r) => r.type === RR_TYPES.SRV)
@@ -1011,7 +1113,9 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       log.purpose.startsWith('Target RRset') ||
       log.purpose.startsWith('CNAME target') ||
       log.purpose.startsWith('Mail target') ||
-      log.purpose.startsWith('Web target');
+      log.purpose.startsWith('Web target') ||
+      log.purpose.startsWith('Email DANE target') ||
+      log.purpose.startsWith('Email DANE fallback');
     addSectionRecords(log.packet.answers, 'answer', isTarget);
     if (
       (!log.purpose.startsWith('Zone ZONEMD') && !log.purpose.startsWith('Mail SRV probe')) ||
@@ -2341,12 +2445,19 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
 
   // 6. Build CNAME Edges & Target Negative Response Nodes (NXDOMAIN / NODATA)
   const cnameEdges: CnameEdge[] = [];
-  const targetProbes: Array<{ owner: string; qt: string }> = queryTypes.map((qt) => ({
-    owner: targetName,
-    qt,
-  }));
+  const targetProbes: Array<{ owner: string; qt: string }> = queryTypes
+    .filter((qt) => !(queriedEmail && (qt === 'OPENPGPKEY' || qt === 'SMIMEA')))
+    .map((qt) => ({
+      owner: targetName,
+      qt,
+    }));
   for (const log of cdLogs) {
-    if (log.purpose.startsWith('Mail target') || log.purpose.startsWith('Web target')) {
+    if (
+      log.purpose.startsWith('Mail target') ||
+      log.purpose.startsWith('Web target') ||
+      log.purpose.startsWith('Email DANE target') ||
+      log.purpose.startsWith('Email DANE fallback')
+    ) {
       if (!targetProbes.some((p) => p.owner === log.qname && p.qt === log.qtypeName)) {
         targetProbes.push({ owner: log.qname, qt: log.qtypeName });
       }
@@ -2658,11 +2769,16 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     .filter((z): z is ZoneAnalysis => Boolean(z));
 
   const isSpecializedMode = mode === 'mail' || mode === 'web';
+  const emailDaneOwners = cdLogs
+    .filter((l) => l.purpose.startsWith('Email DANE target') || l.purpose.startsWith('Email DANE fallback'))
+    .map((l) => l.qname);
   const targetLeafZones = zones.filter((z) => {
     const isTargetAnc = isSubdomainOrEqual(targetName, z.zoneName);
+    const isEmailDaneAnc =
+      !isSpecializedMode && emailDaneOwners.some((o) => isSubdomainOrEqual(o, z.zoneName));
     const isCnameTargetAnc =
       !isSpecializedMode && cnameEdges.some((ce) => isSubdomainOrEqual(ce.toName, z.zoneName));
-    return isTargetAnc || isCnameTargetAnc;
+    return isTargetAnc || isEmailDaneAnc || isCnameTargetAnc;
   });
 
   // Check target RRset / negativeNode statuses specifically
@@ -2793,6 +2909,34 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     findings.push(...rdnsEval.findings);
   }
 
+  let emailDane: EmailDaneAnalysis | undefined;
+  if (mode !== 'web' && mode !== 'consensus') {
+    const derivedEmailTargets = await deriveEmailDaneTargets(queriedEmail ?? targetName);
+    if (derivedEmailTargets) {
+      const emailEval = await evaluateEmailDaneFromSnapshotData({
+        derivedTargets: derivedEmailTargets,
+        queries,
+        zones,
+        cnameEdges,
+        dohEndpoint,
+        validatedAt,
+      });
+      emailDane = emailEval.emailDane;
+      findings.push(...emailEval.findings);
+      if (mode === 'dnssec') {
+        if (
+          emailEval.overallStatusOverride === 'bogus' ||
+          (emailEval.overallStatusOverride === 'warning' && overallStatus === 'secure')
+        ) {
+          overallStatus = emailEval.overallStatusOverride;
+        }
+        if (emailEval.overallSummaryOverride && overallStatus !== 'bogus') {
+          overallSummary = emailEval.overallSummaryOverride;
+        }
+      }
+    }
+  }
+
   // Deduplicate findings & sort errors -> warnings -> info
   const severityOrder: Record<AuditFinding['severity'], number> = {
     error: 0,
@@ -2814,6 +2958,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     targetName,
     displayDomain: displayFqdn(targetName),
     ...(reverseIpTarget ? { queriedIp: reverseIpTarget.ip } : {}),
+    ...(queriedEmail ? { queriedEmail } : {}),
     queryTypes,
     ...(customDkimSelectors && customDkimSelectors.length > 0 ? { customDkimSelectors } : {}),
     ...(mtaStsPolicyFetch ? { mtaStsPolicyFetch } : {}),
@@ -2834,6 +2979,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     ...(webAnalysis ? { webAnalysis } : {}),
     ...(consensusAnalysis ? { consensusAnalysis } : {}),
     ...(reverseDns ? { reverseDns } : {}),
+    ...(emailDane ? { emailDane } : {}),
   };
 }
 

@@ -15,6 +15,7 @@ import {
   type AnalyzeOptions,
 } from './analyzer';
 import { DohSession } from './doh';
+import { deriveEmailDaneTargets, parseEmailDaneInput } from './emailDane';
 import {
   base64ToBytes,
   displayFqdn,
@@ -281,9 +282,11 @@ export async function queryPublicSuffix(
     fetchImpl?: typeof fetch;
   }
 ): Promise<string | null> {
-  const pslQname = buildPslQueryName(fqdn);
+  const emailParsed = parseEmailDaneInput(fqdn);
+  const cleanTargetFqdn = emailParsed ? emailParsed.domain : fqdn;
+  const pslQname = buildPslQueryName(cleanTargetFqdn);
   if (!pslQname) return null;
-  const norm = normalizeFqdn(fqdn);
+  const norm = normalizeFqdn(cleanTargetFqdn);
 
   const extractAndSeed = (log: DohQueryLog | undefined): string | null => {
     if (!log || log.packet.flags.rcode !== 0) return null;
@@ -418,17 +421,21 @@ export function splitDomainByPublicSuffix(
     return null;
   }
 
-  const cachedDnsSuffix = getCachedPublicSuffix(coreDomain);
+  const atIdx = coreDomain.lastIndexOf('@');
+  const domainOnly = atIdx >= 0 ? coreDomain.slice(atIdx + 1) : coreDomain;
+  if (!domainOnly) return null;
+
+  const cachedDnsSuffix = getCachedPublicSuffix(domainOnly);
   const effectiveSuffix = (
-    resolvedSuffix ? normalizePublicSuffixText(resolvedSuffix, coreDomain) : null
+    resolvedSuffix ? normalizePublicSuffixText(resolvedSuffix, domainOnly) : null
   ) ??
     cachedDnsSuffix ??
-    estimatePublicSuffix(coreDomain);
+    estimatePublicSuffix(domainOnly);
 
   if (!effectiveSuffix) return null;
 
-  const coreLower = coreDomain.toLowerCase();
-  if (coreLower !== effectiveSuffix && !coreLower.endsWith(`.${effectiveSuffix}`)) {
+  const domainLower = domainOnly.toLowerCase();
+  if (domainLower !== effectiveSuffix && !domainLower.endsWith(`.${effectiveSuffix}`)) {
     return null;
   }
 
@@ -439,7 +446,7 @@ export function splitDomainByPublicSuffix(
     publicSuffix: coreDomain.slice(splitIdx),
     trailingDotAndWhitespace,
     isDnsVerified: Boolean(
-      (resolvedSuffix && normalizePublicSuffixText(resolvedSuffix, coreDomain)) || cachedDnsSuffix
+      (resolvedSuffix && normalizePublicSuffixText(resolvedSuffix, domainOnly)) || cachedDnsSuffix
     ),
   };
 }
@@ -6228,7 +6235,8 @@ export async function runMailAnalysis(
   options: AnalyzeOptions = {}
 ): Promise<AnalysisSnapshot> {
   const startedAt = Date.now();
-  const targetName = normalizeFqdn(rawDomain);
+  const emailTarget = await deriveEmailDaneTargets(rawDomain);
+  const targetName = emailTarget ? emailTarget.domain : normalizeFqdn(rawDomain);
   const displayDomain = displayFqdn(targetName);
   const queryTypes = ['MX', 'TXT'];
   const trustAnchors = options.trustAnchors ?? IANA_ROOT_TRUST_ANCHORS;
@@ -6258,8 +6266,8 @@ export async function runMailAnalysis(
   const discoveredZones = new Set<string>(['.']);
   const checkedCandidates = new Set<string>(['.']);
 
-  // Step 1: Query MX, TXT, legacy SPF (TYPE99), PSL public suffix, zone cuts, and CD=0 validating check
-  await Promise.all([
+  // Step 1: Query MX, TXT, legacy SPF (TYPE99), PSL public suffix, zone cuts, CD=0 validating check, plus optional RFC 7929 / 8162 user DANE identities
+  const step1Tasks: Promise<unknown>[] = [
     discoverZoneCutsForName(session, targetName, discoveredZones, checkedCandidates),
     queryPublicSuffix(targetName, { session, fetchImpl: options.fetchImpl }).catch(() => null),
     session.query(targetName, RR_TYPES.MX, {
@@ -6284,7 +6292,32 @@ export async function runMailAnalysis(
       doBit: true,
       purpose: `1.1.1.1 validating check (${targetName} MX, CD=0)`,
     }),
-  ]);
+  ];
+
+  if (emailTarget?.openpgpkeyQname) {
+    const pgpOwner = emailTarget.openpgpkeyQname;
+    step1Tasks.push(
+      discoverZoneCutsForName(session, pgpOwner, discoveredZones, checkedCandidates),
+      session.query(pgpOwner, RR_TYPES.OPENPGPKEY, {
+        cd: true,
+        doBit: true,
+        purpose: `Email DANE target (${pgpOwner} OPENPGPKEY)`,
+      })
+    );
+  }
+  if (emailTarget?.smimeaQname) {
+    const smimeOwner = emailTarget.smimeaQname;
+    step1Tasks.push(
+      discoverZoneCutsForName(session, smimeOwner, discoveredZones, checkedCandidates),
+      session.query(smimeOwner, RR_TYPES.SMIMEA, {
+        cd: true,
+        doBit: true,
+        purpose: `Email DANE target (${smimeOwner} SMIMEA)`,
+      })
+    );
+  }
+
+  await Promise.all(step1Tasks);
 
   // Follow any CNAME chain at targetName itself
   let effectiveMailDomain = targetName;
@@ -7002,6 +7035,7 @@ export async function runMailAnalysis(
     id: `snap-${capturedAt}-${Math.random().toString(36).slice(2, 8)}`,
     mode: 'mail',
     targetName,
+    queriedEmail: emailTarget?.inputKind === 'email' ? emailTarget.canonicalInput : undefined,
     queryTypes,
     customDkimSelectors,
     mtaStsPolicyFetch,

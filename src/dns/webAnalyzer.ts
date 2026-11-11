@@ -15,6 +15,7 @@ import {
   type AnalyzeOptions,
 } from './analyzer';
 import { DohSession } from './doh';
+import { parseEmailDaneInput } from './emailDane';
 import {
   countDnsLabels,
   displayFqdn,
@@ -2213,7 +2214,8 @@ export async function runWebAnalysis(
   options: AnalyzeOptions = {}
 ): Promise<AnalysisSnapshot> {
   const startedAt = Date.now();
-  const targetName = normalizeFqdn(rawDomain);
+  const emailParsed = parseEmailDaneInput(rawDomain);
+  const targetName = emailParsed ? emailParsed.domain : normalizeFqdn(rawDomain);
   const displayDomain = displayFqdn(targetName);
   const queryTypes = ['A', 'AAAA', 'HTTPS', 'SVCB', 'CAA', 'TLSA', 'SSHFP'];
   const trustAnchors = options.trustAnchors ?? IANA_ROOT_TRUST_ANCHORS;

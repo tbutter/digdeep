@@ -4,6 +4,7 @@ import { App } from '../../App';
 import { AuditPanel } from '../../components/AuditPanel';
 import { ChainGraphView, prepareExportSvgElement } from '../../components/ChainGraphView';
 import { ConsensusView } from '../../components/ConsensusView';
+import { EmailDaneCard } from '../../components/EmailDaneCard';
 import { GraphInspector } from '../../components/GraphInspector';
 import { HistoryPanel } from '../../components/HistoryPanel';
 import {
@@ -209,7 +210,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v22');
+    expect(swCode).toContain('digdeep-shell-v24');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge when navigator.onLine is false
@@ -491,6 +492,11 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="twitter:card" content="summary_large_image"');
     expect(indexHtml).toContain('type="application/opensearchdescription+xml"');
     expect(indexHtml).toContain('<h1');
+    expect(indexHtml).toContain('<noscript>');
+    expect(indexHtml).toContain('OPENPGPKEY');
+    expect(indexHtml).toContain('SMIMEA');
+    expect(indexHtml).toContain('Certificate Transparency');
+    expect(indexHtml).toContain('0xC0xx');
 
     const jsonLdMatch = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/.exec(indexHtml);
     expect(jsonLdMatch).toBeTruthy();
@@ -580,6 +586,23 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(rdnsHtml).toContain('1.1.1.0/24');
       expect(rdnsHtml).toContain('RPKI VALID ✓');
 
+      const emailSnap = await runDnsvizAnalysis('paul@nohats.ca');
+      expect(emailSnap.emailDane).toBeDefined();
+      const emailHtml = renderToStaticMarkup(
+        <EmailDaneCard
+          emailDane={emailSnap.emailDane!}
+          onJumpToGraphTarget={() => {}}
+          onInspectDomainMail={() => {}}
+        />
+      );
+      expect(emailHtml).toContain('DANE Email Identity');
+      expect(emailHtml).toContain('paul@nohats.ca');
+      expect(emailHtml).toContain('0357513deb903a056e74a7e475247fc1ffe31d8be4c1d4a31f58dd47');
+      expect(emailHtml).toContain('OPENPGPKEY');
+      expect(emailHtml).toContain('SMIMEA');
+      expect(emailHtml).toContain('DANE USABLE ✓');
+      expect(emailHtml).toContain('Copy .asc');
+
       const webSnap = await runWebAnalysis('cloudflare.com');
       expect(webSnap.mode).toBe('web');
       expect(webSnap.webAnalysis).toBeDefined();
@@ -662,6 +685,6 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(badgeHtml).toContain('1.1.1.1');
       expect(badgeHtml).toContain('cursor-help');
     },
-    35000
+    45000
   );
 });

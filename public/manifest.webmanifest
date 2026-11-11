@@ -1,7 +1,7 @@
 {
-  "name": "DigDeep — DNSSEC Visualizer & DoH Inspector",
+  "name": "DigDeep — DNSSEC, Mail, Web/HTTPS & Multi-DoH Analyzer",
   "short_name": "DigDeep",
-  "description": "Modern client-side DNSSEC chain-of-trust visualizer, wire packet inspector, and DoH analyzer.",
+  "description": "100% client-side DNSSEC chain-of-trust visualizer, Mail & Email DANE (OPENPGPKEY/SMIMEA) validator, Web/HTTPS & CT auditor, Reverse DNS + BGP/RPKI inspector, 10-resolver DoH Consensus analyzer, and byte-level DNS wire dissector.",
   "id": "./",
   "start_url": "./",
   "scope": "./",

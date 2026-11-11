@@ -273,18 +273,17 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
       expect(snap.overallStatus).toBe('secure');
       expect(snap.findings.some((f) => f.code === 'RRSIG_EXPIRING_SOON')).toBe(false);
 
-      // Find the earliest RRSIG expiration in slack.com. and time-travel to 20s before expiration (< TTL)
-      const slackZone = snap.zones.find((z) => z.zoneName === 'slack.com.');
-      const aRrset = slackZone?.rrsets.find((r) => r.type === RR_TYPES.A);
-      const aExpSec = aRrset?.rrsigs[0]?.rrsig.expiration;
-      expect(aExpSec).toBeDefined();
-      if (aExpSec) {
-        const nearExpirySnap = await reverifySnapshot(snap, {
-          validationTimeMs: (aExpSec - 20) * 1000,
-        });
-        expect(nearExpirySnap.overallStatus).toBe('warning');
-        expect(nearExpirySnap.findings.some((f) => f.code === 'RRSIG_EXPIRING_SOON')).toBe(true);
-      }
+      // Find the earliest RRSIG expiration across the snapshot and time-travel to 20s before expiration
+      const allExpirations = snap.queries
+        .flatMap((q) => [...q.packet.answers, ...q.packet.authorities])
+        .flatMap((r) => (r.parsed.kind === 'RRSIG' ? [r.parsed.expiration] : []));
+      expect(allExpirations.length).toBeGreaterThan(0);
+      const earliestExpSec = Math.min(...allExpirations);
+      const nearExpirySnap = await reverifySnapshot(snap, {
+        validationTimeMs: (earliestExpSec - 20) * 1000,
+      });
+      expect(nearExpirySnap.overallStatus).toBe('warning');
+      expect(nearExpirySnap.findings.some((f) => f.code === 'RRSIG_EXPIRING_SOON')).toBe(true);
     },
     25000
   );

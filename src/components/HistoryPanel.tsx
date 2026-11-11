@@ -64,6 +64,8 @@ export function HistoryPanel({
       if (!q) return true;
       return (
         s.displayDomain.toLowerCase().includes(q) ||
+        (s.queriedEmail ?? '').toLowerCase().includes(q) ||
+        (s.queriedIp ?? '').toLowerCase().includes(q) ||
         (s.mode ?? 'dnssec').toLowerCase().includes(q) ||
         s.queryTypes.join(',').toLowerCase().includes(q) ||
         (s.note ?? '').toLowerCase().includes(q)
@@ -403,7 +405,7 @@ export function HistoryPanel({
                       onClick={() => onSelectSnapshot(snap)}
                       className="font-mono font-bold text-sm text-slate-900 dark:text-slate-100 hover:text-cyan-500 cursor-pointer"
                     >
-                      {snap.displayDomain}
+                      {snap.queriedEmail ?? snap.queriedIp ?? snap.displayDomain}
                     </button>
                     <StatusBadge status={snap.overallStatus} size="xs" />
                     {snap.mode === 'mail' && (
@@ -455,7 +457,13 @@ export function HistoryPanel({
                   </button>
                   <button
                     type="button"
-                    onClick={() => onReprobe(snap.displayDomain, snap.queryTypes, snap.mode)}
+                    onClick={() =>
+                      onReprobe(
+                        snap.queriedEmail ?? snap.queriedIp ?? snap.displayDomain,
+                        snap.queryTypes,
+                        snap.mode
+                      )
+                    }
                     className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 cursor-pointer"
                     title="Re-probe live via DoH"
                   >

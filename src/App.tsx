@@ -25,6 +25,7 @@ import { AuditPanel } from './components/AuditPanel';
 import { ChainGraphView } from './components/ChainGraphView';
 import { ConsensusView } from './components/ConsensusView';
 import { DohChooser } from './components/DohChooser';
+import { EmailDaneCard } from './components/EmailDaneCard';
 import { HistoryPanel } from './components/HistoryPanel';
 import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './components/IpHoverBadge';
 import { MailAnalysisView } from './components/MailAnalysisView';
@@ -37,6 +38,7 @@ import { ZonesPanel } from './components/ZonesPanel';
 import { reverifySnapshot, runDnsvizAnalysis, SNAPSHOT_ENGINE_VERSION } from './dns/analyzer';
 import { runConsensusAnalysis } from './dns/consensusAnalyzer';
 import { ANALYSIS_MODES, formatDohShortLabel, QUERYABLE_RR_TYPES } from './dns/constants';
+import { parseEmailDaneInput } from './dns/emailDane';
 import { parseReverseIpInput } from './dns/ipUtils';
 import {
   parseDkimSelectorInput,
@@ -122,6 +124,12 @@ const EXAMPLE_TRACES: ReadonlyArray<{
     description: 'Signed PTR + FCrDNS + BGP ASN + DNSBL reputation',
   },
   {
+    domain: 'paul@nohats.ca',
+    types: ['OPENPGPKEY', 'SMIMEA'],
+    badge: 'DANE ID',
+    description: 'RFC 7929 OPENPGPKEY & RFC 8162 SMIMEA email identity',
+  },
+  {
     domain: 'cloudflare.com',
     types: ['A', 'AAAA'],
     badge: 'DNSSEC',
@@ -153,11 +161,20 @@ export function App() {
 
     const initialMode: AnalysisMode =
       deepLink.mode ?? savedSnapshots[0]?.mode ?? 'dnssec';
-    const initialDomain = deepLink.name ?? savedSnapshots[0]?.displayDomain ?? 'digdeep.butter.eu';
-    const initialIpParsed = parseReverseIpInput(initialDomain);
+    const initialDomain =
+      deepLink.name ??
+      savedSnapshots[0]?.queriedEmail ??
+      savedSnapshots[0]?.displayDomain ??
+      'digdeep.butter.eu';
+    const initialEmailParsed = parseEmailDaneInput(initialDomain);
+    const initialIpParsed = initialEmailParsed ? null : parseReverseIpInput(initialDomain);
     const initialTypes =
       deepLink.types ??
-      (initialIpParsed?.wasRawIpInput ? ['PTR'] : savedSnapshots[0]?.queryTypes ?? ['A', 'AAAA']);
+      (initialEmailParsed?.inputKind === 'email'
+        ? ['OPENPGPKEY', 'SMIMEA']
+        : initialIpParsed?.wasRawIpInput
+          ? ['PTR']
+          : savedSnapshots[0]?.queryTypes ?? ['A', 'AAAA']);
     const initialDkimSelectors =
       deepLink.dkimSelectors ?? savedSnapshots[0]?.customDkimSelectors ?? [];
 
@@ -324,21 +341,41 @@ export function App() {
       }
     ) => {
       const cleanDomain = targetDomain.trim() || '.';
-      const parsedIp = parseReverseIpInput(cleanDomain);
+      const parsedEmail = parseEmailDaneInput(cleanDomain);
+      const parsedIp = parsedEmail ? null : parseReverseIpInput(cleanDomain);
       const modeToRun: AnalysisMode =
         parsedIp?.wasRawIpInput && !options?.modeOverride
           ? 'dnssec'
-          : (options?.modeOverride ?? analysisMode);
+          : parsedEmail?.inputKind === 'email' &&
+              !options?.modeOverride &&
+              analysisMode !== 'mail'
+            ? 'dnssec'
+            : (options?.modeOverride ?? analysisMode);
       const rawTypes = typesToQuery.length > 0 ? typesToQuery : ['A'];
       const cleanTypes =
-        parsedIp?.wasRawIpInput &&
-        rawTypes.every((t) => t.toUpperCase() === 'A' || t.toUpperCase() === 'AAAA')
-          ? ['PTR']
-          : rawTypes;
+        parsedEmail?.inputKind === 'email' && modeToRun === 'dnssec'
+          ? ['OPENPGPKEY', 'SMIMEA']
+          : parsedEmail?.inputKind === 'openpgpkey-owner' &&
+              rawTypes.every((t) => t.toUpperCase() === 'A' || t.toUpperCase() === 'AAAA')
+            ? ['OPENPGPKEY']
+            : parsedEmail?.inputKind === 'smimea-owner' &&
+                rawTypes.every((t) => t.toUpperCase() === 'A' || t.toUpperCase() === 'AAAA')
+              ? ['SMIMEA']
+              : parsedIp?.wasRawIpInput &&
+                  rawTypes.every((t) => t.toUpperCase() === 'A' || t.toUpperCase() === 'AAAA')
+                ? ['PTR']
+                : rawTypes;
       const dkimSelsToUse = options?.dkimSelectorsOverride ?? customDkimSelectors;
       const endpointToUse = options?.dohEndpointOverride ?? settings.dohEndpoint;
 
-      if (parsedIp?.wasRawIpInput) {
+      if (parsedEmail && modeToRun === 'dnssec') {
+        if (modeToRun !== analysisMode) setAnalysisMode(modeToRun);
+        if (cleanTypes.some((t) => !selectedTypes.includes(t))) {
+          setSelectedTypes(cleanTypes);
+          setShowExtraTypes(true);
+        }
+        void queryPublicSuffix(parsedEmail.domain, { endpoint: endpointToUse });
+      } else if (parsedIp?.wasRawIpInput) {
         if (modeToRun !== analysisMode) setAnalysisMode(modeToRun);
         if (cleanTypes.includes('PTR') && !selectedTypes.includes('PTR')) {
           setSelectedTypes(['PTR']);
@@ -436,7 +473,7 @@ export function App() {
           const url = new URL(window.location.href);
           url.hash = '';
           url.search = buildDeepLinkSearch({
-            name: snap.displayDomain,
+            name: snap.queriedEmail ?? snap.displayDomain,
             mode: snap.mode,
             types: snap.queryTypes,
             dkimSelectors: snap.customDkimSelectors,
@@ -483,7 +520,7 @@ export function App() {
 
     const url = new URL(window.location.href);
     const nextSearch = buildDeepLinkSearch({
-      name: activeSnapshot.displayDomain,
+      name: activeSnapshot.queriedEmail ?? activeSnapshot.displayDomain,
       mode: activeSnapshot.mode,
       types: activeSnapshot.queryTypes,
       dkimSelectors: activeSnapshot.customDkimSelectors,
@@ -561,7 +598,8 @@ export function App() {
       const cached = snapshots.find(
         (s) =>
           (s.mode ?? 'dnssec') === nextMode &&
-          s.displayDomain.toLowerCase() === parsed.name!.toLowerCase().replace(/\.$/, '') &&
+          (s.queriedEmail ?? s.displayDomain).toLowerCase() ===
+            parsed.name!.toLowerCase().replace(/\.$/, '') &&
           (nextMode === 'mail'
             ? (s.customDkimSelectors ?? []).join(',') === nextDkimSels.join(',')
             : nextMode === 'web' || nextMode === 'consensus'
@@ -682,7 +720,7 @@ export function App() {
   const handleCopyShareLink = async () => {
     if (!activeSnapshot || typeof window === 'undefined') return;
     const shareUrl = buildShareUrl(window.location.href, {
-      name: activeSnapshot.displayDomain,
+      name: activeSnapshot.queriedEmail ?? activeSnapshot.displayDomain,
       mode: activeSnapshot.mode,
       types: activeSnapshot.queryTypes,
       dkimSelectors: activeSnapshot.customDkimSelectors,
@@ -875,7 +913,7 @@ export function App() {
                     inputOverlayRef.current.scrollLeft = e.currentTarget.scrollLeft;
                   }
                 }}
-                placeholder="Enter domain or IPv4/IPv6 address (e.g. digdeep.butter.eu, 1.1.1.1, 2606:4700:4700::1111, .) — press / to focus"
+                placeholder="Enter domain, email, or IPv4/IPv6 (e.g. digdeep.butter.eu, paul@nohats.ca, 1.1.1.1, .) — press / to focus"
                 className={`w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 pl-10 pr-16 py-2.5 font-mono text-sm placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20 ${
                   searchSuffixParts
                     ? 'text-transparent caret-slate-900 dark:caret-slate-100 selection:bg-cyan-500/25 selection:text-transparent'
@@ -1239,6 +1277,14 @@ export function App() {
                         <span className="text-slate-400">→</span>
                       </>
                     )}
+                    {activeSnapshot.queriedEmail && (
+                      <>
+                        <span className="font-mono font-bold text-base text-cyan-700 dark:text-cyan-300 break-all">
+                          {activeSnapshot.queriedEmail}
+                        </span>
+                        <span className="text-slate-400">→</span>
+                      </>
+                    )}
                     <span className="font-mono font-bold text-base text-slate-900 dark:text-slate-100 break-all">
                       {activeSnapshot.displayDomain}
                     </span>
@@ -1311,9 +1357,13 @@ export function App() {
                     type="button"
                     disabled={loading}
                     onClick={() =>
-                      void executeAnalysis(activeSnapshot.displayDomain, activeSnapshot.queryTypes, {
-                        modeOverride: activeSnapshot.mode ?? 'dnssec',
-                      })
+                      void executeAnalysis(
+                        activeSnapshot.queriedEmail ?? activeSnapshot.displayDomain,
+                        activeSnapshot.queryTypes,
+                        {
+                          modeOverride: activeSnapshot.mode ?? 'dnssec',
+                        }
+                      )
                     }
                     className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-cyan-500 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 cursor-pointer"
                     title={`Run a fresh live ${formatDohShortLabel(settings.dohEndpoint)} DoH trace and save a new snapshot`}
@@ -1338,6 +1388,25 @@ export function App() {
                   setSelectedTypes(['A', 'AAAA']);
                   void executeAnalysis(hostname, ['A', 'AAAA'], {
                     modeOverride: 'dnssec',
+                    pushHistory: true,
+                  });
+                }}
+              />
+            )}
+
+            {activeSnapshot.emailDane && (
+              <EmailDaneCard
+                emailDane={activeSnapshot.emailDane}
+                currentMode={activeSnapshot.mode ?? 'dnssec'}
+                onJumpToGraphTarget={(targetId) => {
+                  setFocusedGraphTarget(targetId);
+                  setActiveTab('graph');
+                }}
+                onInspectDomainMail={(emailOrDomain) => {
+                  setAnalysisMode('mail');
+                  setDomainInput(emailOrDomain);
+                  void executeAnalysis(emailOrDomain, ['MX', 'TXT'], {
+                    modeOverride: 'mail',
                     pushHistory: true,
                   });
                 }}
@@ -1534,7 +1603,7 @@ export function App() {
                   setFocusedGraphTarget(null);
                   setActiveSnapshot(snap);
                   setAnalysisMode(snapMode);
-                  setDomainInput(snap.displayDomain);
+                  setDomainInput(snap.queriedEmail ?? snap.displayDomain);
                   setCustomDkimSelectors(snap.customDkimSelectors ?? []);
                   if (snapMode === 'dnssec') {
                     setSelectedTypes(snap.queryTypes);

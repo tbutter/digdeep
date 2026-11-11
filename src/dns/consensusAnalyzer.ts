@@ -14,6 +14,7 @@ import {
   type AnalyzeOptions,
 } from './analyzer';
 import { DohSession } from './doh';
+import { parseEmailDaneInput } from './emailDane';
 import { displayFqdn, isSubdomainOrEqual, normalizeFqdn } from './encoding';
 import { formatCanonicalIpv6, parseIpv6Groups } from './ipUtils';
 import type {
@@ -630,7 +631,8 @@ export async function runConsensusAnalysis(
   options: AnalyzeOptions = {}
 ): Promise<AnalysisSnapshot> {
   const startedAt = Date.now();
-  const targetName = normalizeFqdn(rawDomain);
+  const emailParsed = parseEmailDaneInput(rawDomain);
+  const targetName = emailParsed ? emailParsed.domain : normalizeFqdn(rawDomain);
   const displayDomain = displayFqdn(targetName);
   const queryTypes = ['A', 'AAAA', 'SOA', 'DNSKEY', 'DS'];
   const trustAnchors = options.trustAnchors ?? IANA_ROOT_TRUST_ANCHORS;

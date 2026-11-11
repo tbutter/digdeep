@@ -795,6 +795,56 @@ function dissectRdataSubfields(
       return fields;
     }
 
+    if ((rrtype === RR_TYPES.TLSA || rrtype === RR_TYPES.SMIMEA) && rdlength >= 3) {
+      const usage = buf[rdataOffset];
+      const selector = buf[rdataOffset + 1];
+      const matching = buf[rdataOffset + 2];
+      fields.push(
+        {
+          id: `${prefixId}-dane-usage`,
+          label: 'Certificate Usage',
+          startOffset: rdataOffset,
+          endOffset: rdataOffset + 1,
+          valueSummary: String(usage),
+        },
+        {
+          id: `${prefixId}-dane-sel`,
+          label: 'Selector',
+          startOffset: rdataOffset + 1,
+          endOffset: rdataOffset + 2,
+          valueSummary: String(selector),
+        },
+        {
+          id: `${prefixId}-dane-match`,
+          label: 'Matching Type',
+          startOffset: rdataOffset + 2,
+          endOffset: rdataOffset + 3,
+          valueSummary: String(matching),
+        }
+      );
+      if (rdlength > 3) {
+        fields.push({
+          id: `${prefixId}-dane-assoc`,
+          label: 'Certificate Association Data',
+          startOffset: rdataOffset + 3,
+          endOffset: end,
+          valueSummary: `${rdlength - 3} bytes`,
+        });
+      }
+      return fields;
+    }
+
+    if (rrtype === RR_TYPES.OPENPGPKEY && rdlength >= 1) {
+      fields.push({
+        id: `${prefixId}-openpgpkey`,
+        label: 'OpenPGP Transferable Public Key (RFC 7929)',
+        startOffset: rdataOffset,
+        endOffset: end,
+        valueSummary: `${rdlength} bytes`,
+      });
+      return fields;
+    }
+
     if (rrtype === RR_TYPES.TXT || rrtype === RR_TYPES.SPF) {
       let tOff = rdataOffset;
       let chunkIdx = 0;

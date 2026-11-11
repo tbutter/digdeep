@@ -14,11 +14,11 @@
     <title>DigDeep — Client-Side DNSSEC, Mail, Web/HTTPS &amp; Multi-DoH Analyzer</title>
     <meta
       name="description"
-      content="Interactive client-side DNSSEC chain-of-trust visualizer, Mail (MX, SMTP DANE, SPF, DKIM, DMARC, MTA-STS, BIMI) validator, Web/HTTPS (SVCB, TLS ECH, CAA, DANE, SSHFP) auditor, IPv4/IPv6 Reverse DNS + BGP ASN inspector, and Multi-Resolver DoH Consensus (RFC 8914 EDE) analyzer directly in your browser."
+      content="100% client-side DNSSEC chain-of-trust visualizer, Mail &amp; Email DANE (MX, SMTP TLSA, SPF simulator, DKIM, DMARC, MTA-STS, BIMI, OPENPGPKEY, SMIMEA) validator, Web/HTTPS (SVCB, TLS ECH, CAA ↔ CT logs, DANE, SSHFP) auditor, IPv4/IPv6 Reverse DNS + BGP/RPKI inspector, 10-Resolver DoH Consensus (RFC 8914 EDE) matrix, and byte-level DNS wire dissector."
     />
     <meta
       name="keywords"
-      content="DNSSEC visualizer, DNSViz alternative, SMTP DANE checker, TLSA validator, SPF checker, DKIM checker, DMARC analyzer, MTA-STS checker, HTTPS SVCB ECH, CAA checker, RFC 8914 EDE, DNS over HTTPS, DoH inspector, RRSIG verification, reverse DNS PTR FCrDNS"
+      content="DNSSEC visualizer, DNSViz alternative, SMTP DANE checker, OPENPGPKEY lookup, SMIMEA checker, TLSA validator, SPF checker, SPF simulator, DKIM checker, DMARC analyzer, MTA-STS checker, HTTPS SVCB ECH, CAA Certificate Transparency, RFC 8914 EDE, DNS over HTTPS, DoH wire dissector, RPKI ROA, reverse DNS PTR FCrDNS"
     />
     <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1" />
     <link rel="canonical" href="https://digdeep.fyi/" />
@@ -88,7 +88,7 @@
         "alternateName": "digdeep.fyi",
         "url": "https://digdeep.fyi/",
         "image": "https://digdeep.fyi/og-card.png",
-        "description": "Modern client-side DNSSEC chain-of-trust visualizer, RFC 4034/4035/5155 WebCrypto validator, and RFC 8484 DNS-over-HTTPS (DoH) wire packet inspector.",
+        "description": "100% client-side DNSSEC chain-of-trust visualizer, Mail & Email DANE (OPENPGPKEY/SMIMEA) validator, Web/HTTPS (SVCB/ECH/CAA/CT) auditor, IPv4/IPv6 Reverse DNS + BGP/RPKI inspector, 10-resolver DoH Consensus analyzer, and byte-level DNS wire dissector.",
         "applicationCategory": "DeveloperApplication",
         "operatingSystem": "Any",
         "browserRequirements": "Requires JavaScript and WebCrypto (SubtleCrypto)",
@@ -99,15 +99,16 @@
           "priceCurrency": "USD"
         },
         "featureList": [
-          "100% client-side DNSSEC validation using browser SubtleCrypto",
-          "Interactive chain-of-trust SVG and high-DPI PNG graph export",
+          "100% client-side DNSSEC validation from IANA Root KSK trust anchors using browser SubtleCrypto (RSA, ECDSA P-256/P-384, Ed25519)",
+          "Interactive chain-of-trust SVG and high-DPI PNG graph export, RFC 1035 master zonefile (.zone) export, and snapshot diffing",
           "Multi-resolver RFC 8484 DoH Consensus matrix & RFC 8914 Extended DNS Error (EDE) protective filtering check across 10 public & protective resolvers",
-          "RSASHA1, RSASHA256, RSASHA512, ECDSAP256SHA256, ECDSAP384SHA384, and ED25519 signature verification",
-          "NSEC, NSEC3 Opt-Out, wildcard synthesis, and Compact Denial of Existence (Black Lies) proofs",
+          "NSEC, NSEC3 Opt-Out, wildcard (*.domain) synthesis, Compact Denial of Existence (Black Lies), ZONEMD (RFC 8976), and SaaS TXT hygiene audits",
           "CDS / CDNSKEY (RFC 7344/8078) & CSYNC (RFC 7477) rollover synchronization, NS BGP ASN diversity, SOA timer audit, and dangling NS/CNAME takeover detection",
-          "MX mail routing, RFC 7671/7672 SMTP DANE (_25._tcp TLSA) verification, RFC 7208 recursive SPF 10-lookup auditing, RFC 6376/8301/8463 DKIM key inspection, RFC 7489/9091 DMARC policy analysis, MTA-STS (RFC 8461), TLS-RPT (RFC 8460), and BIMI",
-          "Web & HTTPS analysis: HTTPS/SVCB (RFC 9460), TLS ECHConfigList decoding, ipv4hint/ipv6hint drift, tree-walking CAA (RFC 8659/8657 ACME bindings), _443._tcp DANE TLSA, and SSHFP (RFC 4255)",
-          "IPv4 and IPv6 Reverse DNS (in-addr.arpa / ip6.arpa) chain verification, Forward-Confirmed Reverse DNS (FCrDNS), and Team Cymru BGP ASN lookup"
+          "MX mail routing, RFC 7671/7672 SMTP DANE (_25._tcp TLSA), recursive SPF (RFC 7208) 10-lookup audit & interactive sender IP simulator, DKIM, DMARC, MTA-STS, TLS-RPT, and BIMI",
+          "Email address (user@domain) DANE identity lookup for OPENPGPKEY (RFC 7929) & SMIMEA (RFC 8162) with OpenPGP v4/v6 packet & X.509 DER inspection (.asc / .pem export)",
+          "Web & HTTPS analysis: HTTPS/SVCB (RFC 9460), TLS ECHConfigList decoding, ipv4hint/ipv6hint drift, tree-walking CAA (RFC 8659/8657) cross-checked against Certificate Transparency (CT) logs, _443._tcp DANE TLSA, and SSHFP (RFC 4255)",
+          "IPv4 and IPv6 Reverse DNS (in-addr.arpa / ip6.arpa) chain verification, Forward-Confirmed Reverse DNS (FCrDNS), Team Cymru BGP ASN, RPKI ROA (RFC 6811), and DNSBL reputation (RFC 5782)",
+          "Interactive byte-level DNS wire packet dissector with RFC 1035 §4.1.4 0xC0xx compression pointer visualization and arbitrary ?dns= / hex decoding"
         ],
         "potentialAction": {
           "@type": "SearchAction",
@@ -119,51 +120,103 @@
   </head>
   <body class="bg-slate-950 text-slate-100 antialiased selection:bg-cyan-500/30 selection:text-cyan-200">
     <div id="root">
-      <!-- Semantic crawlable shell for search engines and non-JS link unfurlers; replaced immediately on React mount -->
+      <!-- Semantic crawlable shell for search engines and non-JS browsers; replaced immediately on React mount -->
       <main class="max-w-4xl mx-auto px-6 py-12 text-slate-300 space-y-6">
         <header class="space-y-2">
           <h1 class="text-2xl font-bold text-slate-100">
-            DigDeep — Client-Side DNSSEC Chain-of-Trust Visualizer &amp; DoH Wire Inspector
+            DigDeep — Client-Side DNSSEC, Mail, Web/HTTPS &amp; Multi-DoH Analyzer
           </h1>
           <p class="text-sm text-slate-400">
-            Analyze DNS delegations, DS digests, DNSKEY rollovers, RRSIG cryptographic signatures,
-            NSEC/NSEC3 negative proofs, and raw RFC 8484 DNS-over-HTTPS wire packets directly in
-            your browser with zero backend servers.
+            Inspect domain names, <code>user@domain</code> email identities, and IPv4/IPv6 addresses
+            directly in your browser with zero backend servers — combining WebCrypto DNSSEC
+            chain-of-trust validation, Mail &amp; DANE identity auditing, Web/HTTPS &amp; Certificate
+            Transparency checks, BGP/RPKI lookups, 10-resolver DoH consensus, and byte-level DNS
+            wire dissection.
           </p>
         </header>
-        <section class="space-y-2 text-sm text-slate-400">
+
+        <noscript>
+          <div class="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-xs text-amber-200 space-y-1">
+            <p class="font-semibold text-amber-100">JavaScript &amp; WebCrypto Required</p>
+            <p>
+              DigDeep runs 100% client-side with no server proxy. Enable JavaScript to execute live
+              RFC 8484 DNS-over-HTTPS queries, verify DNSSEC chains via browser
+              <code>SubtleCrypto</code>, audit Mail / SPF / DKIM / DMARC / DANE &amp;
+              <code>OPENPGPKEY</code> / <code>SMIMEA</code> identities, cross-check
+              <code>HTTPS</code> / <code>ECH</code> / <code>CAA</code> against Certificate
+              Transparency logs, inspect Reverse DNS + BGP/RPKI routes, compare 10 DoH resolvers,
+              and dissect raw DNS wire packets.
+            </p>
+          </div>
+        </noscript>
+
+        <section class="space-y-2.5 text-sm text-slate-400">
           <h2 class="text-base font-semibold text-slate-200">Key Capabilities</h2>
-          <ul class="list-disc pl-5 space-y-1">
+          <ul class="list-disc pl-5 space-y-1.5">
             <li>
-              <strong>Browser WebCrypto Verification:</strong> Validates RFC 4034, RFC 4035, and RFC
-              5155 chains from IANA Root KSK trust anchors using <code>SubtleCrypto</code>.
+              <strong class="text-slate-200">DNSSEC Chain-of-Trust &amp; Zone Hygiene:</strong>
+              Validates RFC 4034 / 4035 / 5155 chains from IANA Root KSK trust anchors using
+              <code>SubtleCrypto</code> (<code>RSA</code>, <code>ECDSA P-256/P-384</code>,
+              <code>Ed25519</code>), including NSEC / NSEC3 Opt-Out / Compact Denial (&ldquo;Black
+              Lies&rdquo;), <code>CDS</code> / <code>CDNSKEY</code> / <code>CSYNC</code> rollover
+              sync, <code>ZONEMD</code> (RFC 8976), wildcard (<code>*.domain</code>) synthesis,
+              SaaS <code>TXT</code> hygiene, SOA timers, NS BGP ASN diversity, and dangling
+              NS/CNAME takeover checks.
             </li>
             <li>
-              <strong>Multi-Resolver DoH Comparison:</strong> Query Cloudflare <code>1.1.1.1</code>,
-              Google <code>8.8.8.8</code>, Quad9 <code>9.9.9.9</code>, DNS.SB, DNS4EU, or custom DoH
-              resolvers with side-by-side <code>CD=1</code> / <code>CD=0</code> and RFC 8914
-              Extended DNS Error (EDE) inspection.
+              <strong class="text-slate-200">Mail Security &amp; DANE Email Identity (<code>user@domain</code>):</strong>
+              Audits <code>MX</code> routing, SMTP DANE (<code>_25._tcp</code> <code>TLSA</code>,
+              RFC 7671/7672), recursive <code>SPF</code> 10-lookup budgets with an interactive
+              sender IPv4/IPv6 evaluator, <code>DKIM</code> keys, <code>DMARC</code> (RFC
+              7489/9091), <code>MTA-STS</code>, <code>TLS-RPT</code>, and <code>BIMI</code>, plus
+              <code>OPENPGPKEY</code> (RFC 7929) and <code>SMIMEA</code> (RFC 8162) lookup with
+              client-side OpenPGP <code>.asc</code> &amp; X.509 <code>.pem</code> inspection.
             </li>
             <li>
-              <strong>Interactive Graph &amp; Snapshot Diffing:</strong> Inspect cross-zone CNAMEs,
-              missing SEP keys, time-travel RRSIG expiration windows, and export standalone SVG or
-              PNG diagrams.
+              <strong class="text-slate-200">Web, HTTPS/SVCB, TLS ECH &amp; Certificate Transparency:</strong>
+              Decodes <code>HTTPS</code> / <code>SVCB</code> (RFC 9460) <code>SvcParams</code>
+              (<code>alpn</code>, TLS <code>ECHConfigList</code>, <code>ipv4hint</code> /
+              <code>ipv6hint</code> drift, <code>dohpath</code>), tree-walks <code>CAA</code>
+              policies (RFC 8659/8657) cross-checked against Certificate Transparency (CT) logs with
+              subdomain discovery, and validates <code>_443._tcp</code> Web DANE <code>TLSA</code>
+              and <code>SSHFP</code> (RFC 4255).
+            </li>
+            <li>
+              <strong class="text-slate-200">IPv4 / IPv6 Reverse DNS, BGP ASN, RPKI &amp; DNSBL:</strong>
+              Automatically converts IPv4/IPv6 inputs to <code>in-addr.arpa</code> /
+              <code>ip6.arpa</code>, verifies Forward-Confirmed Reverse DNS (FCrDNS), Team Cymru BGP
+              ASN origins, RPKI Route Origin Authorizations (RFC 6811), and DNSBL IP reputation
+              (RFC 5782).
+            </li>
+            <li>
+              <strong class="text-slate-200">10-Resolver DoH Consensus &amp; Protective Filtering:</strong>
+              Queries Cloudflare <code>1.1.1.1</code>, Google <code>8.8.8.8</code>, Quad9
+              <code>9.9.9.9</code>, DNS.SB, DNS4EU, Mullvad, AdGuard, CleanBrowsing, and OpenDNS
+              side-by-side (<code>CD=0</code> vs <code>CD=1</code>) to surface RFC 8914 Extended DNS
+              Errors (EDE), protective blocking, SOA serial skew, and DNSKEY rollover drift.
+            </li>
+            <li>
+              <strong class="text-slate-200">Byte-Level Wire Dissector, Zonefile Export &amp; Offline History:</strong>
+              Interactive hex + packet structure dissector with RFC 1035 &sect;4.1.4
+              <code>0xC0xx</code> compression pointer visualization and arbitrary
+              <code>?dns=</code> / hex decoding, RFC 1035 <code>.zone</code> export,
+              <code>dig</code> / <code>delv</code> / <code>kdig</code> / <code>curl</code> CLI
+              reproducers, time-travel RRSIG re-verification, snapshot diffing, and SVG/PNG graph
+              export.
             </li>
           </ul>
         </section>
-        <nav aria-label="Example DNSSEC Traces" class="text-xs text-cyan-400 space-x-4">
+
+        <nav aria-label="Example DNSSEC Traces" class="flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-cyan-400">
           <a href="https://digdeep.fyi/?name=www.iana.org&amp;types=A,AAAA">www.iana.org (Cross-zone CNAME)</a>
           <a href="https://digdeep.fyi/?name=dnssec-failed.org&amp;types=A,AAAA">dnssec-failed.org (Bogus SEP)</a>
-          <a href="https://digdeep.fyi/?name=ietf.org&amp;mode=mail">ietf.org (MX + DANE + SPF + DKIM + DMARC)</a>
-          <a href="https://digdeep.fyi/?name=cloudflare.com&amp;types=A,AAAA">cloudflare.com (ECDSA)</a>
-          <a href="https://digdeep.fyi/?name=.&amp;types=DNSKEY,SOA">Root Zone (.)</a>
+          <a href="https://digdeep.fyi/?name=ietf.org&amp;mode=mail">ietf.org (Mail + DANE + SPF + DKIM + DMARC)</a>
+          <a href="https://digdeep.fyi/?name=paul%40nohats.ca">paul@nohats.ca (OPENPGPKEY / SMIMEA)</a>
+          <a href="https://digdeep.fyi/?name=cloudflare.com&amp;mode=web">cloudflare.com (HTTPS + ECH + CAA + CT)</a>
+          <a href="https://digdeep.fyi/?name=1.1.1.1">1.1.1.1 (Reverse DNS + BGP + RPKI)</a>
+          <a href="https://digdeep.fyi/?name=iana.org&amp;mode=consensus">iana.org (10-Resolver DoH Consensus)</a>
+          <a href="https://digdeep.fyi/?name=.&amp;types=DNSKEY,SOA,ZONEMD">Root Zone (. + ZONEMD)</a>
         </nav>
-        <noscript>
-          <p class="text-xs text-amber-300">
-            Enable JavaScript to run live browser-side DNS-over-HTTPS queries and interactive
-            WebCrypto DNSSEC verification.
-          </p>
-        </noscript>
       </main>
     </div>
     <script type="module" src="/src/main.tsx"></script>

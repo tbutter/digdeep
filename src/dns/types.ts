@@ -1459,6 +1459,130 @@ export interface ConsensusAnalysisResult {
   summary: string;
 }
 
+export interface OpenPgpSubkeyInfo {
+  version: number;
+  algorithmId: number;
+  algorithmName: string;
+  curveOrBits: string;
+  fingerprintHex: string;
+  keyIdHex: string;
+  createdAtSec: number;
+  expiresAtSec?: number;
+  isExpired: boolean;
+  isRevoked: boolean;
+  keyFlags: string[];
+}
+
+export interface DecodedOpenPgpTransferableKey {
+  version: number;
+  algorithmId: number;
+  algorithmName: string;
+  curveOrBits: string;
+  fingerprintHex: string;
+  keyIdHex: string;
+  createdAtSec: number;
+  expiresAtSec?: number;
+  isExpired: boolean;
+  isRevoked: boolean;
+  keyFlags: string[];
+  userIds: string[];
+  userAttributeCount: number;
+  subkeys: OpenPgpSubkeyInfo[];
+  armoredPublicKey: string;
+  byteLength: number;
+  matchesQueriedEmail?: boolean;
+  parseWarning?: string;
+}
+
+export interface DecodedX509Certificate {
+  version: number;
+  serialHex: string;
+  signatureAlgorithm: string;
+  subject: string;
+  subjectEmailAddresses: string[];
+  sanRfc822Names: string[];
+  sanDnsNames: string[];
+  issuer: string;
+  isSelfIssued: boolean;
+  notBeforeSec: number;
+  notBeforeIso: string;
+  notAfterSec: number;
+  notAfterIso: string;
+  isExpired: boolean;
+  isNotYetValid: boolean;
+  publicKeyAlgorithm: string;
+  publicKeyBitsOrCurve?: string;
+  hasEmailProtectionEku: boolean;
+  isCa?: boolean;
+  sha256FingerprintHex: string;
+  spkiSha256Hex?: string;
+  pem: string;
+  matchesQueriedEmail?: boolean;
+  parseWarning?: string;
+}
+
+export interface EmailDaneOpenPgpRecord {
+  index: number;
+  ttl: number;
+  byteLength: number;
+  keyBase64: string;
+  decodedKey?: DecodedOpenPgpTransferableKey;
+  parseError?: string;
+}
+
+export interface EmailDaneSmimeaRecord {
+  index: number;
+  ttl: number;
+  usage: number;
+  usageMnemonic: string;
+  usageName: string;
+  selector: number;
+  selectorMnemonic: string;
+  selectorName: string;
+  matchingType: number;
+  matchingMnemonic: string;
+  matchingName: string;
+  certAssociationHex: string;
+  byteLength: number;
+  digestLengthValid: boolean;
+  decodedCert?: DecodedX509Certificate;
+  decodedSpki?: {
+    publicKeyAlgorithm: string;
+    publicKeyBitsOrCurve?: string;
+    spkiSha256Hex: string;
+    pem: string;
+  };
+  parseError?: string;
+}
+
+export interface EmailDaneProtocolResult<TRecord> {
+  protocol: 'OPENPGPKEY' | 'SMIMEA';
+  rfc: 'RFC 7929' | 'RFC 8162';
+  queriedOwner: string;
+  resolvedOwner: string;
+  usedLowercaseFallback: boolean;
+  cnameChain: string[];
+  status: 'present' | 'nxdomain' | 'nodata' | 'error';
+  dnssecStatus: ValidationStatus;
+  daneUsable: boolean;
+  rrsetId?: string;
+  negativeNodeId?: string;
+  records: TRecord[];
+  cliVerifyCommand: string;
+}
+
+export interface EmailDaneAnalysis {
+  inputKind: 'email' | 'openpgpkey-owner' | 'smimea-owner';
+  email?: string;
+  localPart?: string;
+  domain: string;
+  exactHashHex: string;
+  lowercaseHashHex?: string;
+  openpgpkey?: EmailDaneProtocolResult<EmailDaneOpenPgpRecord>;
+  smimea?: EmailDaneProtocolResult<EmailDaneSmimeaRecord>;
+  summary: string;
+}
+
 export interface AnalysisSnapshot {
   id: string;
   version: number;
@@ -1466,6 +1590,7 @@ export interface AnalysisSnapshot {
   targetName: string; // normalized FQDN e.g. "cloudflare.com."
   displayDomain: string; // clean display e.g. "cloudflare.com" or "."
   queriedIp?: string; // canonical IP when reverse-DNS trace was initiated for an IPv4/IPv6 address
+  queriedEmail?: string; // canonical email input (user@domain) when RFC 7929 / 8162 DANE trace was initiated
   queryTypes: string[];
   customDkimSelectors?: string[];
   mtaStsPolicyFetch?: MtaStsPolicyFetchResult;
@@ -1486,6 +1611,7 @@ export interface AnalysisSnapshot {
   webAnalysis?: WebAnalysisResult;
   consensusAnalysis?: ConsensusAnalysisResult;
   reverseDns?: ReverseDnsAnalysis;
+  emailDane?: EmailDaneAnalysis;
   pinned?: boolean;
   note?: string;
 }
