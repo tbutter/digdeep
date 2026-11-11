@@ -30,6 +30,37 @@ export interface EdeEntry {
   extraText: string;
 }
 
+export interface ClientSubnetQueryOption {
+  /** IANA Address Family: 1 = IPv4, 2 = IPv6 */
+  family: 1 | 2;
+  /** Canonical IPv4 or IPv6 network address */
+  address: string;
+  /** SOURCE PREFIX-LENGTH (0..32 for IPv4, 0..128 for IPv6) */
+  sourcePrefixLength: number;
+  /** SCOPE PREFIX-LENGTH (defaults to 0 in queries per RFC 7871 §6) */
+  scopePrefixLength?: number;
+}
+
+export interface EdnsClientSubnet {
+  /** IANA Address Family: 1 = IPv4, 2 = IPv6 */
+  family: number;
+  familyName: string;
+  sourcePrefixLength: number;
+  scopePrefixLength: number;
+  /** Reconstructed IPv4 or IPv6 network address */
+  address: string;
+  /** Raw ADDRESS bytes hex on the wire */
+  rawAddressHex: string;
+  /** Number of ADDRESS octets carried in the option */
+  addressByteLength: number;
+  /** dig-style presentation string: "<address>/<source>/<scope>" */
+  presentation: string;
+  /** RFC 7871 §6 wire hygiene flags */
+  hasNonZeroTailBits?: boolean;
+  hasExcessAddressBytes?: boolean;
+  invalidPrefixLength?: boolean;
+}
+
 export interface EdnsInfo {
   udpPayloadSize: number;
   extendedRcode: number;
@@ -37,6 +68,7 @@ export interface EdnsInfo {
   doBit: boolean;
   flags: number;
   ede: EdeEntry[];
+  ecs?: EdnsClientSubnet;
 }
 
 export interface DnskeyRdata {
@@ -298,6 +330,8 @@ export interface DohQueryLog {
   requestWireBase64: string;
   packet: DnsPacket;
   purpose: string;
+  /** RFC 7871 EDNS Client Subnet CIDR sent in the query (e.g. "71.252.0.0/24") */
+  ecsSubnet?: string;
 }
 
 export interface RrsigVerification {
@@ -1456,6 +1490,59 @@ export interface ConsensusAnalysisResult {
     | 'propagation-skew'
     | 'dnssec-bogus'
     | 'split-horizon-divergent';
+  summary: string;
+  ecsGeo?: EcsGeoAnalysisResult;
+}
+
+export interface EcsAddressProbeResult {
+  qtype: 'A' | 'AAAA';
+  querySubnet: string;
+  sourcePrefixLength: number;
+  reachable: boolean;
+  latencyMs: number;
+  rcode: number;
+  rcodeName: string;
+  adBit: boolean;
+  responseEcs?: EdnsClientSubnet;
+  cnameChain: string[];
+  terminalOwner: string;
+  answers: string[];
+  minTtl?: number;
+  ede: EdeEntry[];
+  isDanglingCname: boolean;
+  isCacheBustingScope: boolean;
+  hasWireAnomaly: boolean;
+  wireAnomalyNotes: string[];
+}
+
+export interface EcsRegionProbeRow {
+  regionId: string;
+  regionLabel: string;
+  locationHint: string;
+  isPrivacyOptOut: boolean;
+  ipv4: EcsAddressProbeResult;
+  ipv6: EcsAddressProbeResult;
+  asns: BgpAsnOrganization[];
+  bgpPrefixes: string[];
+  countries: string[];
+  rpkiStatus?: RpkiValidationState;
+  rpkiValidations?: RpkiRouteValidation[];
+}
+
+export interface EcsGeoAnalysisResult {
+  ecsEndpoint: string;
+  ecsEndpointLabel: string;
+  ecsSupportedByResolver: boolean;
+  regions: EcsRegionProbeRow[];
+  steeringModel: 'geodns-ip' | 'geodns-cname' | 'anycast-uniform' | 'partial-or-error';
+  uniqueIpv4PoolCount: number;
+  uniqueIpv6PoolCount: number;
+  uniqueCnameTargets: string[];
+  ipv4ScopeRange: { min: number; max: number } | null;
+  ipv6ScopeRange: { min: number; max: number } | null;
+  optOutHonored: boolean;
+  cacheBustingRegions: string[];
+  anomalyRegions: string[];
   summary: string;
 }
 

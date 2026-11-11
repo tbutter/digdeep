@@ -47,6 +47,9 @@ export function formatPacketAsDig(log: DohQueryLog): string {
     lines.push(
       `; EDNS: version: ${p.edns.version}, flags:${p.edns.doBit ? ' do' : ''}; udp: ${p.edns.udpPayloadSize}`
     );
+    if (p.edns.ecs) {
+      lines.push(`; CLIENT-SUBNET: ${p.edns.ecs.presentation}`);
+    }
     for (const ede of p.edns.ede) {
       lines.push(
         `; EDE: ${ede.infoCode} (${ede.name})${ede.extraText ? `: (${ede.extraText})` : ''}`
@@ -158,6 +161,7 @@ export function generateCliReproducerCommands(params: {
   qtypeName: string;
   dohEndpoint?: string;
   cd?: boolean;
+  ecsSubnet?: string;
   validatedAt?: number;
   capturedAt?: number;
 }): CliReproducerCommands {
@@ -179,6 +183,7 @@ export function generateCliReproducerCommands(params: {
 
   const resolverIpOrHost = DOH_HOST_TO_RESOLVER_IP[dohHost] ?? dohHost;
   const cdFlag = params.cd ? ' +cd' : '';
+  const subnetFlag = params.ecsSubnet ? ` +subnet=${params.ecsSubnet}` : '';
   const hasClockOverride =
     params.validatedAt !== undefined &&
     params.capturedAt !== undefined &&
@@ -188,9 +193,9 @@ export function generateCliReproducerCommands(params: {
     : '';
 
   return {
-    dig: `dig +dnssec +multi${cdFlag} @${resolverIpOrHost} ${target} ${qtype}`,
+    dig: `dig +dnssec +multi${cdFlag}${subnetFlag} @${resolverIpOrHost} ${target} ${qtype}`,
     delv: `delv @${resolverIpOrHost} ${target} ${qtype} +rtrace${delvTimeFlag}`,
-    kdig: `kdig +dnssec${cdFlag} +https @${dohHost} ${target} ${qtype}`,
+    kdig: `kdig +dnssec${cdFlag}${subnetFlag} +https @${dohHost} ${target} ${qtype}`,
     resolverIpOrHost,
     dohHost,
   };

@@ -118,6 +118,13 @@ const EXAMPLE_TRACES: ReadonlyArray<{
     description: 'Multi-DoH Resolver Matrix & RFC 8914 EDE',
   },
   {
+    domain: 'www.wikipedia.org',
+    mode: 'consensus',
+    types: ['A', 'AAAA', 'SOA', 'DNSKEY', 'DS'],
+    badge: 'ECS GeoDNS',
+    description: 'RFC 7871 ECS 6-continent GeoDNS & SCOPE matrix',
+  },
+  {
     domain: '9.9.9.9',
     types: ['PTR'],
     badge: 'rDNS',
@@ -1176,7 +1183,7 @@ export function App() {
                   SOA Serial &amp; Key-Tag Skew
                 </span>
                 <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
-                  GeoDNS / Anycast Steering
+                  RFC 7871 ECS GeoDNS &amp; SCOPE
                 </span>
               </div>
             )}
@@ -1298,7 +1305,7 @@ export function App() {
                       </span>
                     ) : activeSnapshot.mode === 'consensus' ? (
                       <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 px-2 py-0.5 font-mono text-[11px] font-semibold">
-                        MULTI-DOH · 8 RESOLVERS · RFC 8914 EDE · SKEW
+                        MULTI-DOH · RFC 7871 ECS · RFC 8914 EDE · SKEW
                       </span>
                     ) : (
                       <span className="font-mono text-xs text-slate-500">

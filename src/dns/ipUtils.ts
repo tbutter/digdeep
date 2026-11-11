@@ -596,6 +596,28 @@ export function evaluateDnsblAuditForIp(
 
 const rpkiValidationCache = new Map<string, RpkiRouteValidation>();
 const inFlightRpkiLookups = new Map<string, Promise<RpkiRouteValidation>>();
+const MAX_CONCURRENT_RPKI_FETCHES = 5;
+let activeRpkiFetches = 0;
+const pendingRpkiWaiters: Array<() => void> = [];
+
+async function acquireRpkiSlot(): Promise<void> {
+  if (activeRpkiFetches < MAX_CONCURRENT_RPKI_FETCHES) {
+    activeRpkiFetches++;
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    pendingRpkiWaiters.push(resolve);
+  });
+}
+
+function releaseRpkiSlot(): void {
+  const next = pendingRpkiWaiters.shift();
+  if (next) {
+    next();
+  } else {
+    activeRpkiFetches = Math.max(0, activeRpkiFetches - 1);
+  }
+}
 
 function buildRpkiCacheKey(asn: number, prefix: string): string {
   return `${asn}|${prefix.trim().toLowerCase()}`;
@@ -694,26 +716,41 @@ export async function validateRpkiRoute(
       };
     }
 
-    const timeoutMs = options.timeoutMs ?? 4500;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timeoutMs = options.timeoutMs ?? 5500;
+    const url = `https://stat.ripe.net/data/rpki-validation/data.json?resource=${encodeURIComponent(
+      String(asn)
+    )}&prefix=${encodeURIComponent(cleanPrefix)}`;
+    const maxAttempts = options.fetchImpl ? 1 : 2;
 
     try {
-      const url = `https://stat.ripe.net/data/rpki-validation/data.json?resource=${encodeURIComponent(
-        String(asn)
-      )}&prefix=${encodeURIComponent(cleanPrefix)}`;
-      const res = await fetchFn(url, {
-        method: 'GET',
-        headers: { Accept: 'application/json' },
-        signal: controller.signal,
-      });
-      if (!res.ok) {
+      let res: Response | null = null;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        await acquireRpkiSlot();
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          res = await fetchFn(url, {
+            method: 'GET',
+            headers: { Accept: 'application/json' },
+            signal: controller.signal,
+          });
+          if (res.ok || (res.status !== 429 && res.status < 500) || attempt + 1 >= maxAttempts) {
+            break;
+          }
+        } catch (err) {
+          if (attempt + 1 >= maxAttempts) throw err;
+        } finally {
+          clearTimeout(timer);
+          releaseRpkiSlot();
+        }
+      }
+      if (!res || !res.ok) {
         return {
           asn,
           prefix: cleanPrefix,
           status: 'error',
           roas: [],
-          summary: `RPKI ROA lookup returned HTTP ${res.status} for AS${asn} (${cleanPrefix}).`,
+          summary: `RPKI ROA lookup returned HTTP ${res?.status ?? 'ERR'} for AS${asn} (${cleanPrefix}).`,
         };
       }
 
@@ -799,7 +836,6 @@ export async function validateRpkiRoute(
         summary: `RPKI ROA validation lookup timed out or failed for AS${asn} (${cleanPrefix}).`,
       };
     } finally {
-      clearTimeout(timer);
       inFlightRpkiLookups.delete(key);
     }
   })();

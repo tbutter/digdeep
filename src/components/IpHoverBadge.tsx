@@ -185,6 +185,17 @@ export function seedIpAsnCacheFromSnapshot(snapshot?: AnalysisSnapshot | null): 
       snapshotRpkiEntries.push(snapshot.reverseDns.bgp.rpki);
     }
   }
+  for (const reg of snapshot.consensusAnalysis?.ecsGeo?.regions ?? []) {
+    for (const a of reg.asns) {
+      if (!asnOrgCache.has(a.asn) || (!asnOrgCache.get(a.asn)?.asName && a.asName)) {
+        asnOrgCache.set(a.asn, a);
+        updated = true;
+      }
+    }
+    for (const rv of reg.rpkiValidations ?? []) {
+      snapshotRpkiEntries.push(rv);
+    }
+  }
   if (snapshotRpkiEntries.length > 0) {
     seedRpkiValidationCache(snapshotRpkiEntries);
   }
@@ -310,6 +321,31 @@ export function seedIpAsnCacheFromSnapshot(snapshot?: AnalysisSnapshot | null): 
         });
         updated = true;
       }
+    }
+  }
+
+  // 5. Seed sibling regional edge IPs from ECS Geo-Steering matrix
+  for (const reg of snapshot.consensusAnalysis?.ecsGeo?.regions ?? []) {
+    if (reg.asns.length === 0) continue;
+    const regIps = [...reg.ipv4.answers, ...reg.ipv6.answers];
+    for (const rawIp of regIps) {
+      const tok = parseIpToken(rawIp);
+      if (!tok || !tok.isPublic || ipInfoCache.has(tok.canonicalIp)) continue;
+      ipInfoCache.set(tok.canonicalIp, {
+        ip: tok.canonicalIp,
+        family: tok.family,
+        isPublic: true,
+        asns: reg.asns,
+        bgpPrefixes: reg.bgpPrefixes,
+        country: reg.countries[0] ?? reg.asns[0]?.country,
+        rir: reg.asns[0]?.rir,
+        ...(reg.rpkiStatus ? { rpkiStatus: reg.rpkiStatus } : {}),
+        ...(reg.rpkiValidations && reg.rpkiValidations.length > 0
+          ? { rpkiValidations: reg.rpkiValidations }
+          : {}),
+        status: 'ready',
+      });
+      updated = true;
     }
   }
 

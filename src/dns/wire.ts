@@ -25,6 +25,7 @@ import {
   unescapePresentationLabel,
 } from './encoding';
 import type {
+  ClientSubnetQueryOption,
   DnsHeaderFlags,
   DnsPacket,
   DnsQuestion,
@@ -32,6 +33,7 @@ import type {
   EchCipherSuite,
   EchConfigEntry,
   EdeEntry,
+  EdnsClientSubnet,
   EdnsInfo,
   ParsedRdata,
   SvcParamEntry,
@@ -155,16 +157,257 @@ function lowercaseWireName(uncompressedWire: Uint8Array): Uint8Array {
   return out;
 }
 
+function parseIpv4BytesForWire(raw: string): Uint8Array | null {
+  const parts = raw.trim().split('.');
+  if (parts.length !== 4) return null;
+  const out = new Uint8Array(4);
+  for (let i = 0; i < 4; i++) {
+    const p = parts[i];
+    if (!/^\d{1,3}$/.test(p) || (p.length > 1 && p.startsWith('0'))) return null;
+    const n = Number.parseInt(p, 10);
+    if (n < 0 || n > 255) return null;
+    out[i] = n;
+  }
+  return out;
+}
+
+function parseIpv6BytesForWire(raw: string): Uint8Array | null {
+  const clean = raw.trim().replace(/^\[|\]$/g, '').toLowerCase();
+  if (!clean || !clean.includes(':')) return null;
+  if (clean.split('::').length > 2) return null;
+
+  let working = clean;
+  const lastColon = working.lastIndexOf(':');
+  if (lastColon !== -1 && working.slice(lastColon + 1).includes('.')) {
+    const v4 = parseIpv4BytesForWire(working.slice(lastColon + 1));
+    if (!v4) return null;
+    const hi = ((v4[0] << 8) | v4[1]).toString(16);
+    const lo = ((v4[2] << 8) | v4[3]).toString(16);
+    working = `${working.slice(0, lastColon + 1)}${hi}:${lo}`;
+  }
+
+  let groups: string[];
+  if (working.includes('::')) {
+    const [leftRaw, rightRaw] = working.split('::');
+    const left = leftRaw ? leftRaw.split(':') : [];
+    const right = rightRaw ? rightRaw.split(':') : [];
+    const missing = 8 - (left.length + right.length);
+    if (missing < 1) return null;
+    groups = [...left, ...Array.from({ length: missing }, () => '0'), ...right];
+  } else {
+    groups = working.split(':');
+  }
+  if (groups.length !== 8) return null;
+
+  const out = new Uint8Array(16);
+  for (let i = 0; i < 8; i++) {
+    if (!/^[0-9a-f]{1,4}$/.test(groups[i])) return null;
+    const val = Number.parseInt(groups[i], 16);
+    out[i * 2] = (val >>> 8) & 0xff;
+    out[i * 2 + 1] = val & 0xff;
+  }
+  return out;
+}
+
+function maskAddressBytes(fullBytes: Uint8Array, prefixLen: number): Uint8Array {
+  const out = new Uint8Array(fullBytes.length);
+  const fullOctets = Math.floor(prefixLen / 8);
+  const remBits = prefixLen % 8;
+  for (let i = 0; i < Math.min(fullOctets, out.length); i++) {
+    out[i] = fullBytes[i];
+  }
+  if (remBits > 0 && fullOctets < out.length) {
+    const mask = (0xff << (8 - remBits)) & 0xff;
+    out[fullOctets] = fullBytes[fullOctets] & mask;
+  }
+  return out;
+}
+
+/**
+ * Parses a user or preset CIDR/IP string (e.g. `"71.252.0.0/24"`, `"2601:140:4000::/56"`, `"0.0.0.0/0"`, `"::/0"`)
+ * into a canonical masked `ClientSubnetQueryOption` per RFC 7871 §6.
+ */
+export function parseEcsSubnetInput(raw: string): ClientSubnetQueryOption | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  let addrPart = trimmed;
+  let explicitPrefix: number | null = null;
+  const slashIdx = trimmed.indexOf('/');
+  if (slashIdx !== -1) {
+    addrPart = trimmed.slice(0, slashIdx).trim();
+    const prefixStr = trimmed.slice(slashIdx + 1).trim();
+    if (!/^\d{1,3}$/.test(prefixStr)) return null;
+    explicitPrefix = Number.parseInt(prefixStr, 10);
+  }
+
+  const v4 = parseIpv4BytesForWire(addrPart);
+  if (v4) {
+    const isAllZero = v4.every((b) => b === 0);
+    const prefixLen = explicitPrefix !== null ? explicitPrefix : isAllZero ? 0 : 24;
+    if (prefixLen < 0 || prefixLen > 32) return null;
+    const masked = maskAddressBytes(v4, prefixLen);
+    return {
+      family: 1,
+      address: `${masked[0]}.${masked[1]}.${masked[2]}.${masked[3]}`,
+      sourcePrefixLength: prefixLen,
+      scopePrefixLength: 0,
+    };
+  }
+
+  const v6 = parseIpv6BytesForWire(addrPart);
+  if (v6) {
+    const isAllZero = v6.every((b) => b === 0);
+    const prefixLen = explicitPrefix !== null ? explicitPrefix : isAllZero ? 0 : 56;
+    if (prefixLen < 0 || prefixLen > 128) return null;
+    const masked = maskAddressBytes(v6, prefixLen);
+    return {
+      family: 2,
+      address: formatIpv6(masked),
+      sourcePrefixLength: prefixLen,
+      scopePrefixLength: 0,
+    };
+  }
+
+  return null;
+}
+
+export function formatEcsQuerySubnet(ecs: ClientSubnetQueryOption): string {
+  return `${ecs.address}/${ecs.sourcePrefixLength}`;
+}
+
+/**
+ * Encodes an RFC 7871 §6 EDNS0 `CLIENT-SUBNET` (`OPTION-CODE = 8`) TLV option
+ * (`OPTION-CODE` 2B + `OPTION-LENGTH` 2B + `FAMILY` 2B + `SOURCE` 1B + `SCOPE` 1B + truncated `ADDRESS`).
+ */
+export function encodeEdnsClientSubnetOption(ecs: ClientSubnetQueryOption): Uint8Array {
+  const maxBits = ecs.family === 1 ? 32 : 128;
+  if (ecs.sourcePrefixLength < 0 || ecs.sourcePrefixLength > maxBits) {
+    throw new Error(`Invalid ECS sourcePrefixLength ${ecs.sourcePrefixLength} for family ${ecs.family}`);
+  }
+  const scope = ecs.scopePrefixLength ?? 0;
+  if (scope < 0 || scope > maxBits) {
+    throw new Error(`Invalid ECS scopePrefixLength ${scope} for family ${ecs.family}`);
+  }
+
+  const fullBytes =
+    ecs.family === 1 ? parseIpv4BytesForWire(ecs.address) : parseIpv6BytesForWire(ecs.address);
+  if (!fullBytes) {
+    throw new Error(`Invalid ECS IP address "${ecs.address}" for family ${ecs.family}`);
+  }
+
+  const masked = maskAddressBytes(fullBytes, ecs.sourcePrefixLength);
+  const addrByteLen = Math.ceil(ecs.sourcePrefixLength / 8);
+  const addrBytes = masked.subarray(0, addrByteLen);
+
+  const optLen = 4 + addrBytes.length;
+  const tlv = new Uint8Array(4 + optLen);
+  const view = new DataView(tlv.buffer);
+  view.setUint16(0, 8, false); // OPTION-CODE = 8 (CLIENT-SUBNET)
+  view.setUint16(2, optLen, false); // OPTION-LENGTH
+  view.setUint16(4, ecs.family, false); // FAMILY (1 = IPv4, 2 = IPv6)
+  tlv[6] = ecs.sourcePrefixLength & 0xff;
+  tlv[7] = scope & 0xff;
+  tlv.set(addrBytes, 8);
+  return tlv;
+}
+
+/**
+ * Decodes the payload (`FAMILY` + `SOURCE` + `SCOPE` + `ADDRESS`) of an RFC 7871 §6 EDNS0 Option 8 (`CLIENT-SUBNET`).
+ */
+export function decodeEdnsClientSubnetOption(optData: Uint8Array): EdnsClientSubnet {
+  if (optData.length < 4) {
+    const rawHex = bytesToHex(optData);
+    return {
+      family: 0,
+      familyName: 'MALFORMED',
+      sourcePrefixLength: 0,
+      scopePrefixLength: 0,
+      address: `0x${rawHex}`,
+      rawAddressHex: rawHex,
+      addressByteLength: 0,
+      presentation: `malformed(${rawHex})`,
+      invalidPrefixLength: true,
+    };
+  }
+
+  const view = new DataView(optData.buffer, optData.byteOffset, optData.byteLength);
+  const family = view.getUint16(0, false);
+  const sourcePrefixLength = optData[2];
+  const scopePrefixLength = optData[3];
+  const rawAddr = optData.subarray(4);
+  const rawAddressHex = bytesToHex(rawAddr);
+
+  const familyName = family === 1 ? 'IPv4' : family === 2 ? 'IPv6' : `FAMILY-${family}`;
+  const maxBits = family === 1 ? 32 : family === 2 ? 128 : 0;
+  const expectedByteLen = Math.ceil(sourcePrefixLength / 8);
+
+  let invalidPrefixLength = false;
+  let hasExcessAddressBytes = false;
+  let hasNonZeroTailBits = false;
+
+  if (maxBits === 0 || sourcePrefixLength > maxBits || scopePrefixLength > maxBits) {
+    invalidPrefixLength = true;
+  }
+  if (rawAddr.length < expectedByteLen) {
+    invalidPrefixLength = true;
+  } else if (rawAddr.length > expectedByteLen) {
+    hasExcessAddressBytes = true;
+    for (let i = expectedByteLen; i < rawAddr.length; i++) {
+      if (rawAddr[i] !== 0) {
+        hasNonZeroTailBits = true;
+      }
+    }
+  }
+
+  if (sourcePrefixLength > 0 && sourcePrefixLength % 8 !== 0 && expectedByteLen <= rawAddr.length) {
+    const remBits = sourcePrefixLength % 8;
+    const tailMask = 0xff >>> remBits;
+    if ((rawAddr[expectedByteLen - 1] & tailMask) !== 0) {
+      hasNonZeroTailBits = true;
+    }
+  }
+
+  let address: string;
+  if (family === 1) {
+    const full = new Uint8Array(4);
+    full.set(rawAddr.subarray(0, Math.min(rawAddr.length, 4)));
+    address = `${full[0]}.${full[1]}.${full[2]}.${full[3]}`;
+  } else if (family === 2) {
+    const full = new Uint8Array(16);
+    full.set(rawAddr.subarray(0, Math.min(rawAddr.length, 16)));
+    address = formatIpv6(full);
+  } else {
+    address = rawAddressHex ? `0x${rawAddressHex}` : '0';
+  }
+
+  return {
+    family,
+    familyName,
+    sourcePrefixLength,
+    scopePrefixLength,
+    address,
+    rawAddressHex,
+    addressByteLength: rawAddr.length,
+    presentation: `${address}/${sourcePrefixLength}/${scopePrefixLength}`,
+    ...(hasNonZeroTailBits ? { hasNonZeroTailBits: true } : {}),
+    ...(hasExcessAddressBytes ? { hasExcessAddressBytes: true } : {}),
+    ...(invalidPrefixLength ? { invalidPrefixLength: true } : {}),
+  };
+}
+
 export interface BuildQueryOptions {
   cd?: boolean;
   doBit?: boolean;
   rd?: boolean;
   udpPayloadSize?: number;
   id?: number;
+  ecs?: ClientSubnetQueryOption;
 }
 
 /**
  * Builds an RFC 1035 + RFC 6891 EDNS0 wire query suitable for RFC 8484 DoH (`application/dns-message`).
+ * Supports optional RFC 7871 EDNS0 Option 8 (`CLIENT-SUBNET`).
  * Note: RFC 8484 §4.1 recommends ID = 0 for HTTP cache friendliness.
  */
 export function buildDnsQuery(
@@ -172,7 +415,7 @@ export function buildDnsQuery(
   qtype: number,
   options: BuildQueryOptions = {}
 ): Uint8Array {
-  const { cd = true, doBit = true, rd = true, udpPayloadSize = 4096, id = 0 } = options;
+  const { cd = true, doBit = true, rd = true, udpPayloadSize = 4096, id = 0, ecs } = options;
   const header = new Uint8Array(12);
   const view = new DataView(header.buffer);
 
@@ -193,16 +436,20 @@ export function buildDnsQuery(
   qView.setUint16(0, qtype, false);
   qView.setUint16(2, 1, false); // IN class
 
-  // EDNS0 OPT pseudo-RR: root(0x00), type=41, class=udpPayloadSize, ttl=(extRcode<<24 | ver<<16 | flags), rdlen=0
-  const opt = new Uint8Array(11);
-  const optView = new DataView(opt.buffer);
-  opt[0] = 0; // root owner
+  const optRdata = ecs ? encodeEdnsClientSubnetOption(ecs) : new Uint8Array(0);
+
+  // EDNS0 OPT pseudo-RR: root(0x00), type=41, class=udpPayloadSize, ttl=(extRcode<<24 | ver<<16 | flags), rdlen=optRdata.length
+  const optHeader = new Uint8Array(11);
+  const optView = new DataView(optHeader.buffer);
+  optHeader[0] = 0; // root owner
   optView.setUint16(1, RR_TYPES.OPT, false);
   optView.setUint16(3, udpPayloadSize, false);
   optView.setUint32(5, doBit ? 0x00008000 : 0x00000000, false);
-  optView.setUint16(9, 0, false);
+  optView.setUint16(9, optRdata.length, false);
 
-  return concatBytes(header, nameWire, qTail, opt);
+  return optRdata.length > 0
+    ? concatBytes(header, nameWire, qTail, optHeader, optRdata)
+    : concatBytes(header, nameWire, qTail, optHeader);
 }
 
 function decodeTypeBitmaps(buf: Uint8Array): number[] {
@@ -914,6 +1161,7 @@ function parseEdnsOpt(rdataBuf: Uint8Array, rrclass: number, ttl: number): EdnsI
   const flags = ttl & 0xffff;
   const doBit = (flags & 0x8000) !== 0;
   const ede: EdeEntry[] = [];
+  let ecs: EdnsClientSubnet | undefined;
 
   let pos = 0;
   while (pos + 4 <= rdataBuf.length) {
@@ -923,8 +1171,11 @@ function parseEdnsOpt(rdataBuf: Uint8Array, rrclass: number, ttl: number): EdnsI
     pos += 4;
     if (pos + optLen > rdataBuf.length) break;
     const optData = rdataBuf.subarray(pos, pos + optLen);
-    // Option 15 = RFC 8914 Extended DNS Error
-    if (optCode === 15 && optData.length >= 2) {
+    // Option 8 = RFC 7871 EDNS Client Subnet (CLIENT-SUBNET)
+    if (optCode === 8) {
+      ecs = decodeEdnsClientSubnetOption(optData);
+    } else if (optCode === 15 && optData.length >= 2) {
+      // Option 15 = RFC 8914 Extended DNS Error
       const edeView = new DataView(optData.buffer, optData.byteOffset, optData.byteLength);
       const infoCode = edeView.getUint16(0, false);
       const extraText = optData.length > 2 ? textDecoder.decode(optData.subarray(2)).replace(/\0+$/, '') : '';
@@ -945,6 +1196,7 @@ function parseEdnsOpt(rdataBuf: Uint8Array, rrclass: number, ttl: number): EdnsI
     doBit,
     flags,
     ede,
+    ...(ecs ? { ecs } : {}),
   };
 }
 

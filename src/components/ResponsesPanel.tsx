@@ -81,6 +81,7 @@ export function ResponsesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
             qtypeName: selectedLog.qtypeName,
             dohEndpoint: selectedLog.endpoint || snapshot.dohEndpoint,
             cd: selectedLog.cd,
+            ecsSubnet: selectedLog.ecsSubnet,
             validatedAt: snapshot.validatedAt,
             capturedAt: snapshot.capturedAt,
           })
@@ -185,6 +186,11 @@ export function ResponsesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
                     <span className="font-mono text-xs font-medium truncate text-slate-900 dark:text-slate-100">
                       {q.qname}
                     </span>
+                    {q.ecsSubnet && (
+                      <span className="rounded bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30 px-1.5 py-0.2 font-mono text-[10px] shrink-0">
+                        ECS {q.ecsSubnet}
+                      </span>
+                    )}
                   </div>
                   <span className={`font-mono text-[11px] font-semibold shrink-0 ${rcodeColor}`}>
                     {rcode}

@@ -210,7 +210,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v24');
+    expect(swCode).toContain('digdeep-shell-v25');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge when navigator.onLine is false
@@ -632,6 +632,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       const consensusSnap = await runConsensusAnalysis('iana.org');
       expect(consensusSnap.mode).toBe('consensus');
       expect(consensusSnap.consensusAnalysis).toBeDefined();
+      expect(consensusSnap.consensusAnalysis?.ecsGeo).toBeDefined();
       const consensusHtml = renderToStaticMarkup(
         <ConsensusView
           snapshot={consensusSnap}
@@ -643,6 +644,10 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(consensusHtml).toContain('Protective Filtering &amp; EDE');
       expect(consensusHtml).toContain('SOA Serial Propagation');
       expect(consensusHtml).toContain('DNSKEY &amp; Answer Sync');
+      expect(consensusHtml).toContain('EDNS Client Subnet (ECS — RFC 7871)');
+      expect(consensusHtml).toContain('71.252.0.0/24');
+      expect(consensusHtml).toContain('0.0.0.0/0');
+      expect(consensusHtml).toContain('Interactive Custom ECS Subnet Probe');
       expect(consensusHtml).toContain('1.1.1.1');
       expect(consensusHtml).toContain('8.8.8.8');
       expect(consensusHtml).toContain('9.9.9.9');

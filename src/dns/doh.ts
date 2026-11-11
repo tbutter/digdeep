@@ -1,7 +1,7 @@
 import { DEFAULT_DOH_ENDPOINT, rrTypeToString } from './constants';
 import { bytesToBase64, bytesToBase64Url, normalizeFqdn } from './encoding';
-import type { DohQueryLog } from './types';
-import { buildDnsQuery, parseDnsPacket } from './wire';
+import type { ClientSubnetQueryOption, DohQueryLog } from './types';
+import { buildDnsQuery, formatEcsQuerySubnet, parseDnsPacket } from './wire';
 
 export interface DohClientOptions {
   endpoint?: string;
@@ -35,19 +35,20 @@ export class DohSession {
   public async query(
     qname: string,
     qtype: number,
-    opts: { cd?: boolean; doBit?: boolean; purpose: string }
+    opts: { cd?: boolean; doBit?: boolean; ecs?: ClientSubnetQueryOption; purpose: string }
   ): Promise<DohQueryLog> {
     const normName = normalizeFqdn(qname);
     const cd = opts.cd ?? true;
     const doBit = opts.doBit ?? true;
-    const key = `${normName}|${qtype}|cd=${cd ? 1 : 0}|do=${doBit ? 1 : 0}`;
+    const ecsSubnet = opts.ecs ? formatEcsQuerySubnet(opts.ecs) : undefined;
+    const key = `${normName}|${qtype}|cd=${cd ? 1 : 0}|do=${doBit ? 1 : 0}${ecsSubnet ? `|ecs=${ecsSubnet}` : ''}`;
 
     const existing = this.inflight.get(key);
     if (existing) {
       return existing;
     }
 
-    const promise = this.executeQuery(normName, qtype, cd, doBit, opts.purpose);
+    const promise = this.executeQuery(normName, qtype, cd, doBit, opts.purpose, opts.ecs, ecsSubnet);
     this.inflight.set(key, promise);
     return promise;
   }
@@ -57,9 +58,17 @@ export class DohSession {
     qtype: number,
     cd: boolean,
     doBit: boolean,
-    purpose: string
+    purpose: string,
+    ecs?: ClientSubnetQueryOption,
+    ecsSubnet?: string
   ): Promise<DohQueryLog> {
-    const reqWire = buildDnsQuery(normName, qtype, { cd, doBit, rd: true, udpPayloadSize: 4096 });
+    const reqWire = buildDnsQuery(normName, qtype, {
+      cd,
+      doBit,
+      rd: true,
+      udpPayloadSize: 4096,
+      ecs,
+    });
     const dnsParam = bytesToBase64Url(reqWire);
     const sep = this.endpoint.includes('?') ? '&' : '?';
     const url = `${this.endpoint}${sep}dns=${dnsParam}`;
@@ -112,6 +121,7 @@ export class DohSession {
           requestWireBase64: bytesToBase64(reqWire),
           packet,
           purpose,
+          ...(ecsSubnet ? { ecsSubnet } : {}),
         };
 
         this.logs.push(log);

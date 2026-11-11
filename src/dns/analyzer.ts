@@ -90,7 +90,7 @@ import type {
   ZonemdRecordDetail,
 } from './types';
 
-export const SNAPSHOT_ENGINE_VERSION = 14;
+export const SNAPSHOT_ENGINE_VERSION = 15;
 
 export interface AnalyzeOptions extends DohClientOptions {
   queryTypes?: string[];
@@ -107,7 +107,7 @@ export function findLog(
   cd = true
 ): DohQueryLog | undefined {
   const norm = normalizeFqdn(qname);
-  return logs.find((l) => l.qname === norm && l.qtype === qtype && l.cd === cd);
+  return logs.find((l) => !l.ecsSubnet && l.qname === norm && l.qtype === qtype && l.cd === cd);
 }
 
 /**
@@ -793,6 +793,11 @@ export async function reverifySnapshot(
   } else if (snapshot.reverseDns?.bgp?.rpki) {
     existingRpki.push(snapshot.reverseDns.bgp.rpki);
   }
+  for (const reg of snapshot.consensusAnalysis?.ecsGeo?.regions ?? []) {
+    for (const rv of reg.rpkiValidations ?? []) {
+      existingRpki.push(rv);
+    }
+  }
   if (existingRpki.length > 0) {
     seedRpkiValidationCache(existingRpki);
   }
@@ -903,6 +908,8 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
   const cdLogs = queries.filter(
     (q) =>
       q.cd &&
+      !q.ecsSubnet &&
+      !q.purpose.startsWith('ECS ') &&
       !q.purpose.startsWith('Nameserver IP') &&
       !q.purpose.startsWith('SPF lookup') &&
       !q.purpose.startsWith('DMARC lookup') &&

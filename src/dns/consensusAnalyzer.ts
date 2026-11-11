@@ -14,6 +14,7 @@ import {
   type AnalyzeOptions,
 } from './analyzer';
 import { DohSession } from './doh';
+import { evaluateEcsGeoFromLogs, runEcsGeoProbes } from './ecsProbe';
 import { parseEmailDaneInput } from './emailDane';
 import { displayFqdn, isSubdomainOrEqual, normalizeFqdn } from './encoding';
 import { formatCanonicalIpv6, parseIpv6Groups } from './ipUtils';
@@ -116,6 +117,8 @@ export function evaluateConsensusFromSnapshotData(params: {
   const rawRows: ConsensusResolverRow[] = activeResolvers.map((preset) => {
     const epLogs = queries.filter(
       (q) =>
+        !q.ecsSubnet &&
+        !q.purpose.startsWith('ECS ') &&
         q.endpoint === preset.url &&
         (q.purpose.startsWith('Consensus probe') || preset.url === primaryEndpoint)
     );
@@ -556,6 +559,13 @@ export function evaluateConsensusFromSnapshotData(params: {
     });
   }
 
+  const { ecsGeo, ecsFindings } = evaluateEcsGeoFromLogs({
+    targetName,
+    primaryEndpoint,
+    queries,
+  });
+  consensusFindings.push(...ecsFindings);
+
   // Compute overall verdict & summary
   let overallVerdict: ConsensusAnalysisResult['overallVerdict'] = 'unanimous-secure';
   let summary = '';
@@ -572,7 +582,11 @@ export function evaluateConsensusFromSnapshotData(params: {
   } else if (rcodeConsensus === 'divergent' || adBitConsensus === 'mixed-ad') {
     overallVerdict = 'split-horizon-divergent';
     summary = `Resolver divergence across ${reachableCount} DoH endpoints (RCODE / AD-bit mismatch).`;
-  } else if (answerConsensus === 'geodns-anycast') {
+  } else if (
+    answerConsensus === 'geodns-anycast' ||
+    ecsGeo?.steeringModel === 'geodns-ip' ||
+    ecsGeo?.steeringModel === 'geodns-cname'
+  ) {
     overallVerdict = 'geodns-consistent';
     summary = `All ${reachableCount} DoH resolvers agree on RCODE & SOA serial (${uniqueSoaSerials[0]?.serial ?? 'sync'}) with GeoDNS/CDN anycast IP steering (${adBitConsensus === 'all-ad' ? 'AD=1 verified' : 'AD=0 unsigned'}).`;
   } else if (adBitConsensus === 'all-ad') {
@@ -589,7 +603,8 @@ export function evaluateConsensusFromSnapshotData(params: {
   } else if (
     (overallVerdict === 'protective-blocked' ||
       overallVerdict === 'propagation-skew' ||
-      overallVerdict === 'split-horizon-divergent') &&
+      overallVerdict === 'split-horizon-divergent' ||
+      ecsFindings.some((f) => f.severity === 'error' || f.severity === 'warning')) &&
     overallStatus === 'secure'
   ) {
     overallStatus = 'warning';
@@ -613,6 +628,7 @@ export function evaluateConsensusFromSnapshotData(params: {
       uniqueSoaSerials,
       keyTagConsensus,
       edeHighlights,
+      ...(ecsGeo ? { ecsGeo } : {}),
       overallVerdict,
       summary,
     },
@@ -734,18 +750,19 @@ export async function runConsensusAnalysis(
       .filter((z) => isSubdomainOrEqual(targetName, z))
       .sort((a, b) => b.length - a.length)[0] ?? targetName;
 
-  // Step 2: Query all CONSENSUS_DOH_RESOLVERS in parallel
+  // Step 2: Query all CONSENSUS_DOH_RESOLVERS & RFC 7871 ECS regional prefixes in parallel
   currentPhase = 'consensus-probes';
   const resolverPresets = getResolverPresetList(endpoint);
   options.onProgress?.({
     phase: 'consensus-probes',
-    message: `Querying ${resolverPresets.length} public & protective DoH resolvers in parallel for ${displayDomain}…`,
+    message: `Querying ${resolverPresets.length} DoH resolvers & 7 RFC 7871 ECS regional subnets in parallel for ${displayDomain}…`,
     completedQueries: completedCount,
   });
 
   const consensusLogs: DohQueryLog[] = [];
-  await Promise.all(
-    resolverPresets.map(async (preset) => {
+  let ecsLogs: DohQueryLog[] = [];
+  await Promise.all([
+    ...resolverPresets.map(async (preset) => {
       const rSession = new DohSession({
         endpoint: preset.url,
         timeoutMs: Math.min(options.timeoutMs ?? 4500, 4500),
@@ -809,17 +826,34 @@ export async function runConsensusAnalysis(
           id: `${l.id}-${preset.shortLabel.replace(/[^a-z0-9]/gi, '_')}`,
         });
       }
-    })
-  );
+    }),
+    runEcsGeoProbes({
+      targetName,
+      primaryEndpoint: endpoint,
+      bgpSession: primarySession,
+      timeoutMs: options.timeoutMs,
+      fetchImpl: options.fetchImpl,
+      onQueryCompleted: (lastLog, epShort) => {
+        completedCount++;
+        options.onProgress?.({
+          phase: 'consensus-probes',
+          message: `[ECS ${lastLog.ecsSubnet ?? ''} via ${epShort}] ${lastLog.qname} ${lastLog.qtypeName} → ${rcodeToString(lastLog.packet.flags.rcode)} (${lastLog.latencyMs}ms)`,
+          completedQueries: completedCount,
+        });
+      },
+    }).then((logs) => {
+      ecsLogs = logs;
+    }),
+  ]);
 
   currentPhase = 'validating';
   options.onProgress?.({
     phase: 'validating',
-    message: 'Synthesizing multi-resolver DoH consensus, RFC 8914 EDE & DNSSEC chain…',
+    message: 'Synthesizing multi-resolver DoH consensus, RFC 7871 ECS steering, RFC 8914 EDE & DNSSEC chain…',
     completedQueries: completedCount,
   });
 
-  const allQueries = [...primarySession.getLogs(), ...consensusLogs];
+  const allQueries = [...primarySession.getLogs(), ...consensusLogs, ...ecsLogs];
   const capturedAt = Date.now();
   const validatedAt = options.validationTimeMs ?? capturedAt;
   const durationMs = Math.max(1, capturedAt - startedAt);

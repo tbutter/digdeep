@@ -14,11 +14,11 @@
     <title>DigDeep — Client-Side DNSSEC, Mail, Web/HTTPS &amp; Multi-DoH Analyzer</title>
     <meta
       name="description"
-      content="100% client-side DNSSEC chain-of-trust visualizer, Mail &amp; Email DANE (MX, SMTP TLSA, SPF simulator, DKIM, DMARC, MTA-STS, BIMI, OPENPGPKEY, SMIMEA) validator, Web/HTTPS (SVCB, TLS ECH, CAA ↔ CT logs, DANE, SSHFP) auditor, IPv4/IPv6 Reverse DNS + BGP/RPKI inspector, 10-Resolver DoH Consensus (RFC 8914 EDE) matrix, and byte-level DNS wire dissector."
+      content="100% client-side DNSSEC chain-of-trust visualizer, Mail &amp; Email DANE (MX, SMTP TLSA, SPF simulator, DKIM, DMARC, MTA-STS, BIMI, OPENPGPKEY, SMIMEA) validator, Web/HTTPS (SVCB, TLS ECH, CAA ↔ CT logs, DANE, SSHFP) auditor, IPv4/IPv6 Reverse DNS + BGP/RPKI inspector, 10-Resolver DoH Consensus + RFC 7871 EDNS Client Subnet (ECS) GeoDNS matrix, and byte-level DNS wire dissector."
     />
     <meta
       name="keywords"
-      content="DNSSEC visualizer, DNSViz alternative, SMTP DANE checker, OPENPGPKEY lookup, SMIMEA checker, TLSA validator, SPF checker, SPF simulator, DKIM checker, DMARC analyzer, MTA-STS checker, HTTPS SVCB ECH, CAA Certificate Transparency, RFC 8914 EDE, DNS over HTTPS, DoH wire dissector, RPKI ROA, reverse DNS PTR FCrDNS"
+      content="DNSSEC visualizer, DNSViz alternative, SMTP DANE checker, OPENPGPKEY lookup, SMIMEA checker, TLSA validator, SPF checker, SPF simulator, DKIM checker, DMARC analyzer, MTA-STS checker, HTTPS SVCB ECH, CAA Certificate Transparency, EDNS Client Subnet, RFC 7871 ECS GeoDNS, RFC 8914 EDE, DNS over HTTPS, DoH wire dissector, RPKI ROA, reverse DNS PTR FCrDNS"
     />
     <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1" />
     <link rel="canonical" href="https://digdeep.fyi/" />
@@ -101,7 +101,7 @@
         "featureList": [
           "100% client-side DNSSEC validation from IANA Root KSK trust anchors using browser SubtleCrypto (RSA, ECDSA P-256/P-384, Ed25519)",
           "Interactive chain-of-trust SVG and high-DPI PNG graph export, RFC 1035 master zonefile (.zone) export, and snapshot diffing",
-          "Multi-resolver RFC 8484 DoH Consensus matrix & RFC 8914 Extended DNS Error (EDE) protective filtering check across 10 public & protective resolvers",
+          "Multi-resolver RFC 8484 DoH Consensus matrix, RFC 7871 EDNS Client Subnet (ECS) 6-continent GeoDNS & SCOPE cache-busting probe, and RFC 8914 Extended DNS Error (EDE) protective filtering check across 10 public & protective resolvers",
           "NSEC, NSEC3 Opt-Out, wildcard (*.domain) synthesis, Compact Denial of Existence (Black Lies), ZONEMD (RFC 8976), and SaaS TXT hygiene audits",
           "CDS / CDNSKEY (RFC 7344/8078) & CSYNC (RFC 7477) rollover synchronization, NS BGP ASN diversity, SOA timer audit, and dangling NS/CNAME takeover detection",
           "MX mail routing, RFC 7671/7672 SMTP DANE (_25._tcp TLSA), recursive SPF (RFC 7208) 10-lookup audit & interactive sender IP simulator, DKIM, DMARC, MTA-STS, TLS-RPT, and BIMI",
@@ -144,8 +144,8 @@
               <code>SubtleCrypto</code>, audit Mail / SPF / DKIM / DMARC / DANE &amp;
               <code>OPENPGPKEY</code> / <code>SMIMEA</code> identities, cross-check
               <code>HTTPS</code> / <code>ECH</code> / <code>CAA</code> against Certificate
-              Transparency logs, inspect Reverse DNS + BGP/RPKI routes, compare 10 DoH resolvers,
-              and dissect raw DNS wire packets.
+              Transparency logs, inspect Reverse DNS + BGP/RPKI routes, compare 10 DoH resolvers &amp;
+              RFC 7871 EDNS Client Subnet (ECS) GeoDNS steering, and dissect raw DNS wire packets.
             </p>
           </div>
         </noscript>
@@ -189,11 +189,14 @@
               (RFC 5782).
             </li>
             <li>
-              <strong class="text-slate-200">10-Resolver DoH Consensus &amp; Protective Filtering:</strong>
+              <strong class="text-slate-200">10-Resolver DoH Consensus &amp; RFC 7871 ECS Geo-Steering:</strong>
               Queries Cloudflare <code>1.1.1.1</code>, Google <code>8.8.8.8</code>, Quad9
               <code>9.9.9.9</code>, DNS.SB, DNS4EU, Mullvad, AdGuard, CleanBrowsing, and OpenDNS
               side-by-side (<code>CD=0</code> vs <code>CD=1</code>) to surface RFC 8914 Extended DNS
-              Errors (EDE), protective blocking, SOA serial skew, and DNSKEY rollover drift.
+              Errors (EDE), protective blocking, SOA serial skew, and DNSKEY rollover drift — plus
+              multi-region RFC 7871 EDNS Client Subnet (Option 8) probes across 6 continents &amp;
+              <code>0.0.0.0/0</code> opt-out to audit GeoDNS steering and cache-busting
+              <code>SCOPE</code> prefixes.
             </li>
             <li>
               <strong class="text-slate-200">Byte-Level Wire Dissector, Zonefile Export &amp; Offline History:</strong>

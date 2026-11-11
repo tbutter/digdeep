@@ -10,7 +10,7 @@ import {
   normalizeFqdn,
 } from './encoding';
 import type { DnsPacket, DohQueryLog } from './types';
-import { parseDnsPacket } from './wire';
+import { decodeEdnsClientSubnetOption, parseDnsPacket } from './wire';
 
 export type WireSpanCategory =
   | 'header'
@@ -1087,6 +1087,44 @@ export function dissectDnsWirePacket(buf: Uint8Array): DissectedWirePacket {
             const optLen = view.getUint16(optOff + 2, false);
             const optDataEnd = Math.min(rdataEnd, optOff + 4 + optLen);
             let optSummary = `${optLen}B payload`;
+            if (optCode === 8 && optOff + 8 <= optDataEnd) {
+              const ecs = decodeEdnsClientSubnetOption(buf.subarray(optOff + 4, optDataEnd));
+              const optKey = optIdx++;
+              rFields.push(
+                {
+                  id: `${category}-${rIdx}-opt-${optKey}-hdr`,
+                  label: `EDNS Option 8 (${EDNS_OPTION_NAMES[8]})`,
+                  startOffset: optOff,
+                  endOffset: optOff + 4,
+                  valueSummary: `${ecs.presentation} (${optLen}B payload)`,
+                },
+                {
+                  id: `${category}-${rIdx}-opt-${optKey}-family`,
+                  label: 'ECS FAMILY',
+                  startOffset: optOff + 4,
+                  endOffset: optOff + 6,
+                  valueSummary: `${ecs.family} (${ecs.familyName})`,
+                },
+                {
+                  id: `${category}-${rIdx}-opt-${optKey}-prefixes`,
+                  label: 'ECS SOURCE / SCOPE PREFIX-LENGTH',
+                  startOffset: optOff + 6,
+                  endOffset: optOff + 8,
+                  valueSummary: `SOURCE=/${ecs.sourcePrefixLength}, SCOPE=/${ecs.scopePrefixLength}`,
+                }
+              );
+              if (optDataEnd > optOff + 8) {
+                rFields.push({
+                  id: `${category}-${rIdx}-opt-${optKey}-addr`,
+                  label: 'ECS ADDRESS',
+                  startOffset: optOff + 8,
+                  endOffset: optDataEnd,
+                  valueSummary: `${ecs.address} (${ecs.addressByteLength} truncated octet${ecs.addressByteLength === 1 ? '' : 's'})`,
+                });
+              }
+              optOff = optDataEnd;
+              continue;
+            }
             if (optCode === 15 && optOff + 6 <= optDataEnd) {
               const infoCode = view.getUint16(optOff + 4, false);
               const extra =
