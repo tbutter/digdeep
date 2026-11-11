@@ -245,6 +245,7 @@ export function ChainGraphView({
   onChangeFilters,
   focusedTargetId,
   onSelectTargetId,
+  onInspectWireQuery,
 }: {
   snapshot: AnalysisSnapshot;
   theme: 'dark' | 'light';
@@ -252,6 +253,7 @@ export function ChainGraphView({
   onChangeFilters: (next: GraphFilterOptions) => void;
   focusedTargetId?: string | null;
   onSelectTargetId?: (targetId: string | null) => void;
+  onInspectWireQuery?: (queryId: string, mode?: 'dig' | 'hex-resp' | 'hex-req') => void;
 }) {
   seedIpAsnCacheFromSnapshot(snapshot);
   const graph = useMemo(() => buildChainGraph(snapshot, filters), [snapshot, filters]);
@@ -1237,6 +1239,8 @@ export function ChainGraphView({
         dohEndpoint={snapshot.dohEndpoint}
         capturedAt={snapshot.capturedAt}
         validatedAt={snapshot.validatedAt}
+        queries={snapshot.queries}
+        onInspectWireQuery={onInspectWireQuery}
         onClose={() => selectAndNotify(null)}
       />
 

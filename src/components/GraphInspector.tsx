@@ -1,9 +1,24 @@
-import { Check, Copy, ExternalLink, KeyRound, Layers, Link2, Shield, Terminal, X } from 'lucide-react';
+import {
+  Binary,
+  Check,
+  Copy,
+  ExternalLink,
+  KeyRound,
+  Layers,
+  Link2,
+  Shield,
+  Terminal,
+  X,
+} from 'lucide-react';
 import { useState } from 'react';
 import { DNSSEC_ALGORITHMS, formatAlgorithm, formatDigestType } from '../dns/constants';
 import { generateCliReproducerCommands } from '../dns/digFormat';
 import { displayFqdn } from '../dns/encoding';
-import type { NegativeProofVerification, ZoneAnalysis } from '../dns/types';
+import type { DohQueryLog, NegativeProofVerification, ZoneAnalysis } from '../dns/types';
+import {
+  type FocusedWireSubMode,
+  findGraphSelectionWireQuery,
+} from '../dns/wireQueryFilter';
 import type { GraphEdge, GraphNode } from '../graph/layout';
 import { IpHoverBadge, RpkiStatusBadge } from './IpHoverBadge';
 import { StatusBadge } from './StatusBadge';
@@ -183,17 +198,22 @@ export function GraphInspector({
   dohEndpoint,
   capturedAt,
   validatedAt,
+  queries,
+  onInspectWireQuery,
   onClose,
 }: {
   selection: GraphSelection | null;
   dohEndpoint?: string;
   capturedAt?: number;
   validatedAt?: number;
+  queries?: DohQueryLog[];
+  onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
   onClose: () => void;
 }) {
   const [cliTool, setCliTool] = useState<'dig' | 'delv' | 'kdig'>('dig');
   if (!selection) return null;
 
+  const matchedWireQuery = queries ? findGraphSelectionWireQuery(selection, queries) : undefined;
   const cliTarget = getCliTargetForSelection(selection);
   const cliCommands = cliTarget
     ? generateCliReproducerCommands({
@@ -678,6 +698,39 @@ export function GraphInspector({
             )}
 
             {selection.edge.proof && <ProofDetails proof={selection.edge.proof} />}
+          </div>
+        )}
+
+        {/* Cross-Tab Recorded DoH Wire Packet Deep Jump */}
+        {matchedWireQuery && onInspectWireQuery && (
+          <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+            <div className="flex items-center justify-between gap-2 text-[11px]">
+              <span className="font-semibold uppercase tracking-wider text-slate-500">
+                Recorded DoH Wire Packet
+              </span>
+              <span className="font-mono text-[10px] text-slate-500 truncate">
+                {matchedWireQuery.qname} {matchedWireQuery.qtypeName} ·{' '}
+                {matchedWireQuery.packet.wireSize}B
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => onInspectWireQuery(matchedWireQuery.id, 'dig')}
+                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-slate-50 dark:bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 transition-colors cursor-pointer"
+              >
+                <Terminal className="w-3.5 h-3.5 text-cyan-500" />
+                <span>Inspect dig</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onInspectWireQuery(matchedWireQuery.id, 'hex-resp')}
+                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-cyan-500/35 hover:border-cyan-400 bg-cyan-500/10 px-2.5 py-1.5 text-xs font-medium text-cyan-700 dark:text-cyan-300 transition-colors cursor-pointer"
+              >
+                <Binary className="w-3.5 h-3.5" />
+                <span>Dissect Hex</span>
+              </button>
+            </div>
           </div>
         )}
 

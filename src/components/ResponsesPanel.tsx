@@ -5,10 +5,13 @@ import {
   Copy,
   Download,
   FileCode2,
+  RotateCcw,
+  Search,
   Sparkles,
   Terminal,
+  X,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { formatDohShortLabel, rcodeToString } from '../dns/constants';
 import {
   downloadTextFile,
@@ -24,6 +27,14 @@ import {
   decodeUserWireInput,
   dissectDnsWirePacket,
 } from '../dns/wireDissector';
+import {
+  computeWireQueryCategoryCounts,
+  type FocusedWireQueryRequest,
+  filterDohQueryLogs,
+  matchesWireQueryCategory,
+  matchesWireQuerySearch,
+  type WireQueryFilterCategory,
+} from '../dns/wireQueryFilter';
 import { IpHoverBadge, parseIpToken, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
 import { WirePacketDissectorView } from './WireDissectorView';
 
@@ -44,21 +55,85 @@ const DETECTED_FORMAT_LABELS: Record<'doh-url' | 'hex-dump' | 'hex' | 'base64url
   base64url: 'Base64 / Base64url',
 };
 
-export function ResponsesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
+export function ResponsesPanel({
+  snapshot,
+  focusedQuery = null,
+}: {
+  snapshot: AnalysisSnapshot;
+  focusedQuery?: FocusedWireQueryRequest | null;
+}) {
   seedIpAsnCacheFromSnapshot(snapshot);
-  const [selectedId, setSelectedId] = useState<string>(snapshot.queries[0]?.id ?? '');
+  const [selectedId, setSelectedId] = useState<string>(() => {
+    if (focusedQuery && snapshot.queries.some((q) => q.id === focusedQuery.queryId)) {
+      return focusedQuery.queryId;
+    }
+    return snapshot.queries[0]?.id ?? '';
+  });
   const [mode, setMode] = useState<'dig' | 'zonefile' | 'hex-resp' | 'hex-req' | 'custom-decode'>(
-    'dig'
+    () => focusedQuery?.mode ?? 'dig'
   );
+  const [category, setCategory] = useState<WireQueryFilterCategory>('all');
+  const [searchText, setSearchText] = useState<string>('');
   const [cliTool, setCliTool] = useState<'dig' | 'delv' | 'kdig'>('dig');
   const [copied, setCopied] = useState(false);
   const [copiedCli, setCopiedCli] = useState(false);
   const [customWireInput, setCustomWireInput] = useState<string>('');
   const [customSubView, setCustomSubView] = useState<'dissector' | 'dig'>('dissector');
+  const rowRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const prevSnapshotIdRef = useRef<string>(snapshot.id);
+
+  // Reset filters and selection when switching to a different snapshot while mounted
+  useEffect(() => {
+    if (prevSnapshotIdRef.current !== snapshot.id) {
+      prevSnapshotIdRef.current = snapshot.id;
+      setCategory('all');
+      setSearchText('');
+      if (focusedQuery && snapshot.queries.some((q) => q.id === focusedQuery.queryId)) {
+        setSelectedId(focusedQuery.queryId);
+      } else {
+        setSelectedId(snapshot.queries[0]?.id ?? '');
+      }
+    }
+  }, [snapshot.id, snapshot.queries, focusedQuery]);
+
+  // Focus & scroll to a cross-tab requested wire packet
+  useEffect(() => {
+    if (!focusedQuery) return;
+    const target = snapshot.queries.find((q) => q.id === focusedQuery.queryId);
+    if (!target) return;
+    setSelectedId(target.id);
+    if (focusedQuery.mode) {
+      setMode(focusedQuery.mode);
+    }
+    setCategory((prevCat) => (matchesWireQueryCategory(target, prevCat) ? prevCat : 'all'));
+    setSearchText((prevSearch) => (matchesWireQuerySearch(target, prevSearch) ? prevSearch : ''));
+    const timer = setTimeout(() => {
+      const el = rowRefs.current.get(target.id);
+      if (el && typeof el.scrollIntoView === 'function') {
+        el.scrollIntoView({ block: 'nearest' });
+      }
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [focusedQuery?.seq, focusedQuery?.queryId, focusedQuery?.mode, snapshot.queries, focusedQuery]);
+
+  const categoryCounts = useMemo(
+    () => computeWireQueryCategoryCounts(snapshot.queries),
+    [snapshot.queries]
+  );
+
+  const filteredQueries = useMemo(
+    () => filterDohQueryLogs(snapshot.queries, category, searchText),
+    [snapshot.queries, category, searchText]
+  );
+
+  const isFiltered = category !== 'all' || searchText.trim().length > 0;
 
   const selectedLog: DohQueryLog | undefined = useMemo(
-    () => snapshot.queries.find((q) => q.id === selectedId) ?? snapshot.queries[0],
-    [snapshot.queries, selectedId]
+    () =>
+      snapshot.queries.find((q) => q.id === selectedId) ??
+      filteredQueries[0] ??
+      snapshot.queries[0],
+    [snapshot.queries, filteredQueries, selectedId]
   );
 
   const maxLatency = useMemo(
@@ -149,71 +224,237 @@ export function ResponsesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 min-h-[540px]">
       {/* Left: DoH Query Waterfall Table */}
       <div className="lg:col-span-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 overflow-hidden flex flex-col max-h-[80vh]">
-        <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+        <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
           <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-            {formatDohShortLabel(snapshot.dohEndpoint)} DoH Wire Queries ({snapshot.queries.length})
+            {formatDohShortLabel(snapshot.dohEndpoint)} DoH Wire Queries (
+            {isFiltered
+              ? `${filteredQueries.length}/${snapshot.queries.length}`
+              : snapshot.queries.length}
+            )
           </div>
           <div className="font-mono text-[11px] text-slate-400">application/dns-message</div>
         </div>
 
-        <div className="divide-y divide-slate-100 dark:divide-slate-800/80 overflow-y-auto flex-1">
-          {snapshot.queries.map((q) => {
-            const active = selectedLog?.id === q.id;
-            const rcode = rcodeToString(q.packet.flags.rcode);
-            const rcodeColor =
-              q.packet.flags.rcode === 0
-                ? 'text-emerald-600 dark:text-emerald-400'
-                : q.packet.flags.rcode === 3
-                  ? 'text-amber-600 dark:text-amber-400'
-                  : 'text-rose-600 dark:text-rose-400';
+        {/* Search Input & Category Filter Pills */}
+        {snapshot.queries.length > 0 && (
+          <div className="px-3 py-2.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50/75 dark:bg-slate-950/45 space-y-2">
+            <div className="relative flex items-center">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 pointer-events-none" />
+              <input
+                type="text"
+                value={searchText}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setSearchText(next);
+                  const nextMatches = filterDohQueryLogs(snapshot.queries, category, next);
+                  if (nextMatches.length > 0 && !nextMatches.some((q) => q.id === selectedId)) {
+                    setSelectedId(nextMatches[0].id);
+                  }
+                }}
+                placeholder="Filter qname, type, resolver, ECS, RCODE, EDE…"
+                aria-label="Filter DoH wire queries"
+                data-testid="wire-query-search"
+                className="w-full rounded-lg border border-slate-200 dark:border-slate-700/90 bg-white dark:bg-slate-900 pl-8 pr-7 py-1.5 text-xs font-mono text-slate-900 dark:text-slate-100 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500"
+              />
+              {searchText.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setSearchText('')}
+                  aria-label="Clear wire query filter"
+                  className="absolute right-2 rounded p-0.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
 
-            return (
-              <button
-                key={q.id}
-                type="button"
-                onClick={() => setSelectedId(q.id)}
-                className={`w-full text-left px-3.5 py-2.5 transition-colors cursor-pointer ${
-                  active
-                    ? 'bg-cyan-500/10 border-l-2 border-l-cyan-500'
-                    : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'
-                }`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="rounded bg-slate-200 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] font-bold text-slate-700 dark:text-slate-200 shrink-0">
-                      {q.qtypeName}
-                    </span>
-                    <span className="font-mono text-xs font-medium truncate text-slate-900 dark:text-slate-100">
-                      {q.qname}
-                    </span>
-                    {q.ecsSubnet && (
-                      <span className="rounded bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30 px-1.5 py-0.2 font-mono text-[10px] shrink-0">
-                        ECS {q.ecsSubnet}
+            <div className="flex flex-wrap items-center gap-1">
+              {(
+                [
+                  { id: 'all' as const, label: 'All', count: categoryCounts.all, show: true },
+                  {
+                    id: 'target' as const,
+                    label: 'Target',
+                    count: categoryCounts.target,
+                    show: true,
+                  },
+                  {
+                    id: 'dnssec' as const,
+                    label: 'DNSSEC',
+                    count: categoryCounts.dnssec,
+                    show: true,
+                  },
+                  {
+                    id: 'errors' as const,
+                    label: 'Errors / EDE',
+                    count: categoryCounts.errors,
+                    show: true,
+                  },
+                  {
+                    id: 'consensus' as const,
+                    label: 'Consensus',
+                    count: categoryCounts.consensus,
+                    show: categoryCounts.consensus > 0,
+                  },
+                  {
+                    id: 'ecs' as const,
+                    label: 'ECS Geo',
+                    count: categoryCounts.ecs,
+                    show: categoryCounts.ecs > 0,
+                  },
+                  {
+                    id: 'aux' as const,
+                    label: 'BGP / Aux',
+                    count: categoryCounts.aux,
+                    show: categoryCounts.aux > 0,
+                  },
+                ] as const
+              )
+                .filter((pill) => pill.show)
+                .map((pill) => {
+                  const activePill = category === pill.id;
+                  const hasErrorsHighlight =
+                    pill.id === 'errors' && pill.count > 0 && !activePill;
+                  return (
+                    <button
+                      key={pill.id}
+                      type="button"
+                      data-testid={`wire-filter-pill-${pill.id}`}
+                      onClick={() => {
+                        setCategory(pill.id);
+                        const nextMatches = filterDohQueryLogs(
+                          snapshot.queries,
+                          pill.id,
+                          searchText
+                        );
+                        if (
+                          nextMatches.length > 0 &&
+                          !nextMatches.some((q) => q.id === selectedId)
+                        ) {
+                          setSelectedId(nextMatches[0].id);
+                        }
+                      }}
+                      className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors cursor-pointer ${
+                        activePill
+                          ? 'bg-cyan-500 text-slate-950 font-semibold'
+                          : hasErrorsHighlight
+                            ? 'bg-amber-500/15 text-amber-800 dark:text-amber-300 border border-amber-500/35 hover:border-amber-400'
+                            : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:border-cyan-500/60'
+                      }`}
+                    >
+                      <span>{pill.label}</span>
+                      <span
+                        className={`font-mono text-[10px] ${
+                          activePill ? 'text-slate-950/80' : 'text-slate-400'
+                        }`}
+                      >
+                        {pill.count}
                       </span>
-                    )}
-                  </div>
-                  <span className={`font-mono text-[11px] font-semibold shrink-0 ${rcodeColor}`}>
-                    {rcode}
-                  </span>
-                </div>
+                    </button>
+                  );
+                })}
+            </div>
+          </div>
+        )}
 
-                <div className="flex items-center justify-between text-[11px] text-slate-500 mt-1">
-                  <span className="truncate pr-2">{q.purpose}</span>
-                  <span className="font-mono shrink-0">
-                    {q.cd ? 'CD=1' : 'CD=0'}
-                    {q.packet.flags.ad ? ' AD=1' : ''} · {q.packet.wireSize}B · {q.latencyMs}ms
-                  </span>
-                </div>
-
-                <div className="mt-1.5 h-1 w-full rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-cyan-500/70"
-                    style={{ width: `${Math.max(4, (q.latencyMs / maxLatency) * 100)}%` }}
-                  />
-                </div>
+        <div className="divide-y divide-slate-100 dark:divide-slate-800/80 overflow-y-auto flex-1">
+          {filteredQueries.length === 0 && snapshot.queries.length > 0 ? (
+            <div className="p-6 text-center space-y-2.5">
+              <div className="text-xs font-medium text-slate-600 dark:text-slate-300">
+                No wire queries match the active filter.
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setCategory('all');
+                  setSearchText('');
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-cyan-700 dark:text-cyan-300 cursor-pointer"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Reset filters</span>
               </button>
-            );
-          })}
+            </div>
+          ) : (
+            filteredQueries.map((q) => {
+              const active = selectedLog?.id === q.id;
+              const rcode = rcodeToString(q.packet.flags.rcode);
+              const rcodeColor =
+                q.packet.flags.rcode === 0
+                  ? 'text-emerald-600 dark:text-emerald-400'
+                  : q.packet.flags.rcode === 3
+                    ? 'text-amber-600 dark:text-amber-400'
+                    : 'text-rose-600 dark:text-rose-400';
+              const firstEde = q.packet.edns?.ede[0];
+              const isSecondaryEndpoint =
+                Boolean(q.endpoint) && q.endpoint !== snapshot.dohEndpoint;
+
+              return (
+                <button
+                  key={q.id}
+                  ref={(el) => {
+                    if (el) {
+                      rowRefs.current.set(q.id, el);
+                    } else {
+                      rowRefs.current.delete(q.id);
+                    }
+                  }}
+                  data-query-id={q.id}
+                  type="button"
+                  onClick={() => setSelectedId(q.id)}
+                  className={`w-full text-left px-3.5 py-2.5 transition-colors cursor-pointer ${
+                    active
+                      ? 'bg-cyan-500/10 border-l-2 border-l-cyan-500'
+                      : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="rounded bg-slate-200 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] font-bold text-slate-700 dark:text-slate-200 shrink-0">
+                        {q.qtypeName}
+                      </span>
+                      <span className="font-mono text-xs font-medium truncate text-slate-900 dark:text-slate-100">
+                        {q.qname}
+                      </span>
+                      {q.ecsSubnet && (
+                        <span className="rounded bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30 px-1.5 py-0.2 font-mono text-[10px] shrink-0">
+                          ECS {q.ecsSubnet}
+                        </span>
+                      )}
+                      {isSecondaryEndpoint && !q.ecsSubnet && (
+                        <span className="rounded bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border border-cyan-500/25 px-1.5 py-0.2 font-mono text-[10px] shrink-0">
+                          {formatDohShortLabel(q.endpoint)}
+                        </span>
+                      )}
+                      {firstEde && (
+                        <span className="rounded bg-amber-500/15 text-amber-800 dark:text-amber-300 border border-amber-500/30 px-1.5 py-0.2 font-mono text-[10px] shrink-0">
+                          EDE {firstEde.infoCode}
+                        </span>
+                      )}
+                    </div>
+                    <span className={`font-mono text-[11px] font-semibold shrink-0 ${rcodeColor}`}>
+                      {rcode}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between text-[11px] text-slate-500 mt-1">
+                    <span className="truncate pr-2">{q.purpose}</span>
+                    <span className="font-mono shrink-0">
+                      {q.cd ? 'CD=1' : 'CD=0'}
+                      {q.packet.flags.ad ? ' AD=1' : ''} · {q.packet.wireSize}B · {q.latencyMs}ms
+                    </span>
+                  </div>
+
+                  <div className="mt-1.5 h-1 w-full rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-cyan-500/70"
+                      style={{ width: `${Math.max(4, (q.latencyMs / maxLatency) * 100)}%` }}
+                    />
+                  </div>
+                </button>
+              );
+            })
+          )}
         </div>
       </div>
 

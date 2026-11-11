@@ -50,6 +50,7 @@ import {
 } from './dns/mailAnalyzer';
 import type { AnalysisMode, AnalysisProgress, AnalysisSnapshot } from './dns/types';
 import { runWebAnalysis } from './dns/webAnalyzer';
+import type { FocusedWireQueryRequest, FocusedWireSubMode } from './dns/wireQueryFilter';
 import { usePwaInstall } from './pwa/usePwaInstall';
 import {
   clearUnpinnedSnapshots,
@@ -244,6 +245,18 @@ export function App() {
   const examplesContainerRef = useRef<HTMLDivElement | null>(null);
   const [focusedGraphTarget, setFocusedGraphTarget] = useState<string | null>(
     initialBootState.focusedTarget
+  );
+  const [focusedWireQuery, setFocusedWireQuery] = useState<FocusedWireQueryRequest | null>(null);
+  const handleInspectWireQuery = useCallback(
+    (queryId: string, mode: FocusedWireSubMode = 'dig') => {
+      setFocusedWireQuery((prev) => ({
+        queryId,
+        mode,
+        seq: (prev?.seq ?? 0) + 1,
+      }));
+      setActiveTab('responses');
+    },
+    []
   );
   const [untrustedDohPending, setUntrustedDohPending] = useState<string | null>(
     initialBootState.deepLink.isUntrustedCustomDoh ? initialBootState.deepLink.dohEndpoint : null
@@ -449,6 +462,7 @@ export function App() {
         const updatedList = saveSnapshot(snap);
         setSnapshots(updatedList);
         setActiveSnapshot(snap);
+        setFocusedWireQuery(null);
 
         let nextTab: ActiveTab = activeTab;
         if (modeToRun === 'mail') {
@@ -1520,6 +1534,7 @@ export function App() {
                   setActiveTab('graph');
                 }}
                 onOpenChainGraph={() => setActiveTab('graph')}
+                onInspectWireQuery={handleInspectWireQuery}
                 onProbeDkimSelectors={(rawSelectors) => {
                   const parsedSels = parseDkimSelectorInput(
                     rawSelectors,
@@ -1544,6 +1559,7 @@ export function App() {
                   setActiveTab('graph');
                 }}
                 onOpenChainGraph={() => setActiveTab('graph')}
+                onInspectWireQuery={handleInspectWireQuery}
                 onTraceDomain={(domain) => {
                   setAnalysisMode('web');
                   setDomainInput(domain);
@@ -1561,6 +1577,7 @@ export function App() {
                 snapshot={activeSnapshot}
                 onOpenChainGraph={() => setActiveTab('graph')}
                 onOpenWireResponses={() => setActiveTab('responses')}
+                onInspectWireQuery={handleInspectWireQuery}
               />
             )}
 
@@ -1584,6 +1601,7 @@ export function App() {
                 }
                 focusedTargetId={focusedGraphTarget}
                 onSelectTargetId={setFocusedGraphTarget}
+                onInspectWireQuery={handleInspectWireQuery}
               />
             )}
 
@@ -1594,10 +1612,13 @@ export function App() {
                   setFocusedGraphTarget(targetId);
                   setActiveTab('graph');
                 }}
+                onInspectWireQuery={handleInspectWireQuery}
               />
             )}
 
-            {activeTab === 'responses' && <ResponsesPanel snapshot={activeSnapshot} />}
+            {activeTab === 'responses' && (
+              <ResponsesPanel snapshot={activeSnapshot} focusedQuery={focusedWireQuery} />
+            )}
 
             {activeTab === 'zones' && <ZonesPanel snapshot={activeSnapshot} />}
 
@@ -1608,6 +1629,7 @@ export function App() {
                 onSelectSnapshot={(snap) => {
                   const snapMode: AnalysisMode = snap.mode ?? 'dnssec';
                   setFocusedGraphTarget(null);
+                  setFocusedWireQuery(null);
                   setActiveSnapshot(snap);
                   setAnalysisMode(snapMode);
                   setDomainInput(snap.queriedEmail ?? snap.displayDomain);

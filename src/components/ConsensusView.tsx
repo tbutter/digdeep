@@ -2,6 +2,7 @@ import { useState } from 'react';
 import {
   Activity,
   AlertTriangle,
+  Binary,
   Check,
   Compass,
   Copy,
@@ -29,10 +30,17 @@ import type {
   AnalysisSnapshot,
   ConsensusAnalysisResult,
   ConsensusResolverClassification,
+  DohQueryLog,
   EcsAddressProbeResult,
   EcsGeoAnalysisResult,
   RpkiValidationState,
 } from '../dns/types';
+import {
+  type FocusedWireSubMode,
+  findConsensusEdeWireQuery,
+  findConsensusResolverWireQuery,
+  findEcsRegionWireQueries,
+} from '../dns/wireQueryFilter';
 import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
 
 function getRoleBadgeMeta(role: DohResolverRole): { label: string; cls: string } {
@@ -285,11 +293,15 @@ function EcsGeoSection({
   displayDomain,
   primaryEndpoint,
   ecsGeo,
+  queries,
+  onInspectWireQuery,
 }: {
   targetDomain: string;
   displayDomain: string;
   primaryEndpoint: string;
   ecsGeo: EcsGeoAnalysisResult;
+  queries: DohQueryLog[];
+  onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
 }) {
   const [customSubnet, setCustomSubnet] = useState('81.2.69.0/24');
   const [customQtype, setCustomQtype] = useState<'A' | 'AAAA'>('A');
@@ -499,6 +511,9 @@ function EcsGeoSection({
               const adVerified =
                 (reg.ipv4.reachable && reg.ipv4.rcode === 0 && reg.ipv4.adBit) ||
                 (reg.ipv6.reachable && reg.ipv6.rcode === 0 && reg.ipv6.adBit);
+              const ecsWire = onInspectWireQuery
+                ? findEcsRegionWireQueries(reg, queries)
+                : { ipv4: undefined, ipv6: undefined };
               return (
                 <tr
                   key={reg.regionId}
@@ -613,6 +628,43 @@ function EcsGeoSection({
                         <div className="text-[10px] text-slate-400">
                           {Math.max(reg.ipv4.latencyMs, reg.ipv6.latencyMs)}ms
                         </div>
+                        {onInspectWireQuery && (ecsWire.ipv4 || ecsWire.ipv6) && (
+                          <div className="flex flex-wrap items-center gap-1 pt-0.5 font-sans">
+                            {ecsWire.ipv4 && (
+                              <button
+                                type="button"
+                                onClick={() => onInspectWireQuery(ecsWire.ipv4!.id, 'dig')}
+                                title={`Inspect IPv4 ECS wire query (${reg.ipv4.querySubnet})`}
+                                className="inline-flex items-center gap-0.5 rounded border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-1.5 py-0.5 text-[10px] font-medium text-cyan-700 dark:text-cyan-300 cursor-pointer"
+                              >
+                                <Terminal className="w-2.5 h-2.5" />
+                                <span>v4</span>
+                              </button>
+                            )}
+                            {ecsWire.ipv6 && (
+                              <button
+                                type="button"
+                                onClick={() => onInspectWireQuery(ecsWire.ipv6!.id, 'dig')}
+                                title={`Inspect IPv6 ECS wire query (${reg.ipv6.querySubnet})`}
+                                className="inline-flex items-center gap-0.5 rounded border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-1.5 py-0.5 text-[10px] font-medium text-cyan-700 dark:text-cyan-300 cursor-pointer"
+                              >
+                                <Terminal className="w-2.5 h-2.5" />
+                                <span>v6</span>
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onInspectWireQuery((ecsWire.ipv4 ?? ecsWire.ipv6)!.id, 'hex-resp')
+                              }
+                              title="Dissect RFC 7871 EDNS0 Option 8 wire bytes"
+                              className="inline-flex items-center gap-0.5 rounded border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:text-slate-300 cursor-pointer"
+                            >
+                              <Binary className="w-2.5 h-2.5" />
+                              <span>Hex</span>
+                            </button>
+                          </div>
+                        )}
                       </div>
                     )}
                   </td>
@@ -816,10 +868,12 @@ export function ConsensusView({
   snapshot,
   onOpenChainGraph,
   onOpenWireResponses,
+  onInspectWireQuery,
 }: {
   snapshot: AnalysisSnapshot;
   onOpenChainGraph: () => void;
   onOpenWireResponses: () => void;
+  onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
 }) {
   seedIpAsnCacheFromSnapshot(snapshot);
   const consensus = snapshot.consensusAnalysis;
@@ -976,34 +1030,52 @@ export function ConsensusView({
             </span>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            {consensus.edeHighlights.map((item, idx) => (
-              <div
-                key={`${item.resolverLabel}-${item.infoCode}-${idx}`}
-                className="rounded-lg border border-amber-500/25 bg-white/90 dark:bg-slate-900/90 px-3 py-2 text-xs flex flex-col gap-1"
-              >
-                <div className="flex items-center justify-between gap-2 font-mono">
-                  <span className="font-bold text-slate-900 dark:text-slate-100">
-                    {item.resolverLabel}
-                  </span>
-                  <span
-                    className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                      item.category === 'dnssec-bogus'
-                        ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/30'
-                        : item.category === 'policy-blocked'
-                          ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30'
-                          : 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300'
-                    }`}
-                  >
-                    EDE {item.infoCode}: {item.name}
-                  </span>
-                </div>
-                {item.extraText && (
-                  <div className="font-mono text-[11px] text-slate-600 dark:text-slate-400 break-all">
-                    EXTRA-TEXT: &quot;{item.extraText}&quot;
+            {consensus.edeHighlights.map((item, idx) => {
+              const edeWireQuery = onInspectWireQuery
+                ? findConsensusEdeWireQuery(item.resolverLabel, item.infoCode, snapshot)
+                : undefined;
+              return (
+                <div
+                  key={`${item.resolverLabel}-${item.infoCode}-${idx}`}
+                  className="rounded-lg border border-amber-500/25 bg-white/90 dark:bg-slate-900/90 px-3 py-2 text-xs flex flex-col gap-1"
+                >
+                  <div className="flex items-center justify-between gap-2 font-mono">
+                    <span className="font-bold text-slate-900 dark:text-slate-100">
+                      {item.resolverLabel}
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                          item.category === 'dnssec-bogus'
+                            ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/30'
+                            : item.category === 'policy-blocked'
+                              ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30'
+                              : 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300'
+                        }`}
+                      >
+                        EDE {item.infoCode}: {item.name}
+                      </span>
+                      {edeWireQuery && onInspectWireQuery && (
+                        <button
+                          type="button"
+                          onClick={() => onInspectWireQuery(edeWireQuery.id, 'hex-resp')}
+                          title="Dissect RFC 8914 EDNS0 Option 15 bytes in DoH Wire Dissector"
+                          className="inline-flex items-center gap-1 rounded border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-slate-50 dark:bg-slate-950 px-1.5 py-0.5 font-sans text-[10px] font-medium text-cyan-700 dark:text-cyan-300 cursor-pointer"
+                        >
+                          <Binary className="w-2.5 h-2.5" />
+                          <span>Dissect</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
-                )}
-              </div>
-            ))}
+                  {item.extraText && (
+                    <div className="font-mono text-[11px] text-slate-600 dark:text-slate-400 break-all">
+                      EXTRA-TEXT: &quot;{item.extraText}&quot;
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </section>
       )}
@@ -1052,13 +1124,16 @@ export function ConsensusView({
                 <th className="py-2.5 px-3">A / AAAA Answers</th>
                 <th className="py-2.5 px-3">SOA Serial &amp; Key Tags</th>
                 <th className="py-2.5 px-3">RFC 8914 EDE</th>
-                <th className="py-2.5 px-3.5 text-right">Latency</th>
+                <th className="py-2.5 px-3.5 text-right">Latency &amp; Wire</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800/70 font-mono">
               {consensus.resolvers.map((r) => {
                 const roleMeta = getRoleBadgeMeta(r.role);
                 const classMeta = getClassificationBadgeMeta(r.classification);
+                const resolverWireQuery = onInspectWireQuery
+                  ? findConsensusResolverWireQuery(r, snapshot)
+                  : undefined;
                 return (
                   <tr
                     key={r.endpoint}
@@ -1180,7 +1255,31 @@ export function ConsensusView({
                     </td>
 
                     <td className="py-2.5 px-3.5 text-right text-slate-500">
-                      {r.reachable ? `${r.latencyMs}ms` : '—'}
+                      <div className="flex flex-col items-end gap-1">
+                        <span>{r.reachable ? `${r.latencyMs}ms` : '—'}</span>
+                        {resolverWireQuery && onInspectWireQuery && (
+                          <div className="inline-flex items-center gap-1 font-sans">
+                            <button
+                              type="button"
+                              onClick={() => onInspectWireQuery(resolverWireQuery.id, 'dig')}
+                              title={`Inspect ${r.shortLabel} DoH packet in dig format`}
+                              className="inline-flex items-center gap-0.5 rounded border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-1.5 py-0.5 text-[10px] font-medium text-cyan-700 dark:text-cyan-300 cursor-pointer"
+                            >
+                              <Terminal className="w-2.5 h-2.5" />
+                              <span>Wire</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onInspectWireQuery(resolverWireQuery.id, 'hex-resp')}
+                              title={`Dissect ${r.shortLabel} DoH wire bytes`}
+                              className="inline-flex items-center gap-0.5 rounded border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:text-slate-300 cursor-pointer"
+                            >
+                              <Binary className="w-2.5 h-2.5" />
+                              <span>Hex</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );
@@ -1197,6 +1296,8 @@ export function ConsensusView({
           displayDomain={consensus.displayDomain}
           primaryEndpoint={snapshot.dohEndpoint}
           ecsGeo={consensus.ecsGeo}
+          queries={snapshot.queries}
+          onInspectWireQuery={onInspectWireQuery}
         />
       )}
     </div>

@@ -6,20 +6,31 @@ import {
   Server,
   ShieldAlert,
   ShieldCheck,
+  Terminal,
 } from 'lucide-react';
 import { useState } from 'react';
 import { formatDohShortLabel } from '../dns/constants';
 import type { AnalysisSnapshot, AuditFinding } from '../dns/types';
+import {
+  type FocusedWireSubMode,
+  findAuditFindingWireQuery,
+} from '../dns/wireQueryFilter';
 import { StatusBadge } from './StatusBadge';
 
 export function AuditPanel({
   snapshot,
   onJumpToGraphTarget,
+  onInspectWireQuery,
 }: {
   snapshot: AnalysisSnapshot;
   onJumpToGraphTarget: (targetId: string) => void;
+  onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
 }) {
   const [filter, setFilter] = useState<'all' | AuditFinding['severity']>('all');
+
+  const resolverCd0Query = snapshot.queries.find(
+    (q) => !q.cd && !q.ecsSubnet && !q.purpose.startsWith('Consensus probe')
+  );
 
   const errors = snapshot.findings.filter((f) => f.severity === 'error');
   const warnings = snapshot.findings.filter((f) => f.severity === 'warning');
@@ -91,6 +102,23 @@ export function AuditPanel({
                     .join(' · ')}
                 </div>
               )}
+              {resolverCd0Query && onInspectWireQuery && (
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onInspectWireQuery(
+                        resolverCd0Query.id,
+                        snapshot.resolverVerdict?.ede.length ? 'hex-resp' : 'dig'
+                      )
+                    }
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-slate-50 dark:bg-slate-950 px-2.5 py-1 text-xs font-medium text-cyan-700 dark:text-cyan-300 transition-colors cursor-pointer"
+                  >
+                    <Terminal className="w-3.5 h-3.5" />
+                    <span>Inspect CD=0 Wire Packet</span>
+                  </button>
+                </div>
+              )}
             </>
           ) : (
             <p className="text-sm text-slate-500">No CD=0 resolver check recorded.</p>
@@ -143,6 +171,12 @@ export function AuditPanel({
                 : f.severity === 'warning'
                   ? 'border-amber-500/40 bg-amber-500/5'
                   : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60';
+            const wireQuery = onInspectWireQuery
+              ? findAuditFindingWireQuery(f, snapshot)
+              : undefined;
+            const preferredWireMode: FocusedWireSubMode =
+              f.code === 'ECS_WIRE_FORMAT_ANOMALY' || f.code.includes('EDE') ? 'hex-resp' : 'dig';
+
             return (
               <div
                 key={f.id}
@@ -176,15 +210,30 @@ export function AuditPanel({
                   </div>
                 </div>
 
-                {(f.targetId || f.zone) && (
-                  <button
-                    type="button"
-                    onClick={() => onJumpToGraphTarget(f.targetId ?? `zone-${f.zone}`)}
-                    className="inline-flex items-center gap-1 self-start shrink-0 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:border-cyan-500 transition-colors cursor-pointer"
-                  >
-                    Locate in Graph
-                    <ArrowUpRight className="w-3.5 h-3.5" />
-                  </button>
+                {(f.targetId || f.zone || (wireQuery && onInspectWireQuery)) && (
+                  <div className="flex flex-wrap sm:flex-col items-start sm:items-end gap-1.5 self-start shrink-0">
+                    {(f.targetId || f.zone) && (
+                      <button
+                        type="button"
+                        onClick={() => onJumpToGraphTarget(f.targetId ?? `zone-${f.zone}`)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:border-cyan-500 transition-colors cursor-pointer"
+                      >
+                        Locate in Graph
+                        <ArrowUpRight className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    {wireQuery && onInspectWireQuery && (
+                      <button
+                        type="button"
+                        onClick={() => onInspectWireQuery(wireQuery.id, preferredWireMode)}
+                        title={`Inspect ${wireQuery.qname} ${wireQuery.qtypeName} (${wireQuery.purpose})`}
+                        className="inline-flex items-center gap-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-cyan-700 dark:text-cyan-300 hover:border-cyan-500 transition-colors cursor-pointer"
+                      >
+                        <Terminal className="w-3.5 h-3.5" />
+                        <span>Inspect Wire</span>
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             );

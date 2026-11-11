@@ -35,6 +35,14 @@ import { base64ToBytes } from '../encoding';
 import { runMailAnalysis } from '../mailAnalyzer';
 import { runWebAnalysis } from '../webAnalyzer';
 import { dissectDnsWirePacket } from '../wireDissector';
+import {
+  computeWireQueryCategoryCounts,
+  filterDohQueryLogs,
+  findAuditFindingWireQuery,
+  findConsensusResolverWireQuery,
+  findEcsRegionWireQueries,
+  findGraphSelectionWireQuery,
+} from '../wireQueryFilter';
 
 // Minimal localStorage shim for HistoryPanel stats
 const mem = new Map<string, string>();
@@ -86,9 +94,15 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(bogusGraphHtml).toContain('MISSING KEY');
 
       const auditHtml = renderToStaticMarkup(
-        <AuditPanel snapshot={bogusSnap} onJumpToGraphTarget={() => {}} />
+        <AuditPanel
+          snapshot={bogusSnap}
+          onJumpToGraphTarget={() => {}}
+          onInspectWireQuery={() => {}}
+        />
       );
       expect(auditHtml).toContain('DS_NO_MATCHING_DNSKEY');
+      expect(auditHtml).toContain('Inspect CD=0 Wire Packet');
+      expect(auditHtml).toContain('Inspect Wire');
 
       const responsesHtml = renderToStaticMarkup(<ResponsesPanel snapshot={cfSnap} />);
       expect(responsesHtml).toContain('HEADER');
@@ -97,6 +111,25 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(responsesHtml).toContain('Export .zone');
       expect(responsesHtml).toContain('dig +dnssec +multi');
       expect(responsesHtml).toContain('Decode ?dns= / Hex');
+      expect(responsesHtml).toContain('data-testid="wire-query-search"');
+      expect(responsesHtml).toContain('data-testid="wire-filter-pill-all"');
+      expect(responsesHtml).toContain('data-testid="wire-filter-pill-target"');
+      expect(responsesHtml).toContain('data-testid="wire-filter-pill-dnssec"');
+      expect(responsesHtml).toContain('data-testid="wire-filter-pill-errors"');
+
+      const dnskeyQuery =
+        cfSnap.queries.find((q) => q.qtypeName === 'DNSKEY' && q.qname === 'iana.org.') ??
+        cfSnap.queries[0];
+      const focusedHexHtml = renderToStaticMarkup(
+        <ResponsesPanel
+          snapshot={cfSnap}
+          focusedQuery={{ queryId: dnskeyQuery.id, mode: 'hex-resp', seq: 1 }}
+        />
+      );
+      expect(focusedHexHtml).toContain(
+        `DNS Response Wire — ${dnskeyQuery.qname} ${dnskeyQuery.qtypeName}`
+      );
+      expect(focusedHexHtml).toContain('16-Bit Header Flags Register');
 
       const compressedQuery =
         cfSnap.queries.find(
@@ -129,11 +162,16 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
           dohEndpoint={cfSnap.dohEndpoint}
           capturedAt={cfSnap.capturedAt}
           validatedAt={cfSnap.validatedAt}
+          queries={cfSnap.queries}
+          onInspectWireQuery={() => {}}
           onClose={() => {}}
         />
       );
       expect(inspectorHtml).toContain('CLI Reproducer');
       expect(inspectorHtml).toContain('dig +dnssec +multi');
+      expect(inspectorHtml).toContain('Recorded DoH Wire Packet');
+      expect(inspectorHtml).toContain('Inspect dig');
+      expect(inspectorHtml).toContain('Dissect Hex');
 
       const historyHtml = renderToStaticMarkup(
         <HistoryPanel
@@ -213,7 +251,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v26');
+    expect(swCode).toContain('digdeep-shell-v27');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge when navigator.onLine is false
@@ -641,6 +679,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
           snapshot={consensusSnap}
           onOpenChainGraph={() => {}}
           onOpenWireResponses={() => {}}
+          onInspectWireQuery={() => {}}
         />
       );
       expect(consensusHtml).toContain('Multi-Resolver DoH Matrix for');
@@ -651,9 +690,73 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(consensusHtml).toContain('71.252.0.0/24');
       expect(consensusHtml).toContain('0.0.0.0/0');
       expect(consensusHtml).toContain('Interactive Custom ECS Subnet Probe');
+      expect(consensusHtml).toContain('Latency &amp; Wire');
       expect(consensusHtml).toContain('1.1.1.1');
       expect(consensusHtml).toContain('8.8.8.8');
       expect(consensusHtml).toContain('9.9.9.9');
+
+      // Verify DoH Wire Waterfall category counts, search filters, and cross-tab query resolvers on Consensus snapshot
+      const consensusResponsesHtml = renderToStaticMarkup(
+        <ResponsesPanel snapshot={consensusSnap} />
+      );
+      expect(consensusResponsesHtml).toContain('data-testid="wire-filter-pill-consensus"');
+      expect(consensusResponsesHtml).toContain('data-testid="wire-filter-pill-ecs"');
+
+      const counts = computeWireQueryCategoryCounts(consensusSnap.queries);
+      expect(counts.all).toBe(consensusSnap.queries.length);
+      expect(counts.ecs).toBeGreaterThanOrEqual(14);
+      expect(counts.consensus).toBeGreaterThan(0);
+      expect(counts.dnssec).toBeGreaterThan(0);
+      expect(counts.target).toBeGreaterThan(0);
+
+      const ecsFiltered = filterDohQueryLogs(consensusSnap.queries, 'ecs', '71.252.0.0/24');
+      expect(ecsFiltered.length).toBe(1);
+      expect(ecsFiltered[0].ecsSubnet).toBe('71.252.0.0/24');
+
+      const reachableSecondary = consensusSnap.consensusAnalysis!.resolvers.find(
+        (r) => r.reachable && r.endpoint !== consensusSnap.dohEndpoint
+      );
+      expect(reachableSecondary).toBeDefined();
+      const secondaryFiltered = filterDohQueryLogs(
+        consensusSnap.queries,
+        'consensus',
+        `${reachableSecondary!.shortLabel} a`
+      );
+      expect(secondaryFiltered.length).toBeGreaterThanOrEqual(1);
+      const providerFiltered = filterDohQueryLogs(
+        consensusSnap.queries,
+        'consensus',
+        reachableSecondary!.provider
+      );
+      expect(providerFiltered.length).toBeGreaterThanOrEqual(1);
+
+      const firstResolverRow = consensusSnap.consensusAnalysis!.resolvers[0];
+      expect(findConsensusResolverWireQuery(firstResolverRow, consensusSnap)).toBeDefined();
+
+      const firstEcsRow = consensusSnap.consensusAnalysis!.ecsGeo!.regions[0];
+      const ecsRowQueries = findEcsRegionWireQueries(firstEcsRow, consensusSnap.queries);
+      expect(ecsRowQueries.ipv4).toBeDefined();
+      expect(ecsRowQueries.ipv6).toBeDefined();
+
+      const graphBuilt = buildChainGraph(consensusSnap, {
+        showSoaAndNs: true,
+        showStandbyKeys: true,
+      });
+      const firstRrsetNode = graphBuilt.nodes.find((n) => n.kind === 'rrset');
+      if (firstRrsetNode) {
+        expect(
+          findGraphSelectionWireQuery(
+            { kind: 'node', node: firstRrsetNode },
+            consensusSnap.queries
+          )
+        ).toBeDefined();
+      }
+      if (consensusSnap.findings.length > 0) {
+        const anyMatchedFinding = consensusSnap.findings.some((f) =>
+          Boolean(findAuditFindingWireQuery(f, consensusSnap))
+        );
+        expect(anyMatchedFinding).toBe(true);
+      }
 
       // Verify IP hover card cache seeding, live DoH lookup, and rendering
       seedIpAsnCacheFromSnapshot(rdnsSnap);

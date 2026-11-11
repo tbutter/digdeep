@@ -16,6 +16,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   ShieldOff,
+  Terminal,
 } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { displayFqdn } from '../dns/encoding';
@@ -39,6 +40,11 @@ import type {
   SpfSenderEvaluationResult,
   SpfTerm,
 } from '../dns/types';
+import {
+  type FocusedWireSubMode,
+  findWireQueryByGraphTargetId,
+  findWireQueryByOwnerAndType,
+} from '../dns/wireQueryFilter';
 import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
 import { StatusBadge } from './StatusBadge';
 
@@ -875,10 +881,14 @@ function getDkimStatusMeta(sel: DkimSelectorResult): {
 
 function DkimSelectorCard({
   sel,
+  wireQueryId,
   onJumpToGraphTarget,
+  onInspectWireQuery,
 }: {
   sel: DkimSelectorResult;
+  wireQueryId?: string;
   onJumpToGraphTarget: (targetId: string) => void;
+  onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
 }) {
   const statusMeta = getDkimStatusMeta(sel);
   const graphTargetId = sel.txtRrsetId ?? sel.negativeNodeId;
@@ -911,6 +921,16 @@ function DkimSelectorCard({
             >
               <span>Inspect Key Proof in Graph</span>
               <ArrowUpRight className="w-3 h-3" />
+            </button>
+          )}
+          {wireQueryId && onInspectWireQuery && (
+            <button
+              type="button"
+              onClick={() => onInspectWireQuery(wireQueryId, 'dig')}
+              className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-0.5 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:border-cyan-500 cursor-pointer"
+            >
+              <Terminal className="w-3 h-3 text-cyan-500" />
+              <span>Wire</span>
             </button>
           )}
         </div>
@@ -1003,12 +1023,14 @@ export function MailAnalysisView({
   snapshot,
   onJumpToGraphTarget,
   onOpenChainGraph,
+  onInspectWireQuery,
   onProbeDkimSelectors,
   loading = false,
 }: {
   snapshot: AnalysisSnapshot;
   onJumpToGraphTarget: (targetId: string) => void;
   onOpenChainGraph: () => void;
+  onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
   onProbeDkimSelectors?: (rawSelectorsInput: string) => void;
   loading?: boolean;
 }) {
@@ -1308,14 +1330,29 @@ export function MailAnalysisView({
             </p>
           </div>
           {mail.mxRrsetId && (
-            <button
-              type="button"
-              onClick={() => onJumpToGraphTarget(mail.mxRrsetId!)}
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:border-cyan-500 transition-colors cursor-pointer"
-            >
-              <span>Locate MX RRset in Graph</span>
-              <ArrowUpRight className="w-3.5 h-3.5" />
-            </button>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => onJumpToGraphTarget(mail.mxRrsetId!)}
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:border-cyan-500 transition-colors cursor-pointer"
+              >
+                <span>Locate MX RRset in Graph</span>
+                <ArrowUpRight className="w-3.5 h-3.5" />
+              </button>
+              {onInspectWireQuery && findWireQueryByGraphTargetId(mail.mxRrsetId, snapshot) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const q = findWireQueryByGraphTargetId(mail.mxRrsetId, snapshot);
+                    if (q) onInspectWireQuery(q.id, 'dig');
+                  }}
+                  className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-cyan-700 dark:text-cyan-300 hover:border-cyan-500 transition-colors cursor-pointer"
+                >
+                  <Terminal className="w-3.5 h-3.5" />
+                  <span>MX Wire</span>
+                </button>
+              )}
+            </div>
           )}
         </div>
 
@@ -1372,14 +1409,30 @@ export function MailAnalysisView({
             </p>
           </div>
           {mail.spf.txtRrsetId && (
-            <button
-              type="button"
-              onClick={() => onJumpToGraphTarget(mail.spf.txtRrsetId!)}
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:border-cyan-500 transition-colors cursor-pointer"
-            >
-              <span>Locate TXT RRset in Graph</span>
-              <ArrowUpRight className="w-3.5 h-3.5" />
-            </button>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => onJumpToGraphTarget(mail.spf.txtRrsetId!)}
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:border-cyan-500 transition-colors cursor-pointer"
+              >
+                <span>Locate TXT RRset in Graph</span>
+                <ArrowUpRight className="w-3.5 h-3.5" />
+              </button>
+              {onInspectWireQuery &&
+                findWireQueryByGraphTargetId(mail.spf.txtRrsetId, snapshot) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const q = findWireQueryByGraphTargetId(mail.spf.txtRrsetId, snapshot);
+                      if (q) onInspectWireQuery(q.id, 'dig');
+                    }}
+                    className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-cyan-700 dark:text-cyan-300 hover:border-cyan-500 transition-colors cursor-pointer"
+                  >
+                    <Terminal className="w-3.5 h-3.5" />
+                    <span>SPF Wire</span>
+                  </button>
+                )}
+            </div>
           )}
         </div>
 
@@ -1622,18 +1675,42 @@ export function MailAnalysisView({
             </p>
           </div>
           {(mail.dmarc.txtRrsetId || mail.dmarc.negativeNodeId) && (
-            <button
-              type="button"
-              onClick={() =>
-                onJumpToGraphTarget((mail.dmarc.txtRrsetId ?? mail.dmarc.negativeNodeId)!)
-              }
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:border-cyan-500 transition-colors cursor-pointer"
-            >
-              <span>
-                {mail.dmarc.txtRrsetId ? 'Locate DMARC RRset in Graph' : 'Locate NSEC Proof in Graph'}
-              </span>
-              <ArrowUpRight className="w-3.5 h-3.5" />
-            </button>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() =>
+                  onJumpToGraphTarget((mail.dmarc.txtRrsetId ?? mail.dmarc.negativeNodeId)!)
+                }
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:border-cyan-500 transition-colors cursor-pointer"
+              >
+                <span>
+                  {mail.dmarc.txtRrsetId
+                    ? 'Locate DMARC RRset in Graph'
+                    : 'Locate NSEC Proof in Graph'}
+                </span>
+                <ArrowUpRight className="w-3.5 h-3.5" />
+              </button>
+              {onInspectWireQuery &&
+                findWireQueryByGraphTargetId(
+                  mail.dmarc.txtRrsetId ?? mail.dmarc.negativeNodeId,
+                  snapshot
+                ) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const q = findWireQueryByGraphTargetId(
+                        mail.dmarc.txtRrsetId ?? mail.dmarc.negativeNodeId,
+                        snapshot
+                      );
+                      if (q) onInspectWireQuery(q.id, 'dig');
+                    }}
+                    className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-cyan-700 dark:text-cyan-300 hover:border-cyan-500 transition-colors cursor-pointer"
+                  >
+                    <Terminal className="w-3.5 h-3.5" />
+                    <span>DMARC Wire</span>
+                  </button>
+                )}
+            </div>
           )}
         </div>
 
@@ -1887,7 +1964,17 @@ export function MailAnalysisView({
                 <DkimSelectorCard
                   key={sel.qname}
                   sel={sel}
+                  wireQueryId={
+                    onInspectWireQuery
+                      ? (findWireQueryByGraphTargetId(
+                          sel.txtRrsetId ?? sel.negativeNodeId,
+                          snapshot
+                        )?.id ??
+                        findWireQueryByOwnerAndType(snapshot.queries, sel.qname, 'TXT')?.id)
+                      : undefined
+                  }
                   onJumpToGraphTarget={onJumpToGraphTarget}
+                  onInspectWireQuery={onInspectWireQuery}
                 />
               ))}
             </div>

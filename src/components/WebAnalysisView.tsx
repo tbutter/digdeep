@@ -28,6 +28,11 @@ import type {
   WebCtAnalysis,
   WebSvcbRecordDetail,
 } from '../dns/types';
+import {
+  type FocusedWireSubMode,
+  findWireQueryByGraphTargetId,
+  findWireQueryByOwnerAndType,
+} from '../dns/wireQueryFilter';
 import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
 import { StatusBadge } from './StatusBadge';
 
@@ -237,11 +242,15 @@ function getCtCertVerdictMeta(verdict: CtCertificateEntry['caaAuthorized']): {
 function SvcbRecordCard({
   rec,
   onJumpToGraphTarget,
+  onInspectWireQuery,
   rrsetId,
+  wireQueryId,
 }: {
   rec: WebSvcbRecordDetail;
   onJumpToGraphTarget: (targetId: string) => void;
+  onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
   rrsetId?: string;
+  wireQueryId?: string;
 }) {
   return (
     <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-3 space-y-2.5">
@@ -266,16 +275,28 @@ function SvcbRecordCard({
           <span className="font-mono text-[11px] text-slate-400">TTL {rec.ttl}s</span>
         </div>
 
-        {rrsetId && (
-          <button
-            type="button"
-            onClick={() => onJumpToGraphTarget(rrsetId)}
-            className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 hover:border-cyan-500 px-2 py-0.5 text-[11px] font-medium text-cyan-700 dark:text-cyan-300 cursor-pointer"
-          >
-            <span>Inspect in Graph</span>
-            <ArrowUpRight className="w-3 h-3" />
-          </button>
-        )}
+        <div className="flex flex-wrap items-center gap-1.5">
+          {rrsetId && (
+            <button
+              type="button"
+              onClick={() => onJumpToGraphTarget(rrsetId)}
+              className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 hover:border-cyan-500 px-2 py-0.5 text-[11px] font-medium text-cyan-700 dark:text-cyan-300 cursor-pointer"
+            >
+              <span>Inspect in Graph</span>
+              <ArrowUpRight className="w-3 h-3" />
+            </button>
+          )}
+          {wireQueryId && onInspectWireQuery && (
+            <button
+              type="button"
+              onClick={() => onInspectWireQuery(wireQueryId, 'dig')}
+              className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-2 py-0.5 text-[11px] font-medium text-slate-700 dark:text-slate-200 cursor-pointer"
+            >
+              <Terminal className="w-3 h-3 text-cyan-500" />
+              <span>Wire</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* SvcParams Grid */}
@@ -443,11 +464,13 @@ export function WebAnalysisView({
   snapshot,
   onJumpToGraphTarget,
   onOpenChainGraph,
+  onInspectWireQuery,
   onTraceDomain,
 }: {
   snapshot: AnalysisSnapshot;
   onJumpToGraphTarget: (targetId: string) => void;
   onOpenChainGraph: () => void;
+  onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
   onTraceDomain?: (domain: string) => void;
 }) {
   seedIpAsnCacheFromSnapshot(snapshot);
@@ -673,7 +696,17 @@ export function WebAnalysisView({
                 key={`${rec.ownerName}-${rec.rrtypeName}-${rec.priority}-${idx}`}
                 rec={rec}
                 onJumpToGraphTarget={onJumpToGraphTarget}
+                onInspectWireQuery={onInspectWireQuery}
                 rrsetId={web.httpsRrsetId}
+                wireQueryId={
+                  onInspectWireQuery
+                    ? findWireQueryByOwnerAndType(
+                        snapshot.queries,
+                        rec.ownerName,
+                        rec.rrtypeName
+                      )?.id
+                    : undefined
+                }
               />
             ))}
           </div>
@@ -738,16 +771,35 @@ export function WebAnalysisView({
                       )}
                       <StatusBadge status={hop.dnssecStatus} size="sm" />
                     </div>
-                    {hop.rrsetId && (
-                      <button
-                        type="button"
-                        onClick={() => onJumpToGraphTarget(hop.rrsetId!)}
-                        className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 hover:border-cyan-500 px-2 py-0.5 text-[11px] font-medium text-cyan-700 dark:text-cyan-300 cursor-pointer"
-                      >
-                        <span>Inspect in Graph</span>
-                        <ArrowUpRight className="w-3 h-3" />
-                      </button>
-                    )}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {hop.rrsetId && (
+                        <button
+                          type="button"
+                          onClick={() => onJumpToGraphTarget(hop.rrsetId!)}
+                          className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 hover:border-cyan-500 px-2 py-0.5 text-[11px] font-medium text-cyan-700 dark:text-cyan-300 cursor-pointer"
+                        >
+                          <span>Inspect in Graph</span>
+                          <ArrowUpRight className="w-3 h-3" />
+                        </button>
+                      )}
+                      {onInspectWireQuery &&
+                        (findWireQueryByGraphTargetId(hop.rrsetId, snapshot) ??
+                          findWireQueryByOwnerAndType(snapshot.queries, hop.name, 'CAA')) && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const q =
+                                findWireQueryByGraphTargetId(hop.rrsetId, snapshot) ??
+                                findWireQueryByOwnerAndType(snapshot.queries, hop.name, 'CAA');
+                              if (q) onInspectWireQuery(q.id, 'dig');
+                            }}
+                            className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-2 py-0.5 text-[11px] font-medium text-slate-700 dark:text-slate-200 cursor-pointer"
+                          >
+                            <Terminal className="w-3 h-3 text-cyan-500" />
+                            <span>Wire</span>
+                          </button>
+                        )}
+                    </div>
                   </div>
 
                   <div className="space-y-1.5">
