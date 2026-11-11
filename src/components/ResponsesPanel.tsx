@@ -55,12 +55,19 @@ const DETECTED_FORMAT_LABELS: Record<'doh-url' | 'hex-dump' | 'hex' | 'base64url
   base64url: 'Base64 / Base64url',
 };
 
+export interface ExternalCustomWireRequest {
+  payload: string;
+  seq: number;
+}
+
 export function ResponsesPanel({
   snapshot,
   focusedQuery = null,
+  externalCustomWire = null,
 }: {
   snapshot: AnalysisSnapshot;
   focusedQuery?: FocusedWireQueryRequest | null;
+  externalCustomWire?: ExternalCustomWireRequest | null;
 }) {
   seedIpAsnCacheFromSnapshot(snapshot);
   const [selectedId, setSelectedId] = useState<string>(() => {
@@ -70,17 +77,30 @@ export function ResponsesPanel({
     return snapshot.queries[0]?.id ?? '';
   });
   const [mode, setMode] = useState<'dig' | 'zonefile' | 'hex-resp' | 'hex-req' | 'custom-decode'>(
-    () => focusedQuery?.mode ?? 'dig'
+    () =>
+      externalCustomWire
+        ? 'custom-decode'
+        : (focusedQuery?.mode ?? (snapshot.queries.length === 0 ? 'custom-decode' : 'dig'))
   );
   const [category, setCategory] = useState<WireQueryFilterCategory>('all');
   const [searchText, setSearchText] = useState<string>('');
   const [cliTool, setCliTool] = useState<'dig' | 'delv' | 'kdig'>('dig');
   const [copied, setCopied] = useState(false);
   const [copiedCli, setCopiedCli] = useState(false);
-  const [customWireInput, setCustomWireInput] = useState<string>('');
+  const [customWireInput, setCustomWireInput] = useState<string>(
+    () => externalCustomWire?.payload ?? ''
+  );
   const [customSubView, setCustomSubView] = useState<'dissector' | 'dig'>('dissector');
   const rowRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const prevSnapshotIdRef = useRef<string>(snapshot.id);
+
+  // Sync external omnibox-pasted ?dns= / wire hex payloads into the Offline Wire Dissector
+  useEffect(() => {
+    if (!externalCustomWire) return;
+    setCustomWireInput(externalCustomWire.payload);
+    setMode('custom-decode');
+    setCustomSubView('dissector');
+  }, [externalCustomWire?.seq, externalCustomWire?.payload, externalCustomWire]);
 
   // Reset filters and selection when switching to a different snapshot while mounted
   useEffect(() => {
@@ -460,58 +480,62 @@ export function ResponsesPanel({
 
       {/* Right: Packet Presentation (`dig`, RFC 1035 `.zone`, Interactive Wire Dissector & Offline Decoder) */}
       <div className="lg:col-span-7 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 overflow-hidden flex flex-col max-h-[80vh]">
-        {selectedLog ? (
+        {selectedLog || mode === 'custom-decode' ? (
           <>
             <div className="px-4 py-2.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
               <div className="flex flex-wrap items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => setMode('dig')}
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer ${
-                    mode === 'dig'
-                      ? 'bg-cyan-500 text-slate-950 font-semibold'
-                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                  }`}
-                >
-                  <Terminal className="w-3.5 h-3.5" />
-                  dig Output
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setMode('zonefile')}
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer ${
-                    mode === 'zonefile'
-                      ? 'bg-cyan-500 text-slate-950 font-semibold'
-                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                  }`}
-                >
-                  <FileCode2 className="w-3.5 h-3.5" />
-                  Zonefile (.zone)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setMode('hex-resp')}
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer ${
-                    mode === 'hex-resp'
-                      ? 'bg-cyan-500 text-slate-950 font-semibold'
-                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                  }`}
-                >
-                  <Binary className="w-3.5 h-3.5" />
-                  Response Wire ({selectedLog.packet.wireSize}B)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setMode('hex-req')}
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer ${
-                    mode === 'hex-req'
-                      ? 'bg-cyan-500 text-slate-950 font-semibold'
-                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                  }`}
-                >
-                  <Binary className="w-3.5 h-3.5" />
-                  Request Wire
-                </button>
+                {selectedLog && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setMode('dig')}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer ${
+                        mode === 'dig'
+                          ? 'bg-cyan-500 text-slate-950 font-semibold'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      <Terminal className="w-3.5 h-3.5" />
+                      dig Output
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMode('zonefile')}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer ${
+                        mode === 'zonefile'
+                          ? 'bg-cyan-500 text-slate-950 font-semibold'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      <FileCode2 className="w-3.5 h-3.5" />
+                      Zonefile (.zone)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMode('hex-resp')}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer ${
+                        mode === 'hex-resp'
+                          ? 'bg-cyan-500 text-slate-950 font-semibold'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      <Binary className="w-3.5 h-3.5" />
+                      Response Wire ({selectedLog.packet.wireSize}B)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMode('hex-req')}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer ${
+                        mode === 'hex-req'
+                          ? 'bg-cyan-500 text-slate-950 font-semibold'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      <Binary className="w-3.5 h-3.5" />
+                      Request Wire
+                    </button>
+                  </>
+                )}
                 <button
                   type="button"
                   onClick={() => setMode('custom-decode')}
@@ -527,15 +551,17 @@ export function ResponsesPanel({
               </div>
 
               <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => downloadTextFile(zonefileText, zoneFilename)}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 font-medium cursor-pointer"
-                  title={`Download RFC 1035 Master Zonefile (${zoneFilename})`}
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>Export .zone</span>
-                </button>
+                {(selectedLog || snapshot.zones.length > 0) && (
+                  <button
+                    type="button"
+                    onClick={() => downloadTextFile(zonefileText, zoneFilename)}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 font-medium cursor-pointer"
+                    title={`Download RFC 1035 Master Zonefile (${zoneFilename})`}
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Export .zone</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => {
@@ -640,7 +666,7 @@ export function ResponsesPanel({
                   })}
                 </pre>
               ) : mode === 'hex-resp' || mode === 'hex-req' ? (
-                activeWireDissection?.dissected ? (
+                selectedLog && activeWireDissection?.dissected ? (
                   <WirePacketDissectorView
                     key={`${selectedLog.id}-${mode}`}
                     dissected={activeWireDissection.dissected}
@@ -671,17 +697,19 @@ export function ResponsesPanel({
                         </div>
                       </div>
                       <div className="flex flex-wrap items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const bytes = base64ToBytes(selectedLog.wireBase64);
-                            setCustomWireInput(bytesToBase64Url(bytes));
-                          }}
-                          className="rounded border border-slate-700 hover:border-cyan-500 bg-slate-950 px-2 py-1 text-[11px] font-medium text-slate-200 cursor-pointer"
-                        >
-                          Load Selected Response
-                        </button>
-                        {selectedLog.requestWireBase64 && (
+                        {selectedLog && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const bytes = base64ToBytes(selectedLog.wireBase64);
+                              setCustomWireInput(bytesToBase64Url(bytes));
+                            }}
+                            className="rounded border border-slate-700 hover:border-cyan-500 bg-slate-950 px-2 py-1 text-[11px] font-medium text-slate-200 cursor-pointer"
+                          >
+                            Load Selected Response
+                          </button>
+                        )}
+                        {selectedLog?.requestWireBase64 && (
                           <button
                             type="button"
                             onClick={() => {

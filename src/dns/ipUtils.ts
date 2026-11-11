@@ -289,6 +289,51 @@ export function ipToCymruOriginQname(rawIp: string): string | null {
 }
 
 /**
+ * Strips bracketed IPv6 (`[2606:4700:4700::1111]:443`), IPv6 zone IDs (`fe80::1%eth0`),
+ * and IPv4 `:port` suffixes (`1.1.1.1:853`) when the underlying literal is a valid IPv4/IPv6 address.
+ */
+export function stripIpEndpointWrappers(raw: string): { ipCandidate: string; wasWrapped: boolean } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { ipCandidate: '', wasWrapped: false };
+
+  // 1. Bracketed IPv6 `[addr]`, `[addr]:port`, or `[addr%zone]:port`
+  const bracketMatch = /^\[([^\]]+)\](?::(\d{1,5}))?$/.exec(trimmed);
+  if (bracketMatch) {
+    if (bracketMatch[2] !== undefined) {
+      const port = Number.parseInt(bracketMatch[2], 10);
+      if (Number.isNaN(port) || port < 0 || port > 65535) {
+        return { ipCandidate: trimmed, wasWrapped: false };
+      }
+    }
+    const innerNoZone = bracketMatch[1].split('%')[0] ?? bracketMatch[1];
+    const v6 = parseIpv6Groups(innerNoZone);
+    if (v6) {
+      return { ipCandidate: formatCanonicalIpv6(v6), wasWrapped: true };
+    }
+  }
+
+  // 2. Unbracketed IPv6 with RFC 4007 `%zone` identifier (e.g. `2606:4700:4700::1111%eth0`)
+  if (trimmed.includes(':') && trimmed.includes('%') && !trimmed.includes('/')) {
+    const noZone = trimmed.split('%')[0] ?? '';
+    const v6 = parseIpv6Groups(noZone);
+    if (v6) {
+      return { ipCandidate: formatCanonicalIpv6(v6), wasWrapped: true };
+    }
+  }
+
+  // 3. IPv4 with `:port` suffix (e.g. `1.1.1.1:853`)
+  const v4PortMatch = /^(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})$/.exec(trimmed);
+  if (v4PortMatch) {
+    const port = Number.parseInt(v4PortMatch[2], 10);
+    if (!Number.isNaN(port) && port >= 0 && port <= 65535 && parseIpv4Octets(v4PortMatch[1])) {
+      return { ipCandidate: v4PortMatch[1], wasWrapped: true };
+    }
+  }
+
+  return { ipCandidate: trimmed, wasWrapped: false };
+}
+
+/**
  * Detects whether a user search input or snapshot target name represents an IPv4 address,
  * IPv6 address, or reverse `.in-addr.arpa` / `.ip6.arpa` host query.
  */
@@ -296,8 +341,10 @@ export function parseReverseIpInput(raw: string): ParsedReverseIpTarget | null {
   const trimmed = raw.trim();
   if (!trimmed || trimmed === '.') return null;
 
+  const { ipCandidate } = stripIpEndpointWrappers(trimmed);
+
   // 1. Check raw IPv4 literal
-  const v4 = parseIpv4Octets(trimmed);
+  const v4 = parseIpv4Octets(ipCandidate);
   if (v4) {
     const ip = v4.join('.');
     const arpaFqdn = `${[...v4].reverse().join('.')}.in-addr.arpa.`;
@@ -315,7 +362,7 @@ export function parseReverseIpInput(raw: string): ParsedReverseIpTarget | null {
   }
 
   // 2. Check raw IPv6 literal
-  const v6 = parseIpv6Groups(trimmed);
+  const v6 = parseIpv6Groups(ipCandidate);
   if (v6) {
     const ip = formatCanonicalIpv6(v6);
     const arpaFqdn = ipToReverseArpa(ip)!;

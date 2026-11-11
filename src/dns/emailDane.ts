@@ -81,12 +81,27 @@ export function parseEmailDaneInput(rawInput: string): ParsedEmailDaneInput | nu
   let trimmed = rawInput.trim();
   if (!trimmed) return null;
 
-  // Strip optional `<...>` angle brackets or `mailto:` URI scheme
-  if (trimmed.startsWith('<') && trimmed.endsWith('>') && trimmed.length > 2) {
-    trimmed = trimmed.slice(1, -1).trim();
-  }
+  // Strip optional RFC 5322 header label (`From:`, `To:`, etc.), `<...>` angle brackets, or `mailto:` URI scheme
+  trimmed = trimmed.replace(/^(?:from|to|cc|bcc|reply-to|sender)\s*:\s*/i, '').trim();
+  const extractAngleAddr = (s: string): string => {
+    if (!s.endsWith('>')) return s;
+    const m = /^[^<>]*<([^<>]+)>\s*$/.exec(s);
+    if (m && (m[1].includes('@') || /^mailto:/i.test(m[1].trim()))) {
+      return m[1].trim();
+    }
+    return s;
+  };
+  trimmed = extractAngleAddr(trimmed);
   if (/^mailto:/i.test(trimmed)) {
-    trimmed = trimmed.slice(7).split('?')[0]?.trim() ?? '';
+    let afterMailto = trimmed.slice(7).split(/[?#]/)[0]?.trim() ?? '';
+    if (afterMailto.includes('%')) {
+      try {
+        afterMailto = decodeURIComponent(afterMailto).trim();
+      } catch {
+        // keep raw if malformed percent-encoding
+      }
+    }
+    trimmed = extractAngleAddr(afterMailto);
   }
 
   // 1. Check pre-hashed `<56-hex>._openpgpkey.<domain>` or `<56-hex>._smimecert.<domain>`

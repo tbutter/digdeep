@@ -9,6 +9,7 @@ import {
   Mail,
   Moon,
   Network,
+  Pin,
   Play,
   Radio,
   RefreshCw,
@@ -16,11 +17,22 @@ import {
   Settings,
   ShieldCheck,
   SlidersHorizontal,
+  Sparkles,
   Sun,
   Terminal,
   WifiOff,
+  X,
 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
 import { AuditPanel } from './components/AuditPanel';
 import { ChainGraphView } from './components/ChainGraphView';
 import { ConsensusView } from './components/ConsensusView';
@@ -29,7 +41,7 @@ import { EmailDaneCard } from './components/EmailDaneCard';
 import { HistoryPanel } from './components/HistoryPanel';
 import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './components/IpHoverBadge';
 import { MailAnalysisView } from './components/MailAnalysisView';
-import { ResponsesPanel } from './components/ResponsesPanel';
+import { type ExternalCustomWireRequest, ResponsesPanel } from './components/ResponsesPanel';
 import { ReverseDnsCard } from './components/ReverseDnsCard';
 import { SettingsModal } from './components/SettingsModal';
 import { StatusBadge, STATUS_META } from './components/StatusBadge';
@@ -48,6 +60,13 @@ import {
   splitDomainByPublicSuffix,
   subscribePublicSuffixCache,
 } from './dns/mailAnalyzer';
+import {
+  buildOfflineWireSnapshot,
+  filterExampleTraces,
+  filterHistorySuggestions,
+  formatRelativeTime,
+  parseOmniboxInput,
+} from './dns/omniboxParse';
 import type { AnalysisMode, AnalysisProgress, AnalysisSnapshot } from './dns/types';
 import { runWebAnalysis } from './dns/webAnalyzer';
 import type { FocusedWireQueryRequest, FocusedWireSubMode } from './dns/wireQueryFilter';
@@ -242,6 +261,12 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [examplesOpen, setExamplesOpen] = useState(false);
+  const [autocompleteOpen, setAutocompleteOpen] = useState(false);
+  const [activeSuggestionIdx, setActiveSuggestionIdx] = useState(-1);
+  const [omniboxNotice, setOmniboxNotice] = useState<string | null>(null);
+  const [externalCustomWire, setExternalCustomWire] = useState<ExternalCustomWireRequest | null>(
+    null
+  );
   const examplesContainerRef = useRef<HTMLDivElement | null>(null);
   const [focusedGraphTarget, setFocusedGraphTarget] = useState<string | null>(
     initialBootState.focusedTarget
@@ -317,6 +342,8 @@ export function App() {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setExamplesOpen(false);
+        setAutocompleteOpen(false);
+        setActiveSuggestionIdx(-1);
       }
       if (
         e.key === '/' &&
@@ -333,20 +360,22 @@ export function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  // Close examples overlay when clicking outside
+  // Close examples / autocomplete overlay when clicking outside
   useEffect(() => {
-    if (!examplesOpen) return;
+    if (!examplesOpen && !autocompleteOpen) return;
     const onPointerDown = (e: MouseEvent) => {
       if (
         examplesContainerRef.current &&
         !examplesContainerRef.current.contains(e.target as Node)
       ) {
         setExamplesOpen(false);
+        setAutocompleteOpen(false);
+        setActiveSuggestionIdx(-1);
       }
     };
     document.addEventListener('mousedown', onPointerDown);
     return () => document.removeEventListener('mousedown', onPointerDown);
-  }, [examplesOpen]);
+  }, [examplesOpen, autocompleteOpen]);
 
   const executeAnalysis = useCallback(
     async (
@@ -536,7 +565,7 @@ export function App() {
 
   // Keep browser URL query string in sync as user switches tabs, selects graph elements, or toggles filters
   useEffect(() => {
-    if (!activeSnapshot || loading) return;
+    if (!activeSnapshot || loading || activeSnapshot.id.startsWith('offline-wire-')) return;
     if (typeof window === 'undefined' || !window.history?.replaceState) return;
 
     const url = new URL(window.location.href);
@@ -701,9 +730,264 @@ export function App() {
     untrustedDohPending,
   ]);
 
+  const selectHistorySnapshot = useCallback((snap: AnalysisSnapshot) => {
+    const snapMode: AnalysisMode = snap.mode ?? 'dnssec';
+    setExamplesOpen(false);
+    setAutocompleteOpen(false);
+    setActiveSuggestionIdx(-1);
+    setOmniboxNotice(null);
+    setFocusedGraphTarget(null);
+    setFocusedWireQuery(null);
+    setExternalCustomWire(null);
+    setActiveSnapshot(snap);
+    setAnalysisMode(snapMode);
+    setDomainInput(snap.queriedEmail ?? snap.queriedIp ?? snap.displayDomain);
+    setCustomDkimSelectors(snap.customDkimSelectors ?? []);
+    if (snapMode === 'dnssec') {
+      setSelectedTypes(snap.queryTypes);
+      if (snap.queryTypes.some((t) => (EXTRA_TYPES as readonly string[]).includes(t))) {
+        setShowExtraTypes(true);
+      }
+    }
+    setActiveTab(
+      snapMode === 'mail'
+        ? 'mail'
+        : snapMode === 'web'
+          ? 'web'
+          : snapMode === 'consensus'
+            ? 'consensus'
+            : 'graph'
+    );
+  }, []);
+
+  const openParsedWirePacket = useCallback(
+    (wireParsed: Extract<ReturnType<typeof parseOmniboxInput>, { kind: 'wire-packet' }>) => {
+      setExamplesOpen(false);
+      setAutocompleteOpen(false);
+      setActiveSuggestionIdx(-1);
+      setError(null);
+      setOmniboxNotice(wireParsed.summaryLabel);
+      setExternalCustomWire((prev) => ({
+        payload: wireParsed.wireInput,
+        seq: (prev?.seq ?? 0) + 1,
+      }));
+      setActiveSnapshot((cur) => cur ?? buildOfflineWireSnapshot(wireParsed, settings.dohEndpoint));
+      setActiveTab('responses');
+    },
+    [settings.dohEndpoint]
+  );
+
+  const omniboxHistoryItems = useMemo(() => {
+    if (examplesOpen) {
+      return filterHistorySuggestions(snapshots, '', 5);
+    }
+    if (!autocompleteOpen) return [];
+    return filterHistorySuggestions(snapshots, domainInput, 6);
+  }, [examplesOpen, autocompleteOpen, snapshots, domainInput]);
+
+  const omniboxExampleItems = useMemo(() => {
+    if (examplesOpen) {
+      return EXAMPLE_TRACES;
+    }
+    if (!autocompleteOpen) return [];
+    if (domainInput.trim().length === 0) {
+      return EXAMPLE_TRACES.slice(0, 6);
+    }
+    return filterExampleTraces(EXAMPLE_TRACES, domainInput, 4);
+  }, [examplesOpen, autocompleteOpen, domainInput]);
+
+  const showOmniboxDropdown =
+    examplesOpen ||
+    (autocompleteOpen && (omniboxHistoryItems.length > 0 || omniboxExampleItems.length > 0));
+
+  const handleOmniboxPaste = (e: ClipboardEvent<HTMLInputElement>) => {
+    const pasted = e.clipboardData?.getData('text') ?? '';
+    if (!pasted) return;
+    const el = e.currentTarget;
+    const selStart = el.selectionStart ?? 0;
+    const selEnd = el.selectionEnd ?? domainInput.length;
+    const replacesFullInput =
+      domainInput.trim().length === 0 || (selStart === 0 && selEnd === domainInput.length);
+
+    const parsed = parseOmniboxInput(pasted, settings.customDohEndpoints);
+
+    if (parsed.kind === 'wire-packet') {
+      e.preventDefault();
+      openParsedWirePacket(parsed);
+      return;
+    }
+
+    if (parsed.kind === 'cli-command') {
+      e.preventDefault();
+      setExamplesOpen(false);
+      setAutocompleteOpen(false);
+      setActiveSuggestionIdx(-1);
+      setDomainInput(parsed.target);
+      setAnalysisMode('dnssec');
+      if (parsed.rrTypes && parsed.rrTypes.length > 0) {
+        setSelectedTypes(parsed.rrTypes);
+        if (parsed.rrTypes.some((t) => !(PRIMARY_TYPES as readonly string[]).includes(t))) {
+          setShowExtraTypes(true);
+        }
+      }
+      if (parsed.dohEndpoint) {
+        if (parsed.isUntrustedCustomDoh) {
+          setUntrustedDohPending(parsed.dohEndpoint);
+        } else {
+          setUntrustedDohPending(null);
+          const nextSettings: UserSettings = { ...settings, dohEndpoint: parsed.dohEndpoint };
+          setSettings(nextSettings);
+          saveUserSettings(nextSettings);
+        }
+      }
+      setOmniboxNotice(parsed.summaryLabel);
+      return;
+    }
+
+    if (replacesFullInput && parsed.wasTransformed) {
+      e.preventDefault();
+      setDomainInput(parsed.target);
+      setActiveSuggestionIdx(-1);
+      if (parsed.kind === 'email' && analysisMode === 'dnssec') {
+        setSelectedTypes(['OPENPGPKEY', 'SMIMEA']);
+        setShowExtraTypes(true);
+      } else if (parsed.kind === 'ip' && analysisMode === 'dnssec') {
+        setSelectedTypes(['PTR']);
+        setShowExtraTypes(true);
+      }
+      if (parsed.summaryLabel) {
+        setOmniboxNotice(parsed.summaryLabel);
+      }
+    }
+  };
+
+  const handleOmniboxKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    const totalItems = omniboxHistoryItems.length + omniboxExampleItems.length;
+    if (e.key === 'ArrowDown') {
+      if (!showOmniboxDropdown) {
+        if (snapshots.length > 0 || EXAMPLE_TRACES.length > 0) {
+          e.preventDefault();
+          setAutocompleteOpen(true);
+          setActiveSuggestionIdx(0);
+        }
+        return;
+      }
+      if (totalItems > 0) {
+        e.preventDefault();
+        setActiveSuggestionIdx((prev) => (prev + 1) % totalItems);
+      }
+      return;
+    }
+
+    if (e.key === 'ArrowUp' && showOmniboxDropdown && totalItems > 0) {
+      e.preventDefault();
+      setActiveSuggestionIdx((prev) => (prev <= 0 ? totalItems - 1 : prev - 1));
+      return;
+    }
+
+    if (
+      e.key === 'Enter' &&
+      showOmniboxDropdown &&
+      activeSuggestionIdx >= 0 &&
+      activeSuggestionIdx < totalItems
+    ) {
+      e.preventDefault();
+      if (activeSuggestionIdx < omniboxHistoryItems.length) {
+        selectHistorySnapshot(omniboxHistoryItems[activeSuggestionIdx]);
+      } else {
+        const ex = omniboxExampleItems[activeSuggestionIdx - omniboxHistoryItems.length];
+        if (ex) {
+          const exMode: AnalysisMode = ex.mode ?? 'dnssec';
+          setExamplesOpen(false);
+          setAutocompleteOpen(false);
+          setActiveSuggestionIdx(-1);
+          setOmniboxNotice(null);
+          setAnalysisMode(exMode);
+          setDomainInput(ex.domain);
+          if (exMode === 'dnssec') {
+            setSelectedTypes(ex.types);
+          }
+          void executeAnalysis(ex.domain, ex.types, {
+            modeOverride: exMode,
+            pushHistory: true,
+          });
+        }
+      }
+      return;
+    }
+
+    if (e.key === 'Escape') {
+      if (showOmniboxDropdown) {
+        e.preventDefault();
+        setExamplesOpen(false);
+        setAutocompleteOpen(false);
+        setActiveSuggestionIdx(-1);
+      } else if (omniboxNotice) {
+        setOmniboxNotice(null);
+      }
+    }
+  };
+
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    void executeAnalysis(domainInput, selectedTypes, { pushHistory: true });
+    setExamplesOpen(false);
+    setAutocompleteOpen(false);
+    setActiveSuggestionIdx(-1);
+
+    const parsed = parseOmniboxInput(domainInput, settings.customDohEndpoints);
+
+    if (parsed.kind === 'wire-packet') {
+      openParsedWirePacket(parsed);
+      return;
+    }
+
+    if (parsed.kind === 'cli-command') {
+      const nextTypes =
+        parsed.rrTypes && parsed.rrTypes.length > 0 ? parsed.rrTypes : selectedTypes;
+      setDomainInput(parsed.target);
+      setAnalysisMode('dnssec');
+      if (parsed.rrTypes && parsed.rrTypes.length > 0) {
+        setSelectedTypes(parsed.rrTypes);
+        if (parsed.rrTypes.some((t) => !(PRIMARY_TYPES as readonly string[]).includes(t))) {
+          setShowExtraTypes(true);
+        }
+      }
+      setOmniboxNotice(parsed.summaryLabel);
+
+      if (parsed.dohEndpoint) {
+        if (parsed.isUntrustedCustomDoh) {
+          setUntrustedDohPending(parsed.dohEndpoint);
+          return;
+        }
+        setUntrustedDohPending(null);
+        const nextSettings: UserSettings = { ...settings, dohEndpoint: parsed.dohEndpoint };
+        setSettings(nextSettings);
+        saveUserSettings(nextSettings);
+        void executeAnalysis(parsed.target, nextTypes, {
+          modeOverride: 'dnssec',
+          dohEndpointOverride: parsed.dohEndpoint,
+          pushHistory: true,
+        });
+        return;
+      }
+
+      void executeAnalysis(parsed.target, nextTypes, {
+        modeOverride: 'dnssec',
+        pushHistory: true,
+      });
+      return;
+    }
+
+    const normalizedTarget = parsed.target;
+    if (parsed.wasTransformed) {
+      setDomainInput(normalizedTarget);
+      if (parsed.summaryLabel) {
+        setOmniboxNotice(parsed.summaryLabel);
+      }
+    } else {
+      setOmniboxNotice(null);
+    }
+    void executeAnalysis(normalizedTarget, selectedTypes, { pushHistory: true });
   };
 
   const handleSwitchMode = (nextMode: AnalysisMode) => {
@@ -906,7 +1190,7 @@ export function App() {
                   ref={inputOverlayRef}
                   aria-hidden="true"
                   data-testid="search-psl-overlay"
-                  className="pointer-events-none absolute inset-0 flex items-center rounded-xl border border-transparent pl-10 pr-16 py-2.5 font-mono text-sm whitespace-pre overflow-hidden select-none z-10"
+                  className="pointer-events-none absolute inset-0 flex items-center rounded-xl border border-transparent pl-10 pr-24 py-2.5 font-mono text-sm whitespace-pre overflow-hidden select-none z-10"
                 >
                   <span className="text-slate-900 dark:text-slate-100">
                     {searchSuffixParts.leadingWhitespace}
@@ -928,20 +1212,47 @@ export function App() {
                 ref={inputRef}
                 type="text"
                 value={domainInput}
-                onChange={(e) => setDomainInput(e.target.value)}
+                onFocus={() => setAutocompleteOpen(true)}
+                onChange={(e) => {
+                  setDomainInput(e.target.value);
+                  setOmniboxNotice(null);
+                  setActiveSuggestionIdx(-1);
+                  setAutocompleteOpen(true);
+                }}
+                onPaste={handleOmniboxPaste}
+                onKeyDown={handleOmniboxKeyDown}
                 onScroll={(e) => {
                   if (inputOverlayRef.current) {
                     inputOverlayRef.current.scrollLeft = e.currentTarget.scrollLeft;
                   }
                 }}
-                placeholder="Enter domain, email, or IPv4/IPv6 (e.g. digdeep.butter.eu, paul@nohats.ca, 1.1.1.1, .) — press / to focus"
-                className={`w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 pl-10 pr-16 py-2.5 font-mono text-sm placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20 ${
+                aria-label="Search domain, URL, email, IP, CLI command, or DNS wire packet"
+                placeholder="Domain, URL, email, IP, dig command, or ?dns= packet — press / to focus"
+                className={`w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 pl-10 pr-24 py-2.5 font-mono text-sm placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20 ${
                   searchSuffixParts
                     ? 'text-transparent caret-slate-900 dark:caret-slate-100 selection:bg-cyan-500/25 selection:text-transparent'
                     : 'text-slate-900 dark:text-slate-100'
                 }`}
               />
               <div className="absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1 z-20">
+                {domainInput.length > 0 && (
+                  <button
+                    type="button"
+                    data-testid="omnibox-clear-button"
+                    aria-label="Clear search input"
+                    title="Clear search input"
+                    onClick={() => {
+                      setDomainInput('');
+                      setOmniboxNotice(null);
+                      setActiveSuggestionIdx(-1);
+                      setAutocompleteOpen(true);
+                      inputRef.current?.focus();
+                    }}
+                    className="inline-flex items-center justify-center rounded p-0.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
                 <kbd
                   title="Press / to focus search"
                   className="hidden sm:inline-block rounded border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-400 select-none"
@@ -950,10 +1261,14 @@ export function App() {
                 </kbd>
                 <button
                   type="button"
-                  onClick={() => setExamplesOpen((v) => !v)}
+                  onClick={() => {
+                    setExamplesOpen((v) => !v);
+                    setAutocompleteOpen(false);
+                    setActiveSuggestionIdx(-1);
+                  }}
                   aria-label="Example DNS traces"
-                  aria-expanded={examplesOpen}
-                  title="Example DNS & IP traces"
+                  aria-expanded={showOmniboxDropdown}
+                  title="Recent history & example DNS traces"
                   className={`inline-flex items-center justify-center rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold transition-colors cursor-pointer ${
                     examplesOpen
                       ? 'border-cyan-500 bg-cyan-500/15 text-cyan-600 dark:text-cyan-300'
@@ -964,65 +1279,151 @@ export function App() {
                 </button>
               </div>
 
-              {examplesOpen && (
+              {showOmniboxDropdown && (
                 <div
                   role="dialog"
                   aria-label="Example DNS traces"
-                  className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xl p-3 space-y-2"
+                  data-testid="omnibox-dropdown"
+                  className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xl p-3 space-y-3 max-h-[70vh] overflow-y-auto"
                 >
-                  <div className="flex items-center justify-between gap-2 pb-1 border-b border-slate-100 dark:border-slate-800">
-                    <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                      Example DNS &amp; IP Traces
-                    </span>
-                    <span className="text-[10px] text-slate-400">Click any example to run</span>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                    {EXAMPLE_TRACES.map((ex) => {
-                      const exMode: AnalysisMode = ex.mode ?? 'dnssec';
-                      const href =
-                        exMode === 'mail'
-                          ? `?name=${encodeURIComponent(ex.domain)}&mode=mail`
-                          : exMode === 'web'
-                            ? `?name=${encodeURIComponent(ex.domain)}&mode=web`
-                            : exMode === 'consensus'
-                              ? `?name=${encodeURIComponent(ex.domain)}&mode=consensus`
-                              : `?name=${encodeURIComponent(ex.domain)}&types=${ex.types.join(',')}`;
-                      return (
-                        <a
-                          key={`${ex.domain}-${exMode}-${ex.badge}`}
-                          href={href}
-                          onClick={(e) => {
-                            if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0)
-                              return;
-                            e.preventDefault();
-                            setExamplesOpen(false);
-                            setAnalysisMode(exMode);
-                            setDomainInput(ex.domain);
-                            if (exMode === 'dnssec') {
-                              setSelectedTypes(ex.types);
-                            }
-                            void executeAnalysis(ex.domain, ex.types, {
-                              modeOverride: exMode,
-                              pushHistory: true,
-                            });
-                          }}
-                          className="group flex items-start justify-between gap-2 rounded-lg border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 hover:border-cyan-500/60 hover:bg-cyan-500/5 px-2.5 py-2 transition-colors"
-                        >
-                          <div className="min-w-0">
-                            <div className="font-mono text-xs font-semibold text-cyan-700 dark:text-cyan-300 group-hover:underline truncate">
-                              {ex.domain}
-                            </div>
-                            <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
-                              {ex.description}
-                            </div>
-                          </div>
-                          <span className="shrink-0 rounded bg-slate-200/80 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] font-medium text-slate-600 dark:text-slate-300">
-                            {ex.badge}
-                          </span>
-                        </a>
-                      );
-                    })}
-                  </div>
+                  {omniboxHistoryItems.length > 0 && (
+                    <div className="space-y-1.5" data-testid="omnibox-history-section">
+                      <div className="flex items-center justify-between gap-2 pb-1 border-b border-slate-100 dark:border-slate-800">
+                        <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                          <Clock className="w-3 h-3 text-cyan-500" />
+                          <span>Recent Local History</span>
+                        </span>
+                        <span className="text-[10px] text-slate-400">
+                          ↑↓ navigate · Enter to open
+                        </span>
+                      </div>
+                      <div className="space-y-1">
+                        {omniboxHistoryItems.map((snap, idx) => {
+                          const snapMode: AnalysisMode = snap.mode ?? 'dnssec';
+                          const primaryLabel =
+                            snap.queriedEmail ?? snap.queriedIp ?? snap.displayDomain;
+                          const modePill =
+                            snapMode === 'mail'
+                              ? 'Mail'
+                              : snapMode === 'web'
+                                ? 'Web'
+                                : snapMode === 'consensus'
+                                  ? 'Consensus'
+                                  : snap.queryTypes.join(', ');
+                          const highlighted = activeSuggestionIdx === idx;
+                          return (
+                            <button
+                              key={snap.id}
+                              type="button"
+                              data-testid="omnibox-history-item"
+                              onMouseEnter={() => setActiveSuggestionIdx(idx)}
+                              onClick={() => selectHistorySnapshot(snap)}
+                              className={`w-full flex items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 text-left transition-colors cursor-pointer ${
+                                highlighted
+                                  ? 'border-cyan-500 bg-cyan-500/10'
+                                  : 'border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 hover:border-cyan-500/60 hover:bg-cyan-500/5'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <StatusBadge status={snap.overallStatus} size="xs" />
+                                <span className="font-mono text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
+                                  {primaryLabel}
+                                </span>
+                                {snap.pinned && (
+                                  <Pin className="w-3 h-3 text-amber-500 shrink-0 fill-current" />
+                                )}
+                              </div>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <span className="rounded bg-slate-200/80 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] font-medium text-slate-600 dark:text-slate-300">
+                                  {modePill}
+                                </span>
+                                <span className="hidden sm:inline rounded bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 px-1.5 py-0.5 font-mono text-[10px]">
+                                  {formatDohShortLabel(snap.dohEndpoint)}
+                                </span>
+                                <span className="font-mono text-[10px] text-slate-400">
+                                  {formatRelativeTime(snap.capturedAt)}
+                                </span>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {omniboxExampleItems.length > 0 && (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2 pb-1 border-b border-slate-100 dark:border-slate-800">
+                        <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                          Example DNS &amp; IP Traces
+                        </span>
+                        <span className="text-[10px] text-slate-400">Click any example to run</span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                        {omniboxExampleItems.map((ex, exIdx) => {
+                          const globalIdx = omniboxHistoryItems.length + exIdx;
+                          const highlighted = activeSuggestionIdx === globalIdx;
+                          const exMode: AnalysisMode = ex.mode ?? 'dnssec';
+                          const href =
+                            exMode === 'mail'
+                              ? `?name=${encodeURIComponent(ex.domain)}&mode=mail`
+                              : exMode === 'web'
+                                ? `?name=${encodeURIComponent(ex.domain)}&mode=web`
+                                : exMode === 'consensus'
+                                  ? `?name=${encodeURIComponent(ex.domain)}&mode=consensus`
+                                  : `?name=${encodeURIComponent(ex.domain)}&types=${ex.types.join(',')}`;
+                          return (
+                            <a
+                              key={`${ex.domain}-${exMode}-${ex.badge}`}
+                              href={href}
+                              onMouseEnter={() => setActiveSuggestionIdx(globalIdx)}
+                              onClick={(e) => {
+                                if (
+                                  e.metaKey ||
+                                  e.ctrlKey ||
+                                  e.shiftKey ||
+                                  e.altKey ||
+                                  e.button !== 0
+                                )
+                                  return;
+                                e.preventDefault();
+                                setExamplesOpen(false);
+                                setAutocompleteOpen(false);
+                                setActiveSuggestionIdx(-1);
+                                setOmniboxNotice(null);
+                                setAnalysisMode(exMode);
+                                setDomainInput(ex.domain);
+                                if (exMode === 'dnssec') {
+                                  setSelectedTypes(ex.types);
+                                }
+                                void executeAnalysis(ex.domain, ex.types, {
+                                  modeOverride: exMode,
+                                  pushHistory: true,
+                                });
+                              }}
+                              className={`group flex items-start justify-between gap-2 rounded-lg border px-2.5 py-2 transition-colors ${
+                                highlighted
+                                  ? 'border-cyan-500 bg-cyan-500/10'
+                                  : 'border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 hover:border-cyan-500/60 hover:bg-cyan-500/5'
+                              }`}
+                            >
+                              <div className="min-w-0">
+                                <div className="font-mono text-xs font-semibold text-cyan-700 dark:text-cyan-300 group-hover:underline truncate">
+                                  {ex.domain}
+                                </div>
+                                <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                                  {ex.description}
+                                </div>
+                              </div>
+                              <span className="shrink-0 rounded bg-slate-200/80 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] font-medium text-slate-600 dark:text-slate-300">
+                                {ex.badge}
+                              </span>
+                            </a>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1053,6 +1454,26 @@ export function App() {
               )}
             </button>
           </form>
+
+          {omniboxNotice && (
+            <div
+              data-testid="omnibox-smart-notice"
+              className="flex items-center justify-between gap-2 rounded-lg border border-fuchsia-500/30 bg-fuchsia-500/10 px-3 py-1.5 text-xs text-fuchsia-800 dark:text-fuchsia-200"
+            >
+              <div className="flex items-center gap-1.5 min-w-0">
+                <Sparkles className="w-3.5 h-3.5 text-fuchsia-500 shrink-0" />
+                <span className="font-mono text-[11px] truncate">{omniboxNotice}</span>
+              </div>
+              <button
+                type="button"
+                aria-label="Dismiss smart-paste notice"
+                onClick={() => setOmniboxNotice(null)}
+                className="rounded p-0.5 text-fuchsia-600 dark:text-fuchsia-300 hover:bg-fuchsia-500/20 cursor-pointer shrink-0"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          )}
 
           {/* Analysis Mode Selector + Contextual Controls */}
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2 text-xs">
@@ -1617,7 +2038,11 @@ export function App() {
             )}
 
             {activeTab === 'responses' && (
-              <ResponsesPanel snapshot={activeSnapshot} focusedQuery={focusedWireQuery} />
+              <ResponsesPanel
+                snapshot={activeSnapshot}
+                focusedQuery={focusedWireQuery}
+                externalCustomWire={externalCustomWire}
+              />
             )}
 
             {activeTab === 'zones' && <ZonesPanel snapshot={activeSnapshot} />}

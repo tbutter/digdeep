@@ -251,10 +251,10 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v27');
+    expect(swCode).toContain('digdeep-shell-v28');
     expect(swCode).toContain('application/dns-message');
 
-    // Verify App renders offline badge when navigator.onLine is false
+    // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
     Object.defineProperty(globalThis, 'window', {
       value: {
         location: { search: '', href: 'https://example.test/' },
@@ -273,8 +273,11 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       const appHtml = renderToStaticMarkup(<App />);
       expect(appHtml).toContain('Offline · Local History');
       expect(appHtml).toContain('value="digdeep.butter.eu"');
+      expect(appHtml).toContain('data-testid="omnibox-clear-button"');
+      expect(appHtml).toContain('aria-label="Clear search input"');
       expect(appHtml).toContain('data-testid="search-public-suffix"');
       expect(appHtml).toContain('>eu</span>');
+      expect(appHtml).not.toContain('data-testid="omnibox-dropdown"');
       expect(appHtml).not.toContain('Presets:');
     } finally {
       if (prevOnline) {

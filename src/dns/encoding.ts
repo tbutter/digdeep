@@ -179,16 +179,32 @@ export function unescapePresentationLabel(label: string, canonicalLower = true):
 export function normalizeFqdn(name: string): string {
   const trimmed = name.trim();
   if (!trimmed || trimmed === '.') return '.';
-  // Strip protocol or path if someone pastes a URL
+  // Strip protocol, credentials, port, path, query, or fragment if someone pastes a URL or host:port
   let cleaned = trimmed;
   if (cleaned.includes('://')) {
     try {
-      cleaned = new URL(cleaned).hostname;
+      cleaned = new URL(cleaned).hostname.replace(/^\[|\]$/g, '');
     } catch {
-      cleaned = cleaned.replace(/^https?:\/\//i, '').split('/')[0];
+      cleaned = cleaned
+        .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+        .replace(/^[^@/?#]+@/, '')
+        .split(/[/?#]/)[0];
+      const hostPort = /^([^:]+):(\d{1,5})$/.exec(cleaned);
+      if (hostPort) cleaned = hostPort[1];
+      cleaned = cleaned.replace(/^\[|\]$/g, '');
     }
-  } else if (cleaned.includes('/') && !cleaned.includes('\\')) {
-    cleaned = cleaned.split('/')[0];
+  } else if (!cleaned.includes('\\')) {
+    if (cleaned.startsWith('//')) {
+      cleaned = cleaned.slice(2);
+    }
+    if (/[/?#]/.test(cleaned)) {
+      cleaned = cleaned.split(/[/?#]/)[0];
+    }
+    const hostPort = /^([^:]+):(\d{1,5})$/.exec(cleaned);
+    if (hostPort) {
+      cleaned = hostPort[1];
+    }
+    cleaned = cleaned.replace(/^\[|\]$/g, '');
   }
   const labels = splitPresentationLabels(cleaned.toLowerCase());
   return labels.length > 0 ? `${labels.join('.')}.` : '.';
