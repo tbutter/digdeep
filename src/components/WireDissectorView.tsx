@@ -10,7 +10,7 @@ import {
   Link2,
   X,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { type PointerEvent, useEffect, useMemo, useState } from 'react';
 import type {
   DissectedWirePacket,
   WireCompressionJump,
@@ -18,6 +18,22 @@ import type {
   WireSpanCategory,
   WireSubfieldSpan,
 } from '../dns/wireDissector';
+
+export type HexBytesPerRow = 8 | 16;
+
+const NARROW_HEX_MEDIA_QUERY = '(max-width: 639px)';
+let persistedManualBytesPerRow: HexBytesPerRow | null = null;
+
+export function resetWireGridWidthPreference(): void {
+  persistedManualBytesPerRow = null;
+}
+
+function detectNarrowHexViewport(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return false;
+  }
+  return Boolean(window.matchMedia(NARROW_HEX_MEDIA_QUERY)?.matches);
+}
 
 interface WireSelection {
   sectionId: string;
@@ -206,14 +222,59 @@ function InspectorDescriptionBody({
 export function WirePacketDissectorView({
   dissected,
   packetLabel = 'DNS Wire Packet',
+  defaultBytesPerRow,
 }: {
   dissected: DissectedWirePacket;
   packetLabel?: string;
+  defaultBytesPerRow?: HexBytesPerRow;
 }) {
   const [pinned, setPinned] = useState<WireSelection | null>(null);
   const [hovered, setHovered] = useState<WireSelection | null>(null);
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
   const [copiedB64Url, setCopiedB64Url] = useState(false);
+  const [manualBytesPerRow, setManualBytesPerRow] = useState<HexBytesPerRow | null>(
+    () => defaultBytesPerRow ?? persistedManualBytesPerRow
+  );
+  const [isNarrowViewport, setIsNarrowViewport] = useState<boolean>(detectNarrowHexViewport);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return;
+    }
+    const mql = window.matchMedia(NARROW_HEX_MEDIA_QUERY);
+    if (!mql) return;
+    setIsNarrowViewport(Boolean(mql.matches));
+    const onChange = (ev: MediaQueryListEvent) => setIsNarrowViewport(ev.matches);
+    if (typeof mql.addEventListener === 'function') {
+      mql.addEventListener('change', onChange);
+      return () => mql.removeEventListener('change', onChange);
+    }
+    if (typeof mql.addListener === 'function') {
+      mql.addListener(onChange);
+      return () => mql.removeListener(onChange);
+    }
+  }, []);
+
+  const bytesPerRow: HexBytesPerRow =
+    manualBytesPerRow ?? defaultBytesPerRow ?? (isNarrowViewport ? 8 : 16);
+  const midColIdx = bytesPerRow === 8 ? 3 : 7;
+
+  const chooseBytesPerRow = (next: HexBytesPerRow) => {
+    persistedManualBytesPerRow = next;
+    setManualBytesPerRow(next);
+  };
+
+  const handleHoverEnter = (e: PointerEvent<HTMLElement>, sel: WireSelection) => {
+    if (e.pointerType !== 'touch') {
+      setHovered(sel);
+    }
+  };
+
+  const handleHoverLeave = (e: PointerEvent<HTMLElement>) => {
+    if (e.pointerType !== 'touch') {
+      setHovered(null);
+    }
+  };
 
   const byteLookup = useMemo<ByteCellMeta[]>(() => {
     const table: ByteCellMeta[] = Array.from({ length: dissected.wireSize }, () => ({}));
@@ -294,15 +355,15 @@ export function WirePacketDissectorView({
 
   const hexRows = useMemo(() => {
     const rows: Array<{ rowOffset: number; bytes: number[] }> = [];
-    for (let offset = 0; offset < dissected.wireSize; offset += 16) {
+    for (let offset = 0; offset < dissected.wireSize; offset += bytesPerRow) {
       const slice: number[] = [];
-      for (let j = 0; j < 16 && offset + j < dissected.wireSize; j++) {
+      for (let j = 0; j < bytesPerRow && offset + j < dissected.wireSize; j++) {
         slice.push(dissected.bytes[offset + j]);
       }
       rows.push({ rowOffset: offset, bytes: slice });
     }
     return rows;
-  }, [dissected]);
+  }, [dissected, bytesPerRow]);
 
   const togglePin = (sel: WireSelection) => {
     setPinned((prev) => {
@@ -310,7 +371,8 @@ export function WirePacketDissectorView({
         prev &&
         prev.sectionId === sel.sectionId &&
         prev.fieldId === sel.fieldId &&
-        prev.jumpId === sel.jumpId
+        prev.jumpId === sel.jumpId &&
+        prev.byteOffset === sel.byteOffset
       ) {
         return null;
       }
@@ -318,7 +380,8 @@ export function WirePacketDissectorView({
     });
   };
 
-  const selectJump = (jump: WireCompressionJump, pin: boolean) => {
+  const selectJump = (jump: WireCompressionJump, pin: boolean, pointerType?: string) => {
+    if (!pin && pointerType === 'touch') return;
     const meta = byteLookup[jump.pointerOffset];
     const sel: WireSelection = {
       sectionId: meta?.section?.id ?? dissected.spans[0]?.id ?? 'section-header',
@@ -531,14 +594,14 @@ export function WirePacketDissectorView({
             <button
               key={bit.name}
               type="button"
-              onMouseEnter={() =>
-                setHovered({
+              onPointerEnter={(e) =>
+                handleHoverEnter(e, {
                   sectionId: 'section-header',
                   fieldId: 'hdr-flags',
                   byteOffset: 2,
                 })
               }
-              onMouseLeave={() => setHovered(null)}
+              onPointerLeave={handleHoverLeave}
               onClick={() =>
                 togglePin({
                   sectionId: 'section-header',
@@ -574,7 +637,7 @@ export function WirePacketDissectorView({
               <span>RFC 1035 §4.1.4 Compression Pointer Jumps ({dissected.compressionJumps.length})</span>
             </div>
             <span className="text-[10px] text-fuchsia-300/80">
-              Hover or click a pointer to trace source → target label bytes
+              Tap or hover a pointer to trace source → target label bytes
             </span>
           </div>
 
@@ -586,8 +649,8 @@ export function WirePacketDissectorView({
                 <button
                   key={jump.id}
                   type="button"
-                  onMouseEnter={() => selectJump(jump, false)}
-                  onMouseLeave={() => setHovered(null)}
+                  onPointerEnter={(e) => selectJump(jump, false, e.pointerType)}
+                  onPointerLeave={handleHoverLeave}
                   onClick={() => selectJump(jump, true)}
                   className={`inline-flex items-center gap-1.5 rounded border px-2 py-1 font-mono text-[11px] transition-colors cursor-pointer ${
                     isSelected
@@ -612,9 +675,9 @@ export function WirePacketDissectorView({
         </div>
       )}
 
-      {/* 4. Active Byte / Subfield & Pointer Jump Inspector Banner (CSS-Grid locked to tallest description in packet) */}
+      {/* 4. Sticky Active Byte / Subfield & Pointer Jump Inspector Banner (CSS-Grid locked to tallest description in packet) */}
       <div
-        className="rounded-lg border border-slate-800 bg-slate-900/95 px-3 py-2.5 min-h-[58px] grid grid-cols-1 items-start"
+        className="sticky top-0 z-20 rounded-lg border border-slate-700/90 bg-slate-900/95 backdrop-blur-sm px-3 py-2.5 min-h-[58px] shadow-md shadow-slate-950/80 grid grid-cols-1 items-start"
         data-testid="wire-inspector-banner"
       >
         {/* Invisible sizer stack: reserves exact height of the longest description in this packet */}
@@ -625,8 +688,8 @@ export function WirePacketDissectorView({
         >
           <Layers className="w-3.5 h-3.5 shrink-0" />
           <span>
-            Hover or click any hex byte, ASCII character, compression pointer, or decoded RFC field
-            below to highlight its exact wire span. Click to pin selection.
+            Tap or hover any hex byte, ASCII character, compression pointer, or decoded RFC field
+            below to highlight its exact wire span. Tap or click to pin selection.
           </span>
         </div>
         {inspectorSizerCandidates.map((cand) => (
@@ -664,172 +727,258 @@ export function WirePacketDissectorView({
                   : undefined
               }
               showPinnedControl={Boolean(validPinned)}
-              onClearPin={() => setPinned(null)}
+              onClearPin={() => {
+                setPinned(null);
+                setHovered(null);
+              }}
             />
           ) : (
             <div className="text-[11px] text-slate-400 flex items-center gap-2">
               <Layers className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
               <span>
-                Hover or click any hex byte, ASCII character, compression pointer, or decoded RFC
-                field below to highlight its exact wire span. Click to pin selection.
+                Tap or hover any hex byte, ASCII character, compression pointer, or decoded RFC
+                field below to highlight its exact wire span. Tap or click to pin selection.
               </span>
             </div>
           )}
         </div>
       </div>
 
-      {/* 5. Synchronized Offset-Mapped Hex & ASCII Grid */}
-      <div className="rounded-lg border border-slate-800 bg-slate-950 p-3 overflow-x-auto">
-        <div className="flex items-center justify-between mb-2 text-[10px] font-mono text-slate-500 select-none">
-          <span>OFFSET   00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F   ASCII</span>
-          <span>{dissected.wireSize} OCTETS</span>
+      {/* 5. Synchronized Offset-Mapped Hex & ASCII Grid (Responsive 8B Mobile / 16B Desktop) */}
+      <div
+        className="rounded-lg border border-slate-800 bg-slate-950 p-2 sm:p-3"
+        data-testid="wire-hex-grid"
+        data-bytes-per-row={bytesPerRow}
+      >
+        <div className="flex items-center justify-between gap-2 mb-2 text-[10px] font-mono text-slate-500 select-none">
+          <span>
+            {dissected.wireSize} OCTETS · {bytesPerRow}B/ROW
+          </span>
+          <div
+            className="inline-flex items-center rounded border border-slate-800 bg-slate-900 p-0.5 text-[10px] font-mono"
+            role="group"
+            aria-label="Hex bytes per row"
+          >
+            <button
+              type="button"
+              data-testid="wire-grid-width-8"
+              aria-pressed={bytesPerRow === 8}
+              onClick={() => chooseBytesPerRow(8)}
+              className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
+                bytesPerRow === 8
+                  ? 'bg-cyan-500 text-slate-950 font-semibold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Compact 8 bytes per row (fits narrow mobile screens without horizontal scrolling)"
+            >
+              8B
+            </button>
+            <button
+              type="button"
+              data-testid="wire-grid-width-16"
+              aria-pressed={bytesPerRow === 16}
+              onClick={() => chooseBytesPerRow(16)}
+              className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
+                bytesPerRow === 16
+                  ? 'bg-cyan-500 text-slate-950 font-semibold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Full 16 bytes per row"
+            >
+              16B
+            </button>
+          </div>
         </div>
 
-        <div className="space-y-0.5 font-mono text-[11px] leading-5">
-          {hexRows.map((row) => (
-            <div key={row.rowOffset} className="flex items-center whitespace-nowrap">
-              <span className="w-14 shrink-0 text-slate-500 select-none">
-                {row.rowOffset.toString(16).toUpperCase().padStart(4, '0')}
-              </span>
-
-              {/* 16 Hex Octets */}
-              <div className="flex items-center">
-                {Array.from({ length: 16 }).map((_, colIdx) => {
-                  const byteOffset = row.rowOffset + colIdx;
-                  const spacer = colIdx === 7 ? 'mr-2' : 'mr-0.5';
-                  if (colIdx >= row.bytes.length) {
-                    return (
-                      <span
-                        key={colIdx}
-                        className={`inline-block w-5 text-center select-none ${spacer}`}
-                      >
-                        {'  '}
-                      </span>
-                    );
-                  }
-
-                  const byteVal = row.bytes[colIdx];
-                  const meta = byteLookup[byteOffset];
-                  const cat = meta?.section?.category;
-                  const style = cat ? CATEGORY_STYLES[cat] : undefined;
-
-                  const isPointerJumpSource = activeContext?.pointerByteSet.has(byteOffset);
-                  const isPointerJumpTarget = activeContext?.targetByteSet.has(byteOffset);
-                  const isPointerPrefix = activeContext?.prefixByteSet.has(byteOffset);
-
-                  const isFieldActive =
-                    activeContext?.field &&
-                    byteOffset >= activeContext.field.startOffset &&
-                    byteOffset < activeContext.field.endOffset;
-                  const isSectionOnlyActive =
-                    activeContext &&
-                    !activeContext.field &&
-                    byteOffset >= activeContext.section.startOffset &&
-                    byteOffset < activeContext.section.endOffset;
-                  const isSameSection =
-                    activeContext &&
-                    byteOffset >= activeContext.section.startOffset &&
-                    byteOffset < activeContext.section.endOffset;
-
-                  let cellClass = style ? style.idleByte : 'text-slate-400 hover:bg-slate-800';
-                  if (meta?.pointerJump) {
-                    cellClass =
-                      'text-fuchsia-300 underline decoration-fuchsia-400/80 decoration-dotted underline-offset-2 font-semibold hover:bg-fuchsia-500/25';
-                  }
-                  if (isSameSection && style) {
-                    cellClass = style.sectionTint;
-                  }
-                  if ((isFieldActive || isSectionOnlyActive) && style) {
-                    cellClass = style.activeByte;
-                  }
-                  if (isPointerPrefix) {
-                    cellClass = 'bg-fuchsia-500/20 text-fuchsia-100 ring-1 ring-fuchsia-500/40';
-                  }
-                  if (isPointerJumpTarget) {
-                    cellClass = 'bg-amber-400/30 text-amber-100 ring-1 ring-amber-400 font-bold';
-                  }
-                  if (isPointerJumpSource) {
-                    cellClass = 'bg-fuchsia-500/45 text-white ring-1 ring-fuchsia-400 font-bold';
-                  }
-
-                  const sel: WireSelection = {
-                    sectionId: meta?.section?.id ?? dissected.spans[0]?.id ?? 'section-header',
-                    fieldId: meta?.field?.id,
-                    byteOffset,
-                    jumpId: meta?.pointerJump?.id,
-                  };
-
-                  return (
-                    <button
-                      key={colIdx}
-                      type="button"
-                      onMouseEnter={() => setHovered(sel)}
-                      onMouseLeave={() => setHovered(null)}
-                      onClick={() => togglePin(sel)}
-                      className={`inline-block w-5 rounded-[3px] text-center transition-colors cursor-pointer ${spacer} ${cellClass}`}
-                      title={`${fmtHexOffset(byteOffset)}: ${meta?.section?.title ?? 'Trailing Byte'}${meta?.field ? ` — ${meta.field.label}` : ''}`}
-                    >
-                      {byteVal.toString(16).toUpperCase().padStart(2, '0')}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* 16-Byte ASCII Column */}
-              <div className="ml-3 pl-2 border-l border-slate-800 flex items-center text-slate-400">
-                <span className="text-slate-600 select-none">|</span>
-                {row.bytes.map((byteVal, colIdx) => {
-                  const byteOffset = row.rowOffset + colIdx;
-                  const meta = byteLookup[byteOffset];
-                  const ch = byteVal >= 0x20 && byteVal <= 0x7e ? String.fromCharCode(byteVal) : '.';
-
-                  const isPointerJumpSource = activeContext?.pointerByteSet.has(byteOffset);
-                  const isPointerJumpTarget = activeContext?.targetByteSet.has(byteOffset);
-                  const isFieldActive =
-                    activeContext?.field &&
-                    byteOffset >= activeContext.field.startOffset &&
-                    byteOffset < activeContext.field.endOffset;
-                  const isSectionOnlyActive =
-                    activeContext &&
-                    !activeContext.field &&
-                    byteOffset >= activeContext.section.startOffset &&
-                    byteOffset < activeContext.section.endOffset;
-
-                  let asciiClass = 'text-slate-400 hover:text-white';
-                  if (isFieldActive || isSectionOnlyActive) {
-                    asciiClass = 'bg-cyan-500/30 text-white font-bold';
-                  }
-                  if (isPointerJumpTarget) {
-                    asciiClass = 'bg-amber-400/30 text-amber-100 font-bold';
-                  }
-                  if (isPointerJumpSource) {
-                    asciiClass = 'bg-fuchsia-500/45 text-fuchsia-100 font-bold';
-                  }
-
-                  const sel: WireSelection = {
-                    sectionId: meta?.section?.id ?? dissected.spans[0]?.id ?? 'section-header',
-                    fieldId: meta?.field?.id,
-                    byteOffset,
-                    jumpId: meta?.pointerJump?.id,
-                  };
-
-                  return (
-                    <button
-                      key={colIdx}
-                      type="button"
-                      onMouseEnter={() => setHovered(sel)}
-                      onMouseLeave={() => setHovered(null)}
-                      onClick={() => togglePin(sel)}
-                      className={`inline-block w-[8px] text-center rounded-[2px] cursor-pointer ${asciiClass}`}
-                    >
-                      {ch}
-                    </button>
-                  );
-                })}
-                <span className="text-slate-600 select-none">|</span>
-              </div>
+        <div className="overflow-x-auto">
+          <div
+            className="flex items-center whitespace-nowrap mb-1 pb-1 border-b border-slate-900 text-[10px] font-mono text-slate-500 select-none"
+            data-testid="wire-grid-ruler"
+          >
+            <span className="w-10 sm:w-14 shrink-0">OFFSET</span>
+            <div className="flex items-center">
+              {Array.from({ length: bytesPerRow }).map((_, colIdx) => {
+                const spacer =
+                  colIdx === bytesPerRow - 1
+                    ? ''
+                    : colIdx === midColIdx
+                      ? bytesPerRow === 8
+                        ? 'mr-1.5'
+                        : 'mr-2'
+                      : 'mr-0.5';
+                return (
+                  <span
+                    key={colIdx}
+                    className={`inline-block w-[18px] sm:w-5 text-center ${spacer}`}
+                  >
+                    {colIdx.toString(16).toUpperCase().padStart(2, '0')}
+                  </span>
+                );
+              })}
             </div>
-          ))}
+            <div className="ml-1.5 sm:ml-3 pl-1.5 sm:pl-2 border-l border-slate-800/70">
+              <span>ASCII</span>
+            </div>
+          </div>
+
+          <div className="space-y-0.5 font-mono text-[11px] leading-5">
+            {hexRows.map((row) => (
+              <div
+                key={row.rowOffset}
+                data-row-offset={row.rowOffset.toString(16).toUpperCase().padStart(4, '0')}
+                className="flex items-center whitespace-nowrap"
+              >
+                <span className="w-10 sm:w-14 shrink-0 text-slate-500 select-none">
+                  {row.rowOffset.toString(16).toUpperCase().padStart(4, '0')}
+                </span>
+
+                {/* 8 or 16 Hex Octets */}
+                <div className="flex items-center">
+                  {Array.from({ length: bytesPerRow }).map((_, colIdx) => {
+                    const byteOffset = row.rowOffset + colIdx;
+                    const spacer =
+                      colIdx === bytesPerRow - 1
+                        ? ''
+                        : colIdx === midColIdx
+                          ? bytesPerRow === 8
+                            ? 'mr-1.5'
+                            : 'mr-2'
+                          : 'mr-0.5';
+                    if (colIdx >= row.bytes.length) {
+                      return (
+                        <span
+                          key={colIdx}
+                          className={`inline-block w-[18px] sm:w-5 text-center select-none ${spacer}`}
+                        >
+                          {'  '}
+                        </span>
+                      );
+                    }
+
+                    const byteVal = row.bytes[colIdx];
+                    const meta = byteLookup[byteOffset];
+                    const cat = meta?.section?.category;
+                    const style = cat ? CATEGORY_STYLES[cat] : undefined;
+
+                    const isPointerJumpSource = activeContext?.pointerByteSet.has(byteOffset);
+                    const isPointerJumpTarget = activeContext?.targetByteSet.has(byteOffset);
+                    const isPointerPrefix = activeContext?.prefixByteSet.has(byteOffset);
+
+                    const isFieldActive =
+                      activeContext?.field &&
+                      byteOffset >= activeContext.field.startOffset &&
+                      byteOffset < activeContext.field.endOffset;
+                    const isSectionOnlyActive =
+                      activeContext &&
+                      !activeContext.field &&
+                      byteOffset >= activeContext.section.startOffset &&
+                      byteOffset < activeContext.section.endOffset;
+                    const isSameSection =
+                      activeContext &&
+                      byteOffset >= activeContext.section.startOffset &&
+                      byteOffset < activeContext.section.endOffset;
+
+                    let cellClass = style ? style.idleByte : 'text-slate-400 hover:bg-slate-800';
+                    if (meta?.pointerJump) {
+                      cellClass =
+                        'text-fuchsia-300 underline decoration-fuchsia-400/80 decoration-dotted underline-offset-2 font-semibold hover:bg-fuchsia-500/25';
+                    }
+                    if (isSameSection && style) {
+                      cellClass = style.sectionTint;
+                    }
+                    if ((isFieldActive || isSectionOnlyActive) && style) {
+                      cellClass = style.activeByte;
+                    }
+                    if (isPointerPrefix) {
+                      cellClass = 'bg-fuchsia-500/20 text-fuchsia-100 ring-1 ring-fuchsia-500/40';
+                    }
+                    if (isPointerJumpTarget) {
+                      cellClass = 'bg-amber-400/30 text-amber-100 ring-1 ring-amber-400 font-bold';
+                    }
+                    if (isPointerJumpSource) {
+                      cellClass = 'bg-fuchsia-500/45 text-white ring-1 ring-fuchsia-400 font-bold';
+                    }
+
+                    const sel: WireSelection = {
+                      sectionId: meta?.section?.id ?? dissected.spans[0]?.id ?? 'section-header',
+                      fieldId: meta?.field?.id,
+                      byteOffset,
+                      jumpId: meta?.pointerJump?.id,
+                    };
+
+                    return (
+                      <button
+                        key={colIdx}
+                        type="button"
+                        onPointerEnter={(e) => handleHoverEnter(e, sel)}
+                        onPointerLeave={handleHoverLeave}
+                        onClick={() => togglePin(sel)}
+                        className={`inline-block w-[18px] sm:w-5 rounded-[3px] text-center transition-colors cursor-pointer ${spacer} ${cellClass}`}
+                        title={`${fmtHexOffset(byteOffset)}: ${meta?.section?.title ?? 'Trailing Byte'}${meta?.field ? ` — ${meta.field.label}` : ''}`}
+                      >
+                        {byteVal.toString(16).toUpperCase().padStart(2, '0')}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* 8-Byte or 16-Byte ASCII Column */}
+                <div className="ml-1.5 sm:ml-3 pl-1.5 sm:pl-2 border-l border-slate-800 flex items-center text-slate-400">
+                  <span className="text-slate-600 select-none">|</span>
+                  {row.bytes.map((byteVal, colIdx) => {
+                    const byteOffset = row.rowOffset + colIdx;
+                    const meta = byteLookup[byteOffset];
+                    const ch =
+                      byteVal >= 0x20 && byteVal <= 0x7e ? String.fromCharCode(byteVal) : '.';
+
+                    const isPointerJumpSource = activeContext?.pointerByteSet.has(byteOffset);
+                    const isPointerJumpTarget = activeContext?.targetByteSet.has(byteOffset);
+                    const isFieldActive =
+                      activeContext?.field &&
+                      byteOffset >= activeContext.field.startOffset &&
+                      byteOffset < activeContext.field.endOffset;
+                    const isSectionOnlyActive =
+                      activeContext &&
+                      !activeContext.field &&
+                      byteOffset >= activeContext.section.startOffset &&
+                      byteOffset < activeContext.section.endOffset;
+
+                    let asciiClass = 'text-slate-400 hover:text-white';
+                    if (isFieldActive || isSectionOnlyActive) {
+                      asciiClass = 'bg-cyan-500/30 text-white font-bold';
+                    }
+                    if (isPointerJumpTarget) {
+                      asciiClass = 'bg-amber-400/30 text-amber-100 font-bold';
+                    }
+                    if (isPointerJumpSource) {
+                      asciiClass = 'bg-fuchsia-500/45 text-fuchsia-100 font-bold';
+                    }
+
+                    const sel: WireSelection = {
+                      sectionId: meta?.section?.id ?? dissected.spans[0]?.id ?? 'section-header',
+                      fieldId: meta?.field?.id,
+                      byteOffset,
+                      jumpId: meta?.pointerJump?.id,
+                    };
+
+                    return (
+                      <button
+                        key={colIdx}
+                        type="button"
+                        onPointerEnter={(e) => handleHoverEnter(e, sel)}
+                        onPointerLeave={handleHoverLeave}
+                        onClick={() => togglePin(sel)}
+                        className={`inline-block w-[7px] sm:w-[8px] text-center rounded-[2px] cursor-pointer ${asciiClass}`}
+                      >
+                        {ch}
+                      </button>
+                    );
+                  })}
+                  <span className="text-slate-600 select-none">|</span>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -853,8 +1002,8 @@ export function WirePacketDissectorView({
             >
               <div
                 className="flex items-center justify-between gap-2 px-3 py-2 bg-slate-900/95 hover:bg-slate-800/70 transition-colors cursor-pointer"
-                onMouseEnter={() => setHovered({ sectionId: section.id })}
-                onMouseLeave={() => setHovered(null)}
+                onPointerEnter={(e) => handleHoverEnter(e, { sectionId: section.id })}
+                onPointerLeave={handleHoverLeave}
                 onClick={() =>
                   setCollapsedSections((prev) => ({ ...prev, [section.id]: !prev[section.id] }))
                 }
@@ -896,8 +1045,8 @@ export function WirePacketDissectorView({
                       <button
                         key={field.id}
                         type="button"
-                        onMouseEnter={() => setHovered(sel)}
-                        onMouseLeave={() => setHovered(null)}
+                        onPointerEnter={(e) => handleHoverEnter(e, sel)}
+                        onPointerLeave={handleHoverLeave}
                         onClick={() => togglePin(sel)}
                         className={`w-full text-left px-3 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono transition-colors cursor-pointer ${
                           isFieldSelected

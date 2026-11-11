@@ -640,7 +640,7 @@ export function ResponsesPanel({
               </div>
             )}
 
-            <div className="p-4 overflow-auto flex-1 bg-slate-950 text-slate-200 font-mono text-xs leading-relaxed">
+            <div className="p-2.5 sm:p-4 overflow-auto flex-1 bg-slate-950 text-slate-200 font-mono text-xs leading-relaxed">
               {mode === 'dig' || mode === 'zonefile' ? (
                 <pre className="whitespace-pre overflow-x-auto">
                   {(mode === 'dig' ? digText : zonefileText).split('\n').map((line, idx, lines) => {

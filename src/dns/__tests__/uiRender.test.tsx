@@ -20,7 +20,10 @@ import { ResponsesPanel } from '../../components/ResponsesPanel';
 import { ReverseDnsCard } from '../../components/ReverseDnsCard';
 import { SettingsModal } from '../../components/SettingsModal';
 import { WebAnalysisView } from '../../components/WebAnalysisView';
-import { WirePacketDissectorView } from '../../components/WireDissectorView';
+import {
+  resetWireGridWidthPreference,
+  WirePacketDissectorView,
+} from '../../components/WireDissectorView';
 import { ZonesPanel } from '../../components/ZonesPanel';
 import { buildChainGraph } from '../../graph/layout';
 import { DEFAULT_USER_SETTINGS, saveSnapshot } from '../../storage/historyStore';
@@ -31,7 +34,7 @@ import {
 } from '../../urlState';
 import { runDnsvizAnalysis } from '../analyzer';
 import { runConsensusAnalysis } from '../consensusAnalyzer';
-import { base64ToBytes } from '../encoding';
+import { base64ToBytes, hexToBytes } from '../encoding';
 import { runMailAnalysis } from '../mailAnalyzer';
 import { runWebAnalysis } from '../webAnalyzer';
 import { dissectDnsWirePacket } from '../wireDissector';
@@ -145,8 +148,14 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(dissectorHtml).toContain('RFC 1035 §4.1.4 Compression Pointer Jumps');
       expect(dissectorHtml).toContain('0xC0xx pointer');
       expect(dissectorHtml).toContain('data-testid="wire-inspector-banner"');
+      expect(dissectorHtml).toContain('sticky top-0 z-20');
       expect(dissectorHtml).toContain('data-wire-sizer="candidate"');
       expect(dissectorHtml).toContain('Pointer Trace:');
+      expect(dissectorHtml).toContain('data-testid="wire-hex-grid"');
+      expect(dissectorHtml).toContain('data-bytes-per-row="16"');
+      expect(dissectorHtml).toContain('data-testid="wire-grid-width-8"');
+      expect(dissectorHtml).toContain('data-testid="wire-grid-width-16"');
+      expect(dissectorHtml).toContain('data-testid="wire-grid-ruler"');
 
       const zonesHtml = renderToStaticMarkup(<ZonesPanel snapshot={cfSnap} />);
       expect(zonesHtml).toContain('. (Root Zone)');
@@ -251,7 +260,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v28');
+    expect(swCode).toContain('digdeep-shell-v29');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -801,4 +810,160 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     },
     45000
   );
+
+  it('renders sticky wire-inspector-banner, auto-selects 8B compact hex grid on narrow mobile viewports, and toggles 8B/16B & byte pins cleanly', async () => {
+    // 68-byte compressed DNS response for `www.example.org. IN A`
+    const packetHex =
+      '1a2b81a00001000200000000' +
+      '03777777076578616d706c65036f72670000010001' +
+      'c00c0005000100000e1000070465646765c010' +
+      'c02d000100010000012c00045db8d822';
+    const dissected = dissectDnsWirePacket(hexToBytes(packetHex));
+    expect(dissected.wireSize).toBe(68);
+
+    const prevWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    resetWireGridWidthPreference();
+    try {
+      // 1. Wide viewport (matchMedia matches: false) -> defaults to 16B/row (5 rows for 68 bytes)
+      Object.defineProperty(globalThis, 'window', {
+        value: {
+          matchMedia: () => ({ matches: false }),
+        },
+        configurable: true,
+      });
+      const wideHtml = renderToStaticMarkup(
+        <WirePacketDissectorView dissected={dissected} packetLabel="Wide Wire" />
+      );
+      expect(wideHtml).toContain('data-bytes-per-row="16"');
+      expect(wideHtml).toContain('68 OCTETS · 16B/ROW');
+      expect(wideHtml).toContain('data-row-offset="0000"');
+      expect(wideHtml).toContain('data-row-offset="0010"');
+      expect(wideHtml).toContain('data-row-offset="0040"');
+      expect(wideHtml).not.toContain('data-row-offset="0008"');
+      expect((wideHtml.match(/data-row-offset="/g) ?? []).length).toBe(5);
+
+      // 2. Narrow mobile viewport (< 640px, matchMedia matches: true) -> auto-selects 8B/row (9 rows for 68 bytes)
+      Object.defineProperty(globalThis, 'window', {
+        value: {
+          matchMedia: (q: string) => ({ matches: q.includes('639px') }),
+        },
+        configurable: true,
+      });
+      const mobileHtml = renderToStaticMarkup(
+        <WirePacketDissectorView dissected={dissected} packetLabel="Mobile Wire" />
+      );
+      expect(mobileHtml).toContain('data-bytes-per-row="8"');
+      expect(mobileHtml).toContain('68 OCTETS · 8B/ROW');
+      expect(mobileHtml).toContain('data-row-offset="0000"');
+      expect(mobileHtml).toContain('data-row-offset="0008"');
+      expect(mobileHtml).toContain('data-row-offset="0018"');
+      expect(mobileHtml).toContain('data-row-offset="0040"');
+      expect((mobileHtml.match(/data-row-offset="/g) ?? []).length).toBe(9);
+
+      // Verify ruler only renders columns 00..07 in 8B mode
+      const { JSDOM } = (await import('jsdom' as string)) as {
+        JSDOM: new (markup?: string) => { window: Window & typeof globalThis };
+      };
+      const mobileDom = new JSDOM(mobileHtml);
+      const mobileBanner = mobileDom.window.document.querySelector(
+        '[data-testid="wire-inspector-banner"]'
+      )!;
+      expect(mobileBanner.className).toContain('sticky');
+      expect(mobileBanner.className).toContain('top-0');
+      expect(mobileBanner.className).toContain('z-20');
+      expect(
+        mobileBanner.querySelectorAll('[data-wire-sizer="candidate"]').length
+      ).toBeGreaterThan(0);
+
+      const rulerCols = Array.from(
+        mobileDom.window.document.querySelectorAll('[data-testid="wire-grid-ruler"] div span')
+      ).map((el) => el.textContent);
+      expect(rulerCols).toEqual(['00', '01', '02', '03', '04', '05', '06', '07', 'ASCII']);
+
+      // 3. Interactive JSDOM mount: toggle 16B <-> 8B and pin/step/clear individual hex bytes
+      const liveDom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>');
+      Object.defineProperty(globalThis, 'window', {
+        value: liveDom.window,
+        configurable: true,
+      });
+      Object.defineProperty(globalThis, 'document', {
+        value: liveDom.window.document,
+        configurable: true,
+      });
+      (liveDom.window as unknown as { matchMedia: (q: string) => { matches: boolean } }).matchMedia =
+        () => ({ matches: false });
+      (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
+        true;
+
+      const { act } = await import('react');
+      const { createRoot } = await import('react-dom/client');
+      const container = liveDom.window.document.getElementById('root')!;
+      const root = createRoot(container);
+
+      await act(async () => {
+        root.render(<WirePacketDissectorView dissected={dissected} packetLabel="Interactive Wire" />);
+      });
+
+      const gridEl = container.querySelector('[data-testid="wire-hex-grid"]')!;
+      const btn8 = container.querySelector('[data-testid="wire-grid-width-8"]') as HTMLButtonElement;
+      const btn16 = container.querySelector('[data-testid="wire-grid-width-16"]') as HTMLButtonElement;
+      expect(gridEl.getAttribute('data-bytes-per-row')).toBe('16');
+      expect(btn16.getAttribute('aria-pressed')).toBe('true');
+      expect(container.querySelectorAll('[data-row-offset]').length).toBe(5);
+
+      await act(async () => {
+        btn8.click();
+      });
+      expect(gridEl.getAttribute('data-bytes-per-row')).toBe('8');
+      expect(btn8.getAttribute('aria-pressed')).toBe('true');
+      expect(container.querySelectorAll('[data-row-offset]').length).toBe(9);
+
+      // Tap byte 0x000C (0x03 length prefix of "www"), then tap adjacent byte 0x000D ('w' = 0x77)
+      const byte0c = container.querySelector(
+        'button[title^="0x000C:"]'
+      ) as HTMLButtonElement;
+      const byte0d = container.querySelector(
+        'button[title^="0x000D:"]'
+      ) as HTMLButtonElement;
+      expect(byte0c).toBeTruthy();
+      expect(byte0d).toBeTruthy();
+
+      await act(async () => {
+        byte0c.click();
+      });
+      const liveBanner = container.querySelector('[data-testid="wire-inspector-banner"]')!;
+      expect(liveBanner.textContent).toContain('Byte @0x000C = 0x03');
+      expect(liveBanner.textContent).toContain('Pinned (clear)');
+
+      await act(async () => {
+        byte0d.click();
+      });
+      expect(liveBanner.textContent).toContain('Byte @0x000D = 0x77');
+      expect(liveBanner.textContent).toContain('Pinned (clear)');
+
+      // Tap same byte 0x000D again -> unpins cleanly
+      await act(async () => {
+        byte0d.click();
+      });
+      expect(liveBanner.textContent).not.toContain('Byte @0x000D = 0x77');
+      expect(liveBanner.textContent).toContain('Tap or hover any hex byte');
+
+      await act(async () => {
+        btn16.click();
+      });
+      expect(gridEl.getAttribute('data-bytes-per-row')).toBe('16');
+
+      await act(async () => {
+        root.unmount();
+      });
+    } finally {
+      resetWireGridWidthPreference();
+      if (prevWindow) {
+        Object.defineProperty(globalThis, 'window', prevWindow);
+      } else {
+        Reflect.deleteProperty(globalThis, 'window');
+      }
+      Reflect.deleteProperty(globalThis, 'document');
+    }
+  });
 });
