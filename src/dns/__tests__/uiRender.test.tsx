@@ -111,6 +111,9 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(dissectorHtml).toContain('Copy ?dns= Base64url');
       expect(dissectorHtml).toContain('RFC 1035 §4.1.4 Compression Pointer Jumps');
       expect(dissectorHtml).toContain('0xC0xx pointer');
+      expect(dissectorHtml).toContain('data-testid="wire-inspector-banner"');
+      expect(dissectorHtml).toContain('data-wire-sizer="candidate"');
+      expect(dissectorHtml).toContain('Pointer Trace:');
 
       const zonesHtml = renderToStaticMarkup(<ZonesPanel snapshot={cfSnap} />);
       expect(zonesHtml).toContain('. (Root Zone)');
@@ -210,7 +213,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v25');
+    expect(swCode).toContain('digdeep-shell-v26');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge when navigator.onLine is false

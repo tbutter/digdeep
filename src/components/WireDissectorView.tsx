@@ -97,6 +97,112 @@ function fmtHexOffset(offset: number): string {
   return `0x${offset.toString(16).toUpperCase().padStart(4, '0')}`;
 }
 
+interface InspectorDisplayState {
+  key: string;
+  section: WireSectionSpan;
+  field?: WireSubfieldSpan;
+  jump?: WireCompressionJump;
+}
+
+function InspectorDescriptionBody({
+  section,
+  field,
+  jump,
+  byteOffset,
+  byteValue,
+  showPinnedControl,
+  isSizer,
+  onClearPin,
+}: {
+  section: WireSectionSpan;
+  field?: WireSubfieldSpan;
+  jump?: WireCompressionJump;
+  byteOffset?: number;
+  byteValue?: number;
+  showPinnedControl: boolean;
+  isSizer?: boolean;
+  onClearPin?: () => void;
+}) {
+  const startOff = field?.startOffset ?? section.startOffset;
+  const endOff = field?.endOffset ?? section.endOffset;
+  const spanLen = endOff - startOff;
+
+  return (
+    <div className="space-y-1.5 min-w-0">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2 text-xs min-w-0">
+          <span
+            className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${
+              CATEGORY_STYLES[section.category].badge
+            }`}
+          >
+            {section.title}
+          </span>
+          {field && (
+            <>
+              <span className="text-slate-500">/</span>
+              <span className="font-semibold text-white">{field.label}</span>
+            </>
+          )}
+          <span className="font-mono text-[11px] text-cyan-300 bg-slate-950 px-1.5 py-0.5 rounded border border-slate-800">
+            {fmtHexOffset(startOff)}..{fmtHexOffset(Math.max(startOff, endOff - 1))} ({spanLen}B)
+          </span>
+          {byteOffset !== undefined && (
+            <span className="font-mono text-[10px] text-slate-400">
+              Byte @{fmtHexOffset(byteOffset)} = 0x
+              {(byteValue ?? 0).toString(16).toUpperCase().padStart(2, '0')}
+            </span>
+          )}
+        </div>
+
+        {showPinnedControl &&
+          (isSizer ? (
+            <span className="inline-flex items-center gap-1 rounded bg-cyan-500/20 border border-cyan-500/40 px-2 py-0.5 text-[10px] font-medium text-cyan-200">
+              <X className="w-3 h-3" />
+              Pinned (clear)
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={onClearPin}
+              className="inline-flex items-center gap-1 rounded bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 px-2 py-0.5 text-[10px] font-medium text-cyan-200 cursor-pointer"
+            >
+              <X className="w-3 h-3" />
+              Pinned (clear)
+            </button>
+          ))}
+      </div>
+
+      <div className="font-mono text-[11px] text-slate-300 break-words">
+        {field ? field.valueSummary : section.subtitle}
+      </div>
+
+      {jump && (
+        <div className="rounded border border-fuchsia-500/30 bg-fuchsia-950/25 px-2.5 py-1.5 font-mono text-[11px] text-fuchsia-200 flex flex-wrap items-center gap-1.5">
+          <span className="font-semibold text-fuchsia-300">Pointer Trace:</span>
+          {jump.hops.map((hop, idx) => (
+            <span key={hop.pointerOffset} className="inline-flex items-center gap-1">
+              {idx > 0 && <span className="text-slate-500">→</span>}
+              <span className="rounded bg-fuchsia-500/25 px-1 text-fuchsia-200">
+                {fmtHexOffset(hop.pointerOffset)} ({hop.pointerHex})
+              </span>
+              <ArrowRight className="w-3 h-3 text-amber-400" />
+              <span className="rounded bg-amber-500/25 px-1 text-amber-200">
+                {fmtHexOffset(hop.targetOffset)} &quot;{hop.resolvedSuffix}&quot;
+              </span>
+            </span>
+          ))}
+          <span className="text-slate-400">·</span>
+          <span className="text-emerald-300 break-all">
+            FQDN: {jump.fullName} ({jump.inlineBytes}B inline vs {jump.uncompressedBytes}B
+            uncompressed, saves {jump.savedBytes}B)
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function WirePacketDissectorView({
   dissected,
   packetLabel = 'DNS Wire Packet',
@@ -232,6 +338,88 @@ export function WirePacketDissectorView({
     for (const s of dissected.spans) seen.add(s.category);
     return Array.from(seen);
   }, [dissected.spans]);
+
+  // Precompute deduplicated reachable description states so CSS Grid locks the inspector banner
+  // height to the tallest description in this packet (preventing hex-grid vertical layout jumps on hover).
+  const inspectorSizerCandidates = useMemo<InspectorDisplayState[]>(() => {
+    const seenKeys = new Set<string>();
+    const all: Array<InspectorDisplayState & { score: number; headerScore: number; summaryScore: number; jumpScore: number }> = [];
+
+    const addCandidate = (
+      section: WireSectionSpan,
+      field?: WireSubfieldSpan,
+      jump?: WireCompressionJump
+    ) => {
+      const summary = field ? field.valueSummary : section.subtitle;
+      const startOff = field?.startOffset ?? section.startOffset;
+      const endOff = field?.endOffset ?? section.endOffset;
+      const spanDigits = String(endOff - startOff).length;
+      const dedupKey = `${section.title}|${field?.label ?? ''}|${spanDigits}|${summary}|${jump?.id ?? ''}`;
+      if (seenKeys.has(dedupKey)) return;
+      seenKeys.add(dedupKey);
+
+      const headerScore = section.title.length + (field ? field.label.length + 3 : 0) + spanDigits;
+      const summaryScore = summary.length;
+      const jumpScore = jump
+        ? 60 +
+          jump.fullName.length +
+          jump.hops.reduce((acc, h) => acc + h.resolvedSuffix.length + 18, 0)
+        : 0;
+
+      all.push({
+        key: dedupKey,
+        section,
+        field,
+        jump,
+        score: headerScore + summaryScore + jumpScore,
+        headerScore,
+        summaryScore,
+        jumpScore,
+      });
+    };
+
+    for (const section of dissected.spans) {
+      addCandidate(section, undefined, undefined);
+      for (const field of section.fields) {
+        const directJump = field.isCompressionPointer
+          ? dissected.compressionJumps.find((j) => j.pointerOffset === field.startOffset)
+          : dissected.compressionJumps.find(
+              (j) => j.pointerOffset >= field.startOffset && j.pointerOffset < field.endOffset
+            );
+        if (directJump) {
+          addCandidate(section, field, directJump);
+        } else {
+          addCandidate(section, field, undefined);
+        }
+      }
+    }
+
+    for (const jump of dissected.compressionJumps) {
+      const meta = byteLookup[jump.pointerOffset];
+      if (meta?.section) {
+        addCandidate(meta.section, meta.field, jump);
+      }
+    }
+
+    if (all.length <= 40) {
+      return all;
+    }
+
+    const picked = new Map<string, InspectorDisplayState>();
+    const pickTop = (
+      sorted: typeof all,
+      limit: number
+    ) => {
+      for (let i = 0; i < Math.min(limit, sorted.length); i++) {
+        picked.set(sorted[i].key, sorted[i]);
+      }
+    };
+    pickTop([...all].sort((a, b) => b.score - a.score), 16);
+    pickTop([...all].sort((a, b) => b.summaryScore - a.summaryScore), 10);
+    pickTop([...all].sort((a, b) => b.headerScore - a.headerScore), 8);
+    pickTop([...all].filter((x) => x.jumpScore > 0).sort((a, b) => b.jumpScore - a.jumpScore), 10);
+    return Array.from(picked.values());
+  }, [dissected, byteLookup]);
 
   const { compressionStats } = dissected;
 
@@ -424,101 +612,70 @@ export function WirePacketDissectorView({
         </div>
       )}
 
-      {/* 4. Active Byte / Subfield & Pointer Jump Inspector Banner */}
-      <div className="rounded-lg border border-slate-800 bg-slate-900/95 px-3 py-2.5 min-h-[58px] flex flex-col justify-center">
-        {activeContext ? (
-          <div className="space-y-1.5">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex flex-wrap items-center gap-2 text-xs">
-                <span
-                  className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${
-                    CATEGORY_STYLES[activeContext.section.category].badge
-                  }`}
-                >
-                  {activeContext.section.title}
-                </span>
-                {activeContext.field && (
-                  <>
-                    <span className="text-slate-500">/</span>
-                    <span className="font-semibold text-white">{activeContext.field.label}</span>
-                  </>
-                )}
-                <span className="font-mono text-[11px] text-cyan-300 bg-slate-950 px-1.5 py-0.5 rounded border border-slate-800">
-                  {fmtHexOffset(
-                    activeContext.field?.startOffset ?? activeContext.section.startOffset
-                  )}
-                  ..
-                  {fmtHexOffset(
-                    Math.max(
-                      activeContext.field?.startOffset ?? activeContext.section.startOffset,
-                      (activeContext.field?.endOffset ?? activeContext.section.endOffset) - 1
-                    )
-                  )}{' '}
-                  (
-                  {(activeContext.field?.endOffset ?? activeContext.section.endOffset) -
-                    (activeContext.field?.startOffset ?? activeContext.section.startOffset)}
-                  B)
-                </span>
-                {activeSelection?.byteOffset !== undefined && (
-                  <span className="font-mono text-[10px] text-slate-400">
-                    Byte @{fmtHexOffset(activeSelection.byteOffset)} = 0x
-                    {dissected.bytes[activeSelection.byteOffset]
-                      ?.toString(16)
-                      .toUpperCase()
-                      .padStart(2, '0')}
-                  </span>
-                )}
-              </div>
-
-              {validPinned && (
-                <button
-                  type="button"
-                  onClick={() => setPinned(null)}
-                  className="inline-flex items-center gap-1 rounded bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 px-2 py-0.5 text-[10px] font-medium text-cyan-200 cursor-pointer"
-                >
-                  <X className="w-3 h-3" />
-                  Pinned (clear)
-                </button>
-              )}
-            </div>
-
-            <div className="font-mono text-[11px] text-slate-300">
-              {activeContext.field ? activeContext.field.valueSummary : activeContext.section.subtitle}
-            </div>
-
-            {activeContext.jump && (
-              <div className="rounded border border-fuchsia-500/30 bg-fuchsia-950/25 px-2.5 py-1.5 font-mono text-[11px] text-fuchsia-200 flex flex-wrap items-center gap-1.5">
-                <span className="font-semibold text-fuchsia-300">Pointer Trace:</span>
-                {activeContext.jump.hops.map((hop, idx) => (
-                  <span key={hop.pointerOffset} className="inline-flex items-center gap-1">
-                    {idx > 0 && <span className="text-slate-500">→</span>}
-                    <span className="rounded bg-fuchsia-500/25 px-1 text-fuchsia-200">
-                      {fmtHexOffset(hop.pointerOffset)} ({hop.pointerHex})
-                    </span>
-                    <ArrowRight className="w-3 h-3 text-amber-400" />
-                    <span className="rounded bg-amber-500/25 px-1 text-amber-200">
-                      {fmtHexOffset(hop.targetOffset)} &quot;{hop.resolvedSuffix}&quot;
-                    </span>
-                  </span>
-                ))}
-                <span className="text-slate-400">·</span>
-                <span className="text-emerald-300">
-                  FQDN: {activeContext.jump.fullName} ({activeContext.jump.inlineBytes}B inline vs{' '}
-                  {activeContext.jump.uncompressedBytes}B uncompressed, saves{' '}
-                  {activeContext.jump.savedBytes}B)
-                </span>
-              </div>
-            )}
+      {/* 4. Active Byte / Subfield & Pointer Jump Inspector Banner (CSS-Grid locked to tallest description in packet) */}
+      <div
+        className="rounded-lg border border-slate-800 bg-slate-900/95 px-3 py-2.5 min-h-[58px] grid grid-cols-1 items-start"
+        data-testid="wire-inspector-banner"
+      >
+        {/* Invisible sizer stack: reserves exact height of the longest description in this packet */}
+        <div
+          aria-hidden="true"
+          data-wire-sizer="idle"
+          className="col-start-1 row-start-1 self-center invisible pointer-events-none select-none min-w-0 text-[11px] flex items-center gap-2"
+        >
+          <Layers className="w-3.5 h-3.5 shrink-0" />
+          <span>
+            Hover or click any hex byte, ASCII character, compression pointer, or decoded RFC field
+            below to highlight its exact wire span. Click to pin selection.
+          </span>
+        </div>
+        {inspectorSizerCandidates.map((cand) => (
+          <div
+            key={cand.key}
+            aria-hidden="true"
+            data-wire-sizer="candidate"
+            className="col-start-1 row-start-1 invisible pointer-events-none select-none min-w-0"
+          >
+            <InspectorDescriptionBody
+              section={cand.section}
+              field={cand.field}
+              jump={cand.jump}
+              byteOffset={cand.field?.startOffset ?? cand.section.startOffset}
+              byteValue={0xff}
+              showPinnedControl={true}
+              isSizer={true}
+            />
           </div>
-        ) : (
-          <div className="text-[11px] text-slate-400 flex items-center gap-2">
-            <Layers className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-            <span>
-              Hover or click any hex byte, ASCII character, compression pointer, or decoded RFC field
-              below to highlight its exact wire span. Click to pin selection.
-            </span>
-          </div>
-        )}
+        ))}
+
+        {/* Visible active or idle description */}
+        <div
+          className={`col-start-1 row-start-1 min-w-0 ${activeContext ? '' : 'self-center'}`}
+        >
+          {activeContext ? (
+            <InspectorDescriptionBody
+              section={activeContext.section}
+              field={activeContext.field}
+              jump={activeContext.jump}
+              byteOffset={activeSelection?.byteOffset}
+              byteValue={
+                activeSelection?.byteOffset !== undefined
+                  ? dissected.bytes[activeSelection.byteOffset]
+                  : undefined
+              }
+              showPinnedControl={Boolean(validPinned)}
+              onClearPin={() => setPinned(null)}
+            />
+          ) : (
+            <div className="text-[11px] text-slate-400 flex items-center gap-2">
+              <Layers className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+              <span>
+                Hover or click any hex byte, ASCII character, compression pointer, or decoded RFC
+                field below to highlight its exact wire span. Click to pin selection.
+              </span>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* 5. Synchronized Offset-Mapped Hex & ASCII Grid */}
