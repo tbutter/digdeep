@@ -19,6 +19,7 @@ import { ResponsesPanel } from '../../components/ResponsesPanel';
 import { ReverseDnsCard } from '../../components/ReverseDnsCard';
 import { SettingsModal } from '../../components/SettingsModal';
 import { WebAnalysisView } from '../../components/WebAnalysisView';
+import { WirePacketDissectorView } from '../../components/WireDissectorView';
 import { ZonesPanel } from '../../components/ZonesPanel';
 import { buildChainGraph } from '../../graph/layout';
 import { DEFAULT_USER_SETTINGS, saveSnapshot } from '../../storage/historyStore';
@@ -29,8 +30,10 @@ import {
 } from '../../urlState';
 import { runDnsvizAnalysis } from '../analyzer';
 import { runConsensusAnalysis } from '../consensusAnalyzer';
+import { base64ToBytes } from '../encoding';
 import { runMailAnalysis } from '../mailAnalyzer';
 import { runWebAnalysis } from '../webAnalyzer';
+import { dissectDnsWirePacket } from '../wireDissector';
 
 // Minimal localStorage shim for HistoryPanel stats
 const mem = new Map<string, string>();
@@ -92,6 +95,21 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(responsesHtml).toContain('Zonefile (.zone)');
       expect(responsesHtml).toContain('Export .zone');
       expect(responsesHtml).toContain('dig +dnssec +multi');
+      expect(responsesHtml).toContain('Decode ?dns= / Hex');
+
+      const compressedQuery =
+        cfSnap.queries.find(
+          (q) => dissectDnsWirePacket(base64ToBytes(q.wireBase64)).compressionJumps.length > 0
+        ) ?? cfSnap.queries[0];
+      const dissectedLive = dissectDnsWirePacket(base64ToBytes(compressedQuery.wireBase64));
+      const dissectorHtml = renderToStaticMarkup(
+        <WirePacketDissectorView dissected={dissectedLive} packetLabel="Live Response Wire" />
+      );
+      expect(dissectorHtml).toContain('16-Bit Header Flags Register');
+      expect(dissectorHtml).toContain('Decoded Packet Structure');
+      expect(dissectorHtml).toContain('Copy ?dns= Base64url');
+      expect(dissectorHtml).toContain('RFC 1035 §4.1.4 Compression Pointer Jumps');
+      expect(dissectorHtml).toContain('0xC0xx pointer');
 
       const zonesHtml = renderToStaticMarkup(<ZonesPanel snapshot={cfSnap} />);
       expect(zonesHtml).toContain('. (Root Zone)');
@@ -191,7 +209,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v21');
+    expect(swCode).toContain('digdeep-shell-v22');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge when navigator.onLine is false

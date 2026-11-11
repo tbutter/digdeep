@@ -1,4 +1,13 @@
-import { Binary, Check, Copy, Download, FileCode2, Terminal } from 'lucide-react';
+import {
+  AlertTriangle,
+  Binary,
+  Check,
+  Copy,
+  Download,
+  FileCode2,
+  Sparkles,
+  Terminal,
+} from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { formatDohShortLabel, rcodeToString } from '../dns/constants';
 import {
@@ -8,16 +17,44 @@ import {
   formatWireHexDump,
   generateCliReproducerCommands,
 } from '../dns/digFormat';
+import { base64ToBytes, bytesToBase64, bytesToBase64Url } from '../dns/encoding';
 import type { AnalysisSnapshot, DohQueryLog } from '../dns/types';
+import {
+  buildSyntheticLogFromDissected,
+  decodeUserWireInput,
+  dissectDnsWirePacket,
+} from '../dns/wireDissector';
 import { IpHoverBadge, parseIpToken, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
+import { WirePacketDissectorView } from './WireDissectorView';
+
+/**
+ * Compact RFC 1035 sample response for `www.example.org. A` with CNAME + A records
+ * demonstrating direct (`0xC00C`, `0xC010`) and chained (`0xC02D` -> `0xC010`) compression pointer jumps.
+ */
+const SAMPLE_COMPRESSED_HEX =
+  '1a2b81a00001000200000000' +
+  '03777777076578616d706c65036f72670000010001' +
+  'c00c0005000100000e1000070465646765c010' +
+  'c02d000100010000012c00045db8d822';
+
+const DETECTED_FORMAT_LABELS: Record<'doh-url' | 'hex-dump' | 'hex' | 'base64url', string> = {
+  'doh-url': 'RFC 8484 DoH ?dns= URL',
+  'hex-dump': 'Offset Hex Dump (xxd / DigDeep)',
+  hex: 'Raw Hexadecimal',
+  base64url: 'Base64 / Base64url',
+};
 
 export function ResponsesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
   seedIpAsnCacheFromSnapshot(snapshot);
   const [selectedId, setSelectedId] = useState<string>(snapshot.queries[0]?.id ?? '');
-  const [mode, setMode] = useState<'dig' | 'zonefile' | 'hex-resp' | 'hex-req'>('dig');
+  const [mode, setMode] = useState<'dig' | 'zonefile' | 'hex-resp' | 'hex-req' | 'custom-decode'>(
+    'dig'
+  );
   const [cliTool, setCliTool] = useState<'dig' | 'delv' | 'kdig'>('dig');
   const [copied, setCopied] = useState(false);
   const [copiedCli, setCopiedCli] = useState(false);
+  const [customWireInput, setCustomWireInput] = useState<string>('');
+  const [customSubView, setCustomSubView] = useState<'dissector' | 'dig'>('dissector');
 
   const selectedLog: DohQueryLog | undefined = useMemo(
     () => snapshot.queries.find((q) => q.id === selectedId) ?? snapshot.queries[0],
@@ -51,19 +88,66 @@ export function ResponsesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
     [selectedLog, snapshot.dohEndpoint, snapshot.validatedAt, snapshot.capturedAt]
   );
 
+  const activeWireDissection = useMemo(() => {
+    if (!selectedLog || (mode !== 'hex-resp' && mode !== 'hex-req')) {
+      return null;
+    }
+    const b64 = mode === 'hex-req' ? selectedLog.requestWireBase64 : selectedLog.wireBase64;
+    if (!b64) return null;
+    try {
+      const bytes = base64ToBytes(b64);
+      return {
+        dissected: dissectDnsWirePacket(bytes),
+        error: null as string | null,
+      };
+    } catch (err) {
+      return {
+        dissected: null,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }, [selectedLog, mode]);
+
+  const customDecodeResult = useMemo(() => {
+    if (!customWireInput.trim()) return null;
+    try {
+      const { bytes, detectedFormat } = decodeUserWireInput(customWireInput);
+      const dissected = dissectDnsWirePacket(bytes);
+      const syntheticLog = buildSyntheticLogFromDissected(dissected);
+      const digFormatted = syntheticLog ? formatPacketAsDig(syntheticLog) : '';
+      return {
+        detectedFormat,
+        dissected,
+        digFormatted,
+        error: null as string | null,
+      };
+    } catch (err) {
+      return {
+        detectedFormat: null,
+        dissected: null,
+        digFormatted: '',
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }, [customWireInput]);
+
   const hexRows = useMemo(() => {
+    if (mode === 'custom-decode') {
+      if (!customDecodeResult?.dissected) return [];
+      return formatWireHexDump(bytesToBase64(customDecodeResult.dissected.bytes));
+    }
     if (!selectedLog) return [];
     return formatWireHexDump(
       mode === 'hex-req' ? selectedLog.requestWireBase64 : selectedLog.wireBase64
     );
-  }, [selectedLog, mode]);
+  }, [selectedLog, mode, customDecodeResult]);
 
   const zoneFilename = `${snapshot.displayDomain === '.' ? 'root' : snapshot.displayDomain.replace(/[^a-z0-9.-]/gi, '_')}.zone`;
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 min-h-[540px]">
       {/* Left: DoH Query Waterfall Table */}
-      <div className="lg:col-span-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 overflow-hidden flex flex-col max-h-[70vh]">
+      <div className="lg:col-span-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 overflow-hidden flex flex-col max-h-[80vh]">
         <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
           <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">
             {formatDohShortLabel(snapshot.dohEndpoint)} DoH Wire Queries ({snapshot.queries.length})
@@ -127,8 +211,8 @@ export function ResponsesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
         </div>
       </div>
 
-      {/* Right: Packet Presentation (`dig`, RFC 1035 `.zone`, & Wire Hex) */}
-      <div className="lg:col-span-7 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 overflow-hidden flex flex-col max-h-[70vh]">
+      {/* Right: Packet Presentation (`dig`, RFC 1035 `.zone`, Interactive Wire Dissector & Offline Decoder) */}
+      <div className="lg:col-span-7 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 overflow-hidden flex flex-col max-h-[80vh]">
         {selectedLog ? (
           <>
             <div className="px-4 py-2.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
@@ -178,7 +262,20 @@ export function ResponsesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
                       : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
                   }`}
                 >
+                  <Binary className="w-3.5 h-3.5" />
                   Request Wire
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMode('custom-decode')}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer ${
+                    mode === 'custom-decode'
+                      ? 'bg-fuchsia-500 text-slate-950 font-semibold'
+                      : 'text-fuchsia-700 dark:text-fuchsia-300 hover:bg-fuchsia-500/15'
+                  }`}
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  Decode ?dns= / Hex
                 </button>
               </div>
 
@@ -200,9 +297,11 @@ export function ResponsesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
                         ? digText
                         : mode === 'zonefile'
                           ? zonefileText
-                          : hexRows
-                              .map((r) => `${r.offsetHex}  ${r.hexGroups}  |${r.ascii}|`)
-                              .join('\n');
+                          : mode === 'custom-decode' && customSubView === 'dig'
+                            ? (customDecodeResult?.digFormatted ?? '')
+                            : hexRows
+                                .map((r) => `${r.offsetHex}  ${r.hexGroups}  |${r.ascii}|`)
+                                .join('\n');
                     navigator.clipboard?.writeText(content);
                     setCopied(true);
                     setTimeout(() => setCopied(false), 1500);
@@ -220,7 +319,7 @@ export function ResponsesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
             </div>
 
             {/* CLI Command Reproducer Bar (dig / delv / kdig) */}
-            {cliCommands && (
+            {cliCommands && mode !== 'custom-decode' && (
               <div className="px-4 py-2 border-b border-slate-200 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-900/90 flex flex-wrap items-center justify-between gap-2 text-xs">
                 <div className="flex items-center gap-1.5 min-w-0 flex-1">
                   <div className="inline-flex items-center rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 p-0.5 shrink-0">
@@ -293,15 +392,146 @@ export function ResponsesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
                     );
                   })}
                 </pre>
+              ) : mode === 'hex-resp' || mode === 'hex-req' ? (
+                activeWireDissection?.dissected ? (
+                  <WirePacketDissectorView
+                    key={`${selectedLog.id}-${mode}`}
+                    dissected={activeWireDissection.dissected}
+                    packetLabel={
+                      mode === 'hex-req'
+                        ? `DNS Request Wire — ${selectedLog.qname} ${selectedLog.qtypeName}`
+                        : `DNS Response Wire — ${selectedLog.qname} ${selectedLog.qtypeName}`
+                    }
+                  />
+                ) : (
+                  <div className="rounded-lg border border-rose-500/40 bg-rose-950/20 p-3 text-rose-200 text-xs">
+                    {activeWireDissection?.error ?? 'Wire payload unavailable for this query.'}
+                  </div>
+                )
               ) : (
-                <div className="space-y-0.5">
-                  {hexRows.map((row) => (
-                    <div key={row.offsetHex} className="flex gap-4 whitespace-pre">
-                      <span className="text-slate-500 select-none">{row.offsetHex}</span>
-                      <span className="text-cyan-300">{row.hexGroups}</span>
-                      <span className="text-emerald-300/80">|{row.ascii}|</span>
+                /* Offline Raw Packet Decoder (?dns= / Base64url / Hex Dump) */
+                <div className="space-y-3 font-sans">
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/90 p-3 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <div className="text-xs font-semibold text-slate-100">
+                          Offline Raw DNS Wire Packet Decoder
+                        </div>
+                        <div className="text-[11px] text-slate-400">
+                          Paste an RFC 8484 DoH <code className="text-cyan-300">?dns=</code> URL,
+                          Base64url/Base64 payload, raw hex, or <code className="text-cyan-300">xxd</code> /
+                          DigDeep hex dump — decoded 100% locally in your browser.
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const bytes = base64ToBytes(selectedLog.wireBase64);
+                            setCustomWireInput(bytesToBase64Url(bytes));
+                          }}
+                          className="rounded border border-slate-700 hover:border-cyan-500 bg-slate-950 px-2 py-1 text-[11px] font-medium text-slate-200 cursor-pointer"
+                        >
+                          Load Selected Response
+                        </button>
+                        {selectedLog.requestWireBase64 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const reqB64Url = bytesToBase64Url(
+                                base64ToBytes(selectedLog.requestWireBase64)
+                              );
+                              const endpoint = selectedLog.endpoint || snapshot.dohEndpoint;
+                              setCustomWireInput(`${endpoint}?dns=${reqB64Url}`);
+                            }}
+                            className="rounded border border-slate-700 hover:border-cyan-500 bg-slate-950 px-2 py-1 text-[11px] font-medium text-slate-200 cursor-pointer"
+                          >
+                            Load Request ?dns= URL
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setCustomWireInput(SAMPLE_COMPRESSED_HEX)}
+                          className="rounded border border-fuchsia-500/40 hover:border-fuchsia-400 bg-fuchsia-950/30 px-2 py-1 text-[11px] font-medium text-fuchsia-200 cursor-pointer"
+                        >
+                          Sample Compressed Hex
+                        </button>
+                        {customWireInput && (
+                          <button
+                            type="button"
+                            onClick={() => setCustomWireInput('')}
+                            className="rounded border border-slate-800 hover:border-slate-600 bg-slate-950 px-2 py-1 text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
                     </div>
-                  ))}
+
+                    <textarea
+                      value={customWireInput}
+                      onChange={(e) => setCustomWireInput(e.target.value)}
+                      rows={3}
+                      spellCheck={false}
+                      placeholder="https://1.1.1.1/dns-query?dns=AAABAAAB... or Base64url or hex bytes (1a 2b 81 a0 ...)"
+                      className="w-full rounded-md border border-slate-700 focus:border-cyan-500 focus:outline-none bg-slate-950 px-3 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-600"
+                    />
+
+                    {customDecodeResult?.detectedFormat && customDecodeResult.dissected && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                        <span className="inline-flex items-center gap-1.5 rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 font-mono text-[11px] text-emerald-300">
+                          Detected: {DETECTED_FORMAT_LABELS[customDecodeResult.detectedFormat]} (
+                          {customDecodeResult.dissected.wireSize}B)
+                        </span>
+
+                        <div className="inline-flex items-center rounded-md border border-slate-700 bg-slate-950 p-0.5">
+                          <button
+                            type="button"
+                            onClick={() => setCustomSubView('dissector')}
+                            className={`px-2.5 py-0.5 rounded text-[11px] font-medium cursor-pointer ${
+                              customSubView === 'dissector'
+                                ? 'bg-cyan-500 text-slate-950 font-semibold'
+                                : 'text-slate-300 hover:text-white'
+                            }`}
+                          >
+                            Wire Dissector
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setCustomSubView('dig')}
+                            disabled={!customDecodeResult.digFormatted}
+                            className={`px-2.5 py-0.5 rounded text-[11px] font-medium cursor-pointer disabled:opacity-40 ${
+                              customSubView === 'dig'
+                                ? 'bg-cyan-500 text-slate-950 font-semibold'
+                                : 'text-slate-300 hover:text-white'
+                            }`}
+                          >
+                            Decoded dig Output
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {customDecodeResult?.error && (
+                    <div className="flex items-start gap-2 rounded-lg border border-rose-500/40 bg-rose-950/25 p-3 text-xs text-rose-200">
+                      <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                      <span>{customDecodeResult.error}</span>
+                    </div>
+                  )}
+
+                  {customDecodeResult?.dissected &&
+                    (customSubView === 'dig' && customDecodeResult.digFormatted ? (
+                      <pre className="whitespace-pre overflow-x-auto rounded-lg border border-slate-800 bg-slate-900/60 p-3 font-mono text-xs text-slate-200">
+                        {customDecodeResult.digFormatted}
+                      </pre>
+                    ) : (
+                      <WirePacketDissectorView
+                        key={`custom-${customDecodeResult.dissected.base64Url.slice(0, 32)}-${customDecodeResult.dissected.wireSize}`}
+                        dissected={customDecodeResult.dissected}
+                        packetLabel="Offline Decoded DNS Wire Packet"
+                      />
+                    ))}
                 </div>
               )}
             </div>
