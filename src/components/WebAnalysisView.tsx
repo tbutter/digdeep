@@ -36,6 +36,7 @@ import {
   findWireQueryByOwnerAndType,
 } from '../dns/wireQueryFilter';
 import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
+import { CryptoBlob } from './CryptoBlob';
 import { StatusBadge } from './StatusBadge';
 
 function getHttpsBadgeMeta(status: WebAnalysisResult['httpsStatus']): {
@@ -1390,9 +1391,14 @@ export function WebAnalysisView({
                         </span>
                         <span className="text-[11px] text-slate-400">TTL {rec.ttl}s</span>
                       </div>
-                      <div className="text-[11px] text-slate-600 dark:text-slate-300 break-all">
-                        {rec.certAssociationHex}
-                      </div>
+                      <CryptoBlob
+                        value={rec.certAssociationHex}
+                        compact
+                        headChars={16}
+                        tailChars={12}
+                        copyLabel="Copy Hex"
+                        testId={`crypto-web-tlsa-${idx}`}
+                      />
                     </div>
                   ))}
                 </div>
@@ -1457,9 +1463,14 @@ export function WebAnalysisView({
                           </span>
                         )}
                       </div>
-                      <div className="text-[11px] text-slate-600 dark:text-slate-300 break-all">
-                        {rec.fingerprintHex}
-                      </div>
+                      <CryptoBlob
+                        value={rec.fingerprintHex}
+                        compact
+                        headChars={16}
+                        tailChars={12}
+                        copyLabel="Copy Hex"
+                        testId={`crypto-web-sshfp-${idx}`}
+                      />
                     </div>
                   ))}
                 </div>

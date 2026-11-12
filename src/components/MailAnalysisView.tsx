@@ -46,6 +46,7 @@ import {
   findWireQueryByOwnerAndType,
 } from '../dns/wireQueryFilter';
 import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
+import { CryptoBlob } from './CryptoBlob';
 import { StatusBadge } from './StatusBadge';
 
 function getDaneBadgeMeta(status: DaneHostStatus): {
@@ -774,9 +775,19 @@ function MxHostCard({
                   <span className="font-mono text-[11px] text-slate-400">TTL {rec.ttl}s</span>
                 </div>
 
-                <div className="font-mono text-[11px] text-slate-600 dark:text-slate-300 break-all bg-slate-100/80 dark:bg-slate-950 rounded px-2 py-1">
-                  {rec.certAssociationHex || '(empty)'}
-                </div>
+                {rec.certAssociationHex ? (
+                  <CryptoBlob
+                    value={rec.certAssociationHex}
+                    headChars={16}
+                    tailChars={12}
+                    copyLabel="Copy Hex"
+                    testId={`crypto-mail-tlsa-${idx}`}
+                  />
+                ) : (
+                  <div className="font-mono text-[11px] text-slate-600 dark:text-slate-300 bg-slate-100/80 dark:bg-slate-950 rounded px-2 py-1">
+                    (empty)
+                  </div>
+                )}
 
                 <div className="text-[11px] text-slate-500 dark:text-slate-400">
                   {rec.usageDescription}
@@ -993,9 +1004,13 @@ function DkimSelectorCard({
       )}
 
       {sel.rawRecord && (
-        <div className="rounded-lg bg-slate-100 dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 px-2.5 py-1.5 font-mono text-[11px] text-slate-700 dark:text-slate-300 break-all">
-          {sel.rawRecord}
-        </div>
+        <CryptoBlob
+          value={sel.rawRecord}
+          headChars={28}
+          tailChars={12}
+          copyLabel="Copy TXT"
+          testId={`crypto-dkim-${sel.selector}`}
+        />
       )}
 
       {sel.issues.length > 0 && (

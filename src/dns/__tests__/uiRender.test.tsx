@@ -4,6 +4,7 @@ import { App } from '../../App';
 import { AuditPanel } from '../../components/AuditPanel';
 import { ChainGraphView, prepareExportSvgElement } from '../../components/ChainGraphView';
 import { ConsensusView } from '../../components/ConsensusView';
+import { CryptoBlob, formatMiddleEllipsis } from '../../components/CryptoBlob';
 import { EmailDaneCard } from '../../components/EmailDaneCard';
 import { GraphInspector } from '../../components/GraphInspector';
 import { HistoryPanel } from '../../components/HistoryPanel';
@@ -265,7 +266,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v30');
+    expect(swCode).toContain('digdeep-shell-v31');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -1643,6 +1644,323 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
         root.unmount();
       });
     } finally {
+      if (prevWindow) {
+        Object.defineProperty(globalThis, 'window', prevWindow);
+      } else {
+        Reflect.deleteProperty(globalThis, 'window');
+      }
+      Reflect.deleteProperty(globalThis, 'document');
+    }
+  });
+
+  it('renders concise mobile navigation tab labels (< sm) and tap-to-expand + 1-tap Copy cryptographic blobs (#53)', async () => {
+    // 1. Unit-verify formatMiddleEllipsis
+    expect(formatMiddleEllipsis('00', 12, 10)).toEqual({ truncated: false, preview: '00' });
+    const sampleSha256 = '0123456789abcdef'.repeat(4); // 64 hex chars
+    const ellipsized = formatMiddleEllipsis(sampleSha256, 12, 10);
+    expect(ellipsized.truncated).toBe(true);
+    expect(ellipsized.preview).toBe('0123456789ab…6789abcdef');
+
+    // 2. Verify App navigation tabs render concise < sm short labels alongside full sm:+ titles across Mail, Web & Consensus snapshots
+    const baseSnap: AnalysisSnapshot = {
+      id: 'snap-tabs-mail',
+      version: 1,
+      mode: 'mail',
+      targetName: 'example.org.',
+      displayDomain: 'example.org',
+      queryTypes: ['MX', 'TXT'],
+      dohEndpoint: 'https://1.1.1.1/dns-query',
+      capturedAt: 1700000000000,
+      validatedAt: 1700000000000,
+      durationMs: 95,
+      overallStatus: 'secure',
+      overallSummary: 'Validated chain',
+      zones: [
+        {
+          zoneName: '.',
+          parentZone: null,
+          depth: 0,
+          status: 'secure',
+          statusReason: 'Root KSK verified',
+          nsecMode: 'NSEC',
+          dnskeys: [
+            {
+              id: 'dnskey-root-20326',
+              zone: '.',
+              keyTag: 20326,
+              flags: 257,
+              algorithm: 8,
+              protocol: 3,
+              keySizeInfo: '2048-bit',
+              publicKeyBase64:
+                'AwEAAagAIKlVZrpC6Ia7gEzahOR+9W29euxhJhVVLOyQbSEW0O8gcCjFFVQUTf6v58fLjwBd0YI0EzrAcQqBGCzh/RStIoO8g0NfnfL2MTJRkxoXbfDaUeVPQuYEhg37NZWAJQ9VnMVDxP/VHL496M/QZxkjf5/Efucp2gaDX6RS6CXpoY68LsvPVjR0ZSwzz1apAzvN9dlzEheX7ICJBBtuA6G3LQpzW5hOA2hzCTMjJPJ8LbqF6dsV6DoBQzgul0sGIcGOYl7OyQdXfZ57relSQageu+ipAdTTJ25AsRTAoub8ONGcLmqrAmRLKBP1dfwhYB4N7knNnulqQxA+Uk1ihz0=',
+              isSep: true,
+              isZoneKey: true,
+              isRevoked: false,
+              role: 'trust-anchor',
+              signsTypes: ['DNSKEY'],
+              matchedByParentDs: true,
+              status: 'secure',
+              statusReason: 'Matches IANA trust anchor',
+            },
+          ],
+          dsVerifications: [
+            {
+              id: 'ds-org-26974',
+              ds: {
+                kind: 'DS',
+                keyTag: 26974,
+                algorithm: 8,
+                digestType: 2,
+                digestHex: sampleSha256,
+              },
+              dsTtl: 86400,
+              matchedKeyTag: 26974,
+              targetKeyFound: true,
+              computedDigestHex: sampleSha256,
+              digestValid: true,
+              status: 'secure',
+              reason: 'Matches child SEP DNSKEY',
+            },
+          ],
+          trustAnchorMatches: [],
+          rrsets: [],
+          negativeNodes: [],
+          nameservers: [],
+          zonemd: {
+            present: true,
+            status: 'valid-sync',
+            dnssecStatus: 'secure',
+            soaSerial: 2026111200,
+            records: [
+              {
+                serial: 2026111200,
+                scheme: 1,
+                schemeName: 'SIMPLE',
+                hashAlgorithm: 1,
+                hashAlgorithmName: 'SHA-384',
+                digestHex: 'ab'.repeat(48),
+                digestByteLength: 48,
+                digestLengthValid: true,
+                serialMatchesSoa: true,
+              },
+            ],
+            summary: 'Root ZONEMD SHA-384 matches SOA serial',
+          },
+        },
+      ],
+      cnameEdges: [],
+      findings: [],
+      queries: [],
+      trustAnchorsUsed: [],
+    };
+
+    const prevWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    const prevClipboard = Object.getOwnPropertyDescriptor(globalThis.navigator, 'clipboard');
+    try {
+      mem.clear();
+      saveSnapshot(baseSnap);
+      Object.defineProperty(globalThis, 'window', {
+        value: {
+          location: { search: '', href: 'https://example.test/' },
+          matchMedia: () => ({ matches: false }),
+          addEventListener: () => {},
+          removeEventListener: () => {},
+        },
+        configurable: true,
+      });
+
+      const mailAppHtml = renderToStaticMarkup(<App />);
+      expect(mailAppHtml).toContain('data-testid="nav-tab-short-mail"');
+      expect(mailAppHtml).toContain('>Mail</span>');
+      expect(mailAppHtml).toContain('data-testid="nav-tab-full-mail"');
+      expect(mailAppHtml).toContain('>Mail, DANE, SPF, DKIM &amp; DMARC</span>');
+      expect(mailAppHtml).toContain('>Graph</span>');
+      expect(mailAppHtml).toContain('>Audit</span>');
+      expect(mailAppHtml).toContain('>Wire</span>');
+      expect(mailAppHtml).toContain('>Zones</span>');
+      expect(mailAppHtml).toContain('>History</span>');
+
+      mem.clear();
+      saveSnapshot({ ...baseSnap, id: 'snap-tabs-web', mode: 'web' });
+      const webAppHtml = renderToStaticMarkup(<App />);
+      expect(webAppHtml).toContain('data-testid="nav-tab-short-web"');
+      expect(webAppHtml).toContain('>Web</span>');
+      expect(webAppHtml).toContain('>Web, HTTPS/SVCB, ECH, CAA &amp; DANE</span>');
+
+      mem.clear();
+      saveSnapshot({ ...baseSnap, id: 'snap-tabs-consensus', mode: 'consensus' });
+      const consensusAppHtml = renderToStaticMarkup(<App />);
+      expect(consensusAppHtml).toContain('data-testid="nav-tab-short-consensus"');
+      expect(consensusAppHtml).toContain('>Consensus</span>');
+      expect(consensusAppHtml).toContain('>Multi-Resolver DoH Consensus &amp; EDE</span>');
+      mem.clear();
+
+      // 3. Interactive JSDOM test: tap-to-expand + 1-tap Copy on CryptoBlob & ZonesPanel / EmailDaneCard
+      const { JSDOM } = (await import('jsdom' as string)) as {
+        JSDOM: new (markup?: string) => { window: Window & typeof globalThis };
+      };
+      const liveDom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>');
+      Object.defineProperty(globalThis, 'window', {
+        value: liveDom.window,
+        configurable: true,
+      });
+      Object.defineProperty(globalThis, 'document', {
+        value: liveDom.window.document,
+        configurable: true,
+      });
+      (liveDom.window as unknown as { matchMedia: (q: string) => { matches: boolean } }).matchMedia =
+        () => ({ matches: false });
+      (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
+        true;
+
+      const copiedTexts: string[] = [];
+      Object.defineProperty(globalThis.navigator, 'clipboard', {
+        value: {
+          writeText: async (txt: string) => {
+            copiedTexts.push(txt);
+          },
+        },
+        configurable: true,
+      });
+
+      const { act } = await import('react');
+      const { createRoot } = await import('react-dom/client');
+      const container = liveDom.window.document.getElementById('root')!;
+      const root = createRoot(container);
+
+      await act(async () => {
+        root.render(
+          <div>
+            <ZonesPanel snapshot={baseSnap} />
+            <CryptoBlob
+              value={sampleSha256}
+              headChars={12}
+              tailChars={10}
+              copyLabel="Copy Digest"
+              testId="crypto-unit-blob"
+            />
+            <EmailDaneCard
+              emailDane={{
+                inputKind: 'email',
+                email: 'alice@example.org',
+                localPart: 'alice',
+                domain: 'example.org.',
+                exactHashHex: '2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e88',
+                smimea: {
+                  protocol: 'SMIMEA',
+                  rfc: 'RFC 8162',
+                  queriedOwner:
+                    '2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e88._smimecert.example.org.',
+                  resolvedOwner:
+                    '2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e88._smimecert.example.org.',
+                  usedLowercaseFallback: false,
+                  cnameChain: [],
+                  status: 'present',
+                  dnssecStatus: 'secure',
+                  daneUsable: true,
+                  records: [
+                    {
+                      index: 0,
+                      ttl: 3600,
+                      usage: 3,
+                      usageMnemonic: 'DANE-EE',
+                      usageName: 'Domain-issued certificate',
+                      selector: 1,
+                      selectorMnemonic: 'SPKI',
+                      selectorName: 'SubjectPublicKeyInfo',
+                      matchingType: 1,
+                      matchingMnemonic: 'SHA2-256',
+                      matchingName: 'SHA-256 hash',
+                      certAssociationHex: sampleSha256,
+                      byteLength: 32,
+                      digestLengthValid: true,
+                    },
+                  ],
+                  cliVerifyCommand: 'dig +dnssec SMIMEA',
+                },
+                summary: 'DNSSEC-validated SMIMEA record.',
+              }}
+            />
+          </div>
+        );
+      });
+
+      // Ensure zero nested <button> inside <button>
+      expect(container.querySelectorAll('button button').length).toBe(0);
+
+      // Verify ZonesPanel DNSKEY public key blob starts collapsed even on desktop (`collapseOnDesktop`), expands on click, and copies full Base64 key
+      const dnskeyBlob = container.querySelector('[data-testid="crypto-dnskey-root-20326"]')!;
+      expect(dnskeyBlob.getAttribute('data-expanded')).toBe('false');
+      expect(dnskeyBlob.textContent).toContain('AwEAAagAIK…Uk1ihz0=');
+
+      const dnskeyToggle = container.querySelector(
+        '[data-testid="crypto-dnskey-root-20326-toggle"]'
+      ) as HTMLButtonElement;
+      await act(async () => {
+        dnskeyToggle.click();
+      });
+      expect(dnskeyBlob.getAttribute('data-expanded')).toBe('true');
+      expect(
+        container.querySelector('[data-testid="crypto-dnskey-root-20326-expanded-full"]')
+          ?.textContent
+      ).toBe(baseSnap.zones[0].dnskeys[0].publicKeyBase64);
+
+      const dnskeyCopy = container.querySelector(
+        '[data-testid="crypto-dnskey-root-20326-copy"]'
+      ) as HTMLButtonElement;
+      await act(async () => {
+        dnskeyCopy.click();
+      });
+      expect(copiedTexts.at(-1)).toBe(baseSnap.zones[0].dnskeys[0].publicKeyBase64);
+      expect(dnskeyCopy.textContent).toContain('Copied');
+
+      // Verify responsive CryptoBlob (< sm middle-ellipsis toggle + 1-tap Copy) expands & collapses cleanly
+      const unitBlob = container.querySelector('[data-testid="crypto-unit-blob"]')!;
+      const unitToggle = container.querySelector(
+        '[data-testid="crypto-unit-blob-toggle"]'
+      ) as HTMLButtonElement;
+      expect(unitBlob.getAttribute('data-expanded')).toBe('false');
+      expect(unitToggle.getAttribute('aria-expanded')).toBe('false');
+      expect(unitToggle.textContent).toContain('0123456789ab…6789abcdef');
+
+      await act(async () => {
+        unitToggle.click();
+      });
+      expect(unitBlob.getAttribute('data-expanded')).toBe('true');
+      expect(
+        container.querySelector('[data-testid="crypto-unit-blob-expanded-full"]')?.textContent
+      ).toBe(sampleSha256);
+
+      // Collapse back
+      const unitCollapseBtn = container.querySelector(
+        '[data-testid="crypto-unit-blob-toggle"]'
+      ) as HTMLButtonElement;
+      expect(unitCollapseBtn.getAttribute('aria-expanded')).toBe('true');
+      await act(async () => {
+        unitCollapseBtn.click();
+      });
+      expect(unitBlob.getAttribute('data-expanded')).toBe('false');
+
+      // Verify EmailDaneCard SMIMEA digest association CryptoBlob copy
+      const smimeaCopyBtn = container.querySelector(
+        '[data-testid="crypto-smimea-assoc-0-copy"]'
+      ) as HTMLButtonElement;
+      await act(async () => {
+        smimeaCopyBtn.click();
+      });
+      expect(copiedTexts.at(-1)).toBe(sampleSha256);
+
+      await act(async () => {
+        root.unmount();
+      });
+    } finally {
+      mem.clear();
+      if (prevClipboard) {
+        Object.defineProperty(globalThis.navigator, 'clipboard', prevClipboard);
+      } else {
+        Reflect.deleteProperty(globalThis.navigator, 'clipboard');
+      }
       if (prevWindow) {
         Object.defineProperty(globalThis, 'window', prevWindow);
       } else {

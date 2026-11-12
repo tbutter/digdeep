@@ -19,6 +19,7 @@ import { useState } from 'react';
 import { downloadTextFile } from '../dns/digFormat';
 import { displayFqdn } from '../dns/encoding';
 import type { EmailDaneAnalysis } from '../dns/types';
+import { CryptoBlob } from './CryptoBlob';
 import { StatusBadge } from './StatusBadge';
 
 export interface EmailDaneCardProps {
@@ -102,30 +103,31 @@ export function EmailDaneCard({
                 SHA-256-224(<code className="font-mono text-slate-800 dark:text-slate-200">&quot;{emailDane.localPart}&quot;</code>):
               </span>
             )}
-            <code className="rounded bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 px-1.5 py-0.5 font-mono text-[11px] text-cyan-700 dark:text-cyan-300 break-all">
-              {emailDane.exactHashHex}
-            </code>
-            <button
-              type="button"
-              onClick={() => copyText('hash-exact', emailDane.exactHashHex)}
-              className="inline-flex items-center gap-1 rounded border border-slate-200 dark:border-slate-700 hover:border-cyan-500 px-1.5 py-0.5 text-[10px] text-slate-600 dark:text-slate-300 cursor-pointer"
-              title="Copy 28-byte (56-hex) SHA-256 local-part hash"
-            >
-              {copiedId === 'hash-exact' ? (
-                <Check className="w-3 h-3 text-emerald-500" />
-              ) : (
-                <Copy className="w-3 h-3" />
-              )}
-              <span>{copiedId === 'hash-exact' ? 'Copied' : 'Copy Hash'}</span>
-            </button>
+            <CryptoBlob
+              value={emailDane.exactHashHex}
+              compact
+              headChars={12}
+              tailChars={10}
+              copyLabel="Copy Hash"
+              className="text-cyan-700 dark:text-cyan-300"
+              testId="crypto-email-hash-exact"
+            />
           </div>
 
           {emailDane.lowercaseHashHex && (
-            <div className="text-[11px] text-slate-500 dark:text-slate-400">
-              RFC 7929 §4 lowercase fallback (<code className="font-mono">&quot;{emailDane.localPart?.toLowerCase()}&quot;</code>):{' '}
-              <code className="font-mono text-[10px] text-slate-700 dark:text-slate-300 break-all">
-                {emailDane.lowercaseHashHex}
-              </code>
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+              <span>
+                RFC 7929 §4 lowercase fallback (
+                <code className="font-mono">&quot;{emailDane.localPart?.toLowerCase()}&quot;</code>):
+              </span>
+              <CryptoBlob
+                value={emailDane.lowercaseHashHex}
+                compact
+                headChars={12}
+                tailChars={10}
+                copyLabel="Copy"
+                testId="crypto-email-hash-lowercase"
+              />
             </div>
           )}
 
@@ -249,8 +251,20 @@ export function EmailDaneCard({
                         className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3 space-y-2.5 text-xs"
                       >
                         {rec.parseError || !dk ? (
-                          <div className="text-rose-600 dark:text-rose-400 font-mono text-[11px]">
-                            Failed to parse OpenPGP key ({rec.byteLength}B): {rec.parseError}
+                          <div className="space-y-1.5">
+                            <div className="text-rose-600 dark:text-rose-400 font-mono text-[11px]">
+                              Failed to parse OpenPGP key ({rec.byteLength}B): {rec.parseError}
+                            </div>
+                            {rec.keyBase64 && (
+                              <CryptoBlob
+                                value={rec.keyBase64}
+                                collapseOnDesktop
+                                headChars={16}
+                                tailChars={12}
+                                copyLabel="Copy Base64"
+                                testId={`crypto-openpgpkey-raw-${rec.index}`}
+                              />
+                            )}
                           </div>
                         ) : (
                           <>
@@ -285,27 +299,20 @@ export function EmailDaneCard({
                             </div>
 
                             {/* Primary Fingerprint */}
-                            <div className="rounded bg-slate-50 dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800 px-2.5 py-1.5 flex items-center justify-between gap-2">
-                              <div className="min-w-0">
-                                <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
-                                  Primary Key Fingerprint (Key ID 0x{dk.keyIdHex})
-                                </div>
-                                <div className="font-mono text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 break-all">
-                                  {formatPgpFingerprintGroups(dk.fingerprintHex)}
-                                </div>
+                            <div className="rounded bg-slate-50 dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800 px-2.5 py-1.5 space-y-1">
+                              <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
+                                Primary Key Fingerprint (Key ID 0x{dk.keyIdHex})
                               </div>
-                              <button
-                                type="button"
-                                onClick={() => copyText(`pgp-fp-${rec.index}`, dk.fingerprintHex)}
-                                className="inline-flex items-center gap-1 rounded border border-slate-200 dark:border-slate-700 hover:border-cyan-500 px-2 py-1 text-[10px] font-mono text-slate-600 dark:text-slate-300 shrink-0 cursor-pointer"
-                              >
-                                {copiedId === `pgp-fp-${rec.index}` ? (
-                                  <Check className="w-3 h-3 text-emerald-500" />
-                                ) : (
-                                  <Copy className="w-3 h-3" />
-                                )}
-                                <span>{copiedId === `pgp-fp-${rec.index}` ? 'Copied' : 'Copy'}</span>
-                              </button>
+                              <CryptoBlob
+                                value={formatPgpFingerprintGroups(dk.fingerprintHex)}
+                                copyValue={dk.fingerprintHex}
+                                compact
+                                headChars={19}
+                                tailChars={14}
+                                copyLabel="Copy"
+                                className="font-semibold text-emerald-700 dark:text-emerald-300 w-full justify-between"
+                                testId={`crypto-openpgpkey-fp-${rec.index}`}
+                              />
                             </div>
 
                             {/* Timestamps */}
@@ -647,8 +654,16 @@ export function EmailDaneCard({
                                   </span>
                                 )}
                               </div>
-                              <div className="text-[10px] text-slate-500 break-all">
-                                SHA-256: {cert.sha256FingerprintHex}
+                              <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500">
+                                <span>SHA-256:</span>
+                                <CryptoBlob
+                                  value={cert.sha256FingerprintHex}
+                                  compact
+                                  headChars={14}
+                                  tailChars={10}
+                                  copyLabel="Copy SHA-256"
+                                  testId={`crypto-smimea-cert-fp-${rec.index}`}
+                                />
                               </div>
                             </div>
 
@@ -708,8 +723,16 @@ export function EmailDaneCard({
                               Public Key: {spki.publicKeyAlgorithm}
                               {spki.publicKeyBitsOrCurve ? ` (${spki.publicKeyBitsOrCurve})` : ''}
                             </div>
-                            <div className="text-[10px] text-slate-500 break-all">
-                              SPKI SHA-256: {spki.spkiSha256Hex}
+                            <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500">
+                              <span>SPKI SHA-256:</span>
+                              <CryptoBlob
+                                value={spki.spkiSha256Hex}
+                                compact
+                                headChars={14}
+                                tailChars={10}
+                                copyLabel="Copy SPKI Hash"
+                                testId={`crypto-smimea-spki-fp-${rec.index}`}
+                              />
                             </div>
                             <button
                               type="button"
@@ -725,8 +748,17 @@ export function EmailDaneCard({
                             </button>
                           </div>
                         ) : (
-                          <div className="font-mono text-[11px] text-slate-700 dark:text-slate-300 break-all">
-                            Association Data ({rec.matchingMnemonic}): {rec.certAssociationHex}
+                          <div className="space-y-1">
+                            <div className="font-mono text-[10px] text-slate-500">
+                              Association Data ({rec.matchingMnemonic}):
+                            </div>
+                            <CryptoBlob
+                              value={rec.certAssociationHex}
+                              headChars={16}
+                              tailChars={12}
+                              copyLabel="Copy Hex"
+                              testId={`crypto-smimea-assoc-${rec.index}`}
+                            />
                           </div>
                         )}
                       </div>

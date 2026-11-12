@@ -1856,7 +1856,7 @@ export function App() {
             )}
 
             {/* Navigation Tabs */}
-            <div className="flex items-center gap-1.5 overflow-x-auto border-b border-slate-200 dark:border-slate-800 pb-2">
+            <div className="flex items-center gap-1 sm:gap-1.5 overflow-x-auto border-b border-slate-200 dark:border-slate-800 pb-2">
               {(
                 [
                   ...(activeSnapshot.mode === 'mail'
@@ -1864,6 +1864,7 @@ export function App() {
                         {
                           id: 'mail' as const,
                           label: 'Mail, DANE, SPF, DKIM & DMARC',
+                          shortLabel: 'Mail',
                           icon: Mail,
                         },
                       ]
@@ -1873,6 +1874,7 @@ export function App() {
                         {
                           id: 'web' as const,
                           label: 'Web, HTTPS/SVCB, ECH, CAA & DANE',
+                          shortLabel: 'Web',
                           icon: Globe,
                         },
                       ]
@@ -1882,32 +1884,42 @@ export function App() {
                         {
                           id: 'consensus' as const,
                           label: 'Multi-Resolver DoH Consensus & EDE',
+                          shortLabel: 'Consensus',
                           icon: Radio,
                         },
                       ]
                     : []),
-                  { id: 'graph' as const, label: 'DNSSEC Chain Graph', icon: Network },
+                  {
+                    id: 'graph' as const,
+                    label: 'DNSSEC Chain Graph',
+                    shortLabel: 'Graph',
+                    icon: Network,
+                  },
                   {
                     id: 'audit' as const,
                     label: 'Audit & RFC Checks',
+                    shortLabel: 'Audit',
                     icon: issueCount > 0 ? AlertTriangle : ShieldCheck,
                     badge: issueCount,
                   },
                   {
                     id: 'responses' as const,
                     label: 'DoH Wire Responses',
+                    shortLabel: 'Wire',
                     icon: Terminal,
                     badge: activeSnapshot.queries.length,
                   },
                   {
                     id: 'zones' as const,
                     label: 'Zones & Nameservers',
+                    shortLabel: 'Zones',
                     icon: Globe,
                     badge: activeSnapshot.zones.length,
                   },
                   {
                     id: 'history' as const,
                     label: 'Local History & Diff',
+                    shortLabel: 'History',
                     icon: Clock,
                     badge: snapshots.length,
                   },
@@ -1919,15 +1931,22 @@ export function App() {
                   <button
                     key={tab.id}
                     type="button"
+                    data-testid={`nav-tab-${tab.id}`}
+                    title={tab.label}
                     onClick={() => setActiveTab(tab.id)}
-                    className={`inline-flex items-center gap-2 shrink-0 whitespace-nowrap px-3 sm:px-3.5 py-2 rounded-xl text-xs font-medium transition-colors cursor-pointer ${
+                    className={`inline-flex items-center gap-1.5 sm:gap-2 shrink-0 whitespace-nowrap px-2.5 sm:px-3.5 py-2 rounded-xl text-xs font-medium transition-colors cursor-pointer ${
                       active
                         ? 'bg-cyan-500 text-slate-950 font-semibold shadow-sm'
                         : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-900'
                     }`}
                   >
-                    <Icon className="w-3.5 h-3.5" />
-                    <span>{tab.label}</span>
+                    <Icon className="w-3.5 h-3.5 shrink-0" />
+                    <span data-testid={`nav-tab-short-${tab.id}`} className="sm:hidden">
+                      {tab.shortLabel}
+                    </span>
+                    <span data-testid={`nav-tab-full-${tab.id}`} className="hidden sm:inline">
+                      {tab.label}
+                    </span>
                     {'badge' in tab && tab.badge !== undefined && (
                       <span
                         className={`rounded-full px-1.5 py-0.2 font-mono text-[10px] ${

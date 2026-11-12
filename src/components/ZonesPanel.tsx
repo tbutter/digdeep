@@ -25,6 +25,7 @@ import {
 import { displayFqdn, normalizeFqdn } from '../dns/encoding';
 import type { AnalysisSnapshot, ZoneAnalysis } from '../dns/types';
 import { IpHoverBadge, RpkiStatusBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
+import { CryptoBlob } from './CryptoBlob';
 import { StatusBadge } from './StatusBadge';
 
 const NARROW_ZONES_MEDIA_QUERY = '(max-width: 639px)';
@@ -628,15 +629,23 @@ export function ZonesPanel({
                       key={`cds-${cds.keyTag}-${cds.digestType}-${idx}`}
                       className="rounded border border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2 text-xs font-mono"
                     >
-                      <div className="min-w-0 break-all">
-                        <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 px-1.5 py-0.5 text-[10px] font-bold mr-2">
+                      <div className="min-w-0 flex flex-wrap items-center gap-1.5">
+                        <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 px-1.5 py-0.5 text-[10px] font-bold">
                           CDS
                         </span>
                         <span className="font-semibold text-slate-800 dark:text-slate-200">
                           #{cds.keyTag}
-                        </span>{' '}
-                        · {formatAlgorithm(cds.algorithm)} · {formatDigestType(cds.digestType)} ·{' '}
-                        <span className="text-slate-500 text-[11px]">{cds.digestHex}</span>
+                        </span>
+                        <span>
+                          · {formatAlgorithm(cds.algorithm)} · {formatDigestType(cds.digestType)} ·
+                        </span>
+                        <CryptoBlob
+                          value={cds.digestHex}
+                          compact
+                          headChars={12}
+                          tailChars={10}
+                          testId={`crypto-cds-${slug}-${cds.keyTag}-${idx}`}
+                        />
                       </div>
                       <span
                         className={`text-[10px] font-semibold ${
@@ -660,14 +669,28 @@ export function ZonesPanel({
                       key={`cdnskey-${ck.keyTag}-${idx}`}
                       className="rounded border border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2 text-xs font-mono"
                     >
-                      <div className="min-w-0 break-all">
-                        <span className="rounded bg-purple-500/15 text-purple-700 dark:text-purple-300 px-1.5 py-0.5 text-[10px] font-bold mr-2">
+                      <div className="min-w-0 flex flex-wrap items-center gap-1.5">
+                        <span className="rounded bg-purple-500/15 text-purple-700 dark:text-purple-300 px-1.5 py-0.5 text-[10px] font-bold">
                           CDNSKEY
                         </span>
                         <span className="font-semibold text-slate-800 dark:text-slate-200">
                           #{ck.keyTag}
-                        </span>{' '}
-                        · flags={ck.flags} · {formatAlgorithm(ck.algorithm)}
+                        </span>
+                        <span>· flags={ck.flags} · {formatAlgorithm(ck.algorithm)}</span>
+                        {!ck.isDeleteSignal && ck.publicKeyBase64 && (
+                          <>
+                            <span>·</span>
+                            <CryptoBlob
+                              value={ck.publicKeyBase64}
+                              collapseOnDesktop
+                              compact
+                              headChars={10}
+                              tailChars={8}
+                              copyLabel="Copy Key"
+                              testId={`crypto-cdnskey-${slug}-${ck.keyTag}-${idx}`}
+                            />
+                          </>
+                        )}
                       </div>
                       <span
                         className={`text-[10px] font-semibold ${
@@ -731,16 +754,24 @@ export function ZonesPanel({
                       key={`zonemd-${zmd.serial}-${zmd.scheme}-${zmd.hashAlgorithm}-${idx}`}
                       className="rounded border border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2 text-xs font-mono"
                     >
-                      <div className="min-w-0 break-all">
-                        <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 px-1.5 py-0.5 text-[10px] font-bold mr-2">
+                      <div className="min-w-0 flex flex-wrap items-center gap-1.5">
+                        <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 px-1.5 py-0.5 text-[10px] font-bold">
                           ZONEMD
                         </span>
                         <span className="font-semibold text-slate-800 dark:text-slate-200">
                           serial={zmd.serial}
-                        </span>{' '}
-                        · {zmd.schemeName} ({zmd.scheme}) · {zmd.hashAlgorithmName} (
-                        {zmd.hashAlgorithm}, {zmd.digestByteLength}B) ·{' '}
-                        <span className="text-slate-500 text-[11px]">{zmd.digestHex}</span>
+                        </span>
+                        <span>
+                          · {zmd.schemeName} ({zmd.scheme}) · {zmd.hashAlgorithmName} (
+                          {zmd.hashAlgorithm}, {zmd.digestByteLength}B) ·
+                        </span>
+                        <CryptoBlob
+                          value={zmd.digestHex}
+                          compact
+                          headChars={12}
+                          tailChars={10}
+                          testId={`crypto-zonemd-${slug}-${idx}`}
+                        />
                       </div>
                       <span
                         className={`text-[10px] font-semibold ${
@@ -942,6 +973,7 @@ export function ZonesPanel({
                         <th className="px-3 py-2">Flags</th>
                         <th className="px-3 py-2">Algorithm</th>
                         <th className="px-3 py-2">Strength</th>
+                        <th className="px-3 py-2">Public Key</th>
                         <th className="px-3 py-2">Signs RRsets</th>
                         <th className="px-3 py-2">Status</th>
                       </tr>
@@ -956,6 +988,21 @@ export function ZonesPanel({
                           <td className="px-3 py-2">{k.flags}</td>
                           <td className="px-3 py-2">{formatAlgorithm(k.algorithm)}</td>
                           <td className="px-3 py-2">{k.keySizeInfo}</td>
+                          <td className="px-3 py-2">
+                            {k.publicKeyBase64 ? (
+                              <CryptoBlob
+                                value={k.publicKeyBase64}
+                                collapseOnDesktop
+                                compact
+                                headChars={10}
+                                tailChars={8}
+                                copyLabel="Copy Key"
+                                testId={`crypto-dnskey-${slug}-${k.keyTag}`}
+                              />
+                            ) : (
+                              '—'
+                            )}
+                          </td>
                           <td className="px-3 py-2">
                             {k.signsTypes.length > 0 ? k.signsTypes.join(', ') : '—'}
                           </td>
@@ -982,13 +1029,21 @@ export function ZonesPanel({
                       key={dsv.id}
                       className="rounded-lg border border-slate-200 dark:border-slate-800 p-2.5 flex flex-wrap items-center justify-between gap-2 text-xs font-mono"
                     >
-                      <div className="min-w-0 break-all">
+                      <div className="min-w-0 flex flex-wrap items-center gap-1.5">
                         <span className="font-semibold text-slate-800 dark:text-slate-200">
                           #{dsv.ds.keyTag}
-                        </span>{' '}
-                        · {formatAlgorithm(dsv.ds.algorithm)} ·{' '}
-                        {formatDigestType(dsv.ds.digestType)} ·{' '}
-                        <span className="text-slate-500 text-[11px]">{dsv.ds.digestHex}</span>
+                        </span>
+                        <span>
+                          · {formatAlgorithm(dsv.ds.algorithm)} ·{' '}
+                          {formatDigestType(dsv.ds.digestType)} ·
+                        </span>
+                        <CryptoBlob
+                          value={dsv.ds.digestHex}
+                          compact
+                          headChars={12}
+                          tailChars={10}
+                          testId={`crypto-ds-${slug}-${dsv.ds.keyTag}`}
+                        />
                       </div>
                       <StatusBadge status={dsv.status} size="xs" />
                     </div>
