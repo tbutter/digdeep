@@ -4,6 +4,8 @@ import {
   Check,
   Clock,
   Download,
+  FileCode2,
+  FileText,
   Globe,
   Link2,
   Mail,
@@ -41,6 +43,11 @@ import { EmailDaneCard } from './components/EmailDaneCard';
 import { HistoryPanel } from './components/HistoryPanel';
 import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './components/IpHoverBadge';
 import { MailAnalysisView } from './components/MailAnalysisView';
+import {
+  copyTextToClipboard,
+  ReportExportModal,
+  type ReportExportTab,
+} from './components/ReportExportModal';
 import { type ExternalCustomWireRequest, ResponsesPanel } from './components/ResponsesPanel';
 import { ReverseDnsCard } from './components/ReverseDnsCard';
 import { SettingsModal } from './components/SettingsModal';
@@ -67,6 +74,7 @@ import {
   formatRelativeTime,
   parseOmniboxInput,
 } from './dns/omniboxParse';
+import { formatSnapshotMarkdownReport } from './dns/reportExport';
 import type { AnalysisMode, AnalysisProgress, AnalysisSnapshot } from './dns/types';
 import { runWebAnalysis } from './dns/webAnalyzer';
 import type { FocusedWireQueryRequest, FocusedWireSubMode } from './dns/wireQueryFilter';
@@ -289,6 +297,15 @@ export function App() {
   );
   const [copiedLink, setCopiedLink] = useState(false);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [copiedMarkdown, setCopiedMarkdown] = useState(false);
+  const copyMdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [reportModalOpen, setReportModalOpen] = useState(false);
+  const [reportModalInitialTab, setReportModalInitialTab] =
+    useState<ReportExportTab>('markdown');
+  const openReportModal = useCallback((tab: ReportExportTab = 'markdown') => {
+    setReportModalInitialTab(tab);
+    setReportModalOpen(true);
+  }, []);
   const { canInstall, isOffline, promptInstall } = usePwaInstall();
 
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -335,6 +352,7 @@ export function App() {
   useEffect(() => {
     return () => {
       if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      if (copyMdTimerRef.current) clearTimeout(copyMdTimerRef.current);
     };
   }, []);
 
@@ -1062,6 +1080,18 @@ export function App() {
     }
   };
 
+  const handleCopyMarkdownReport = async () => {
+    if (!activeSnapshot) return;
+    const md = formatSnapshotMarkdownReport(activeSnapshot, {
+      focus: focusedGraphTarget,
+    });
+    if (await copyTextToClipboard(md)) {
+      setCopiedMarkdown(true);
+      if (copyMdTimerRef.current) clearTimeout(copyMdTimerRef.current);
+      copyMdTimerRef.current = setTimeout(() => setCopiedMarkdown(false), 2000);
+    }
+  };
+
   const toggleQueryType = (t: string) => {
     setSelectedTypes((prev) => {
       if (prev.includes(t)) {
@@ -1775,7 +1805,7 @@ export function App() {
                   { new Date(activeSnapshot.capturedAt).toLocaleString() } ·{' '}
                   {activeSnapshot.queries.length} queries ({activeSnapshot.durationMs}ms)
                 </div>
-                <div className="flex items-center gap-1.5">
+                <div className="flex flex-wrap items-center gap-1.5">
                   <button
                     type="button"
                     onClick={() => void handleCopyShareLink()}
@@ -1797,6 +1827,41 @@ export function App() {
                         <span>Copy Link</span>
                       </>
                     )}
+                  </button>
+
+                  <button
+                    type="button"
+                    data-testid="copy-markdown-report-btn"
+                    onClick={() => void handleCopyMarkdownReport()}
+                    className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer ${
+                      copiedMarkdown
+                        ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                        : 'border-slate-200 dark:border-slate-700 hover:border-cyan-500 text-slate-700 dark:text-slate-200'
+                    }`}
+                    title="1-click copy GitHub-Flavored Markdown incident & diagnostic report"
+                  >
+                    {copiedMarkdown ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-500" />
+                        <span>Copied MD!</span>
+                      </>
+                    ) : (
+                      <>
+                        <FileText className="w-3.5 h-3.5 text-cyan-500" />
+                        <span>Copy MD</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    data-testid="open-report-ci-modal-btn"
+                    onClick={() => openReportModal('shell')}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-cyan-500 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 transition-colors cursor-pointer"
+                    title="Open Incident Report (.md) & CI DNSSEC/DANE Regression Check (.sh / GitHub Actions .yml) generator"
+                  >
+                    <FileCode2 className="w-3.5 h-3.5 text-cyan-500" />
+                    <span>CI / Report</span>
                   </button>
 
                   <button
@@ -2073,6 +2138,7 @@ export function App() {
                   setActiveTab('graph');
                 }}
                 onInspectWireQuery={handleInspectWireQuery}
+                onOpenReportModal={openReportModal}
               />
             )}
 
@@ -2219,6 +2285,14 @@ export function App() {
           </div>
         </div>
       </footer>
+
+      <ReportExportModal
+        open={reportModalOpen}
+        snapshot={activeSnapshot}
+        initialTab={reportModalInitialTab}
+        focusedGraphTarget={focusedGraphTarget}
+        onClose={() => setReportModalOpen(false)}
+      />
 
       <SettingsModal
         open={settingsOpen}

@@ -17,6 +17,7 @@ import {
   seedIpAsnCacheFromSnapshot,
 } from '../../components/IpHoverBadge';
 import { MailAnalysisView } from '../../components/MailAnalysisView';
+import { ReportExportModal } from '../../components/ReportExportModal';
 import { ResponsesPanel } from '../../components/ResponsesPanel';
 import { ReverseDnsCard } from '../../components/ReverseDnsCard';
 import { SettingsModal } from '../../components/SettingsModal';
@@ -268,7 +269,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v33');
+    expect(swCode).toContain('digdeep-shell-v34');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -2304,6 +2305,72 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(dom.window.document.title).toContain('example.com (POLICY ERROR)');
       expect(dom.window.document.title).not.toContain('example.com (BOGUS)');
       expect(container.textContent).toContain('POLICY ERROR');
+
+      // Verify 1-Click Copy MD & CI / Report modal (#36)
+      let copiedText = '';
+      Object.defineProperty(globalThis.navigator, 'clipboard', {
+        value: {
+          writeText: async (txt: string) => {
+            copiedText = txt;
+          },
+        },
+        configurable: true,
+      });
+
+      const copyMdBtn = container.querySelector(
+        '[data-testid="copy-markdown-report-btn"]'
+      ) as HTMLButtonElement | null;
+      expect(copyMdBtn).not.toBeNull();
+      await act(async () => {
+        copyMdBtn!.click();
+      });
+      expect(copiedText).toContain('# 🛑 DNS Diagnostic Report: `example.com` (POLICY ERROR)');
+      expect(copiedText).toContain('SPF_DNS_LOOKUP_LIMIT_EXCEEDED');
+      expect(container.textContent).toContain('Copied MD!');
+
+      const openCiModalBtn = container.querySelector(
+        '[data-testid="open-report-ci-modal-btn"]'
+      ) as HTMLButtonElement | null;
+      expect(openCiModalBtn).not.toBeNull();
+      await act(async () => {
+        openCiModalBtn!.click();
+      });
+
+      const modal = container.querySelector('[data-testid="report-export-modal"]');
+      expect(modal).not.toBeNull();
+      const preview = container.querySelector('[data-testid="report-modal-preview"]');
+      expect(preview?.textContent).toContain('#!/usr/bin/env sh');
+
+      // Switch to GitHub Actions (.yml) tab inside ReportExportModal
+      const wfTab = container.querySelector(
+        '[data-testid="report-modal-tab-workflow"]'
+      ) as HTMLButtonElement | null;
+      expect(wfTab).not.toBeNull();
+      await act(async () => {
+        wfTab!.click();
+      });
+      expect(preview?.textContent).toContain('name: "DNS Security Check (example.com)"');
+      expect(preview?.textContent).toContain('workflow_dispatch:');
+
+      // Switch to Incident Report (.md) tab and verify SSR rendering of ReportExportModal too
+      const mdTab = container.querySelector(
+        '[data-testid="report-modal-tab-markdown"]'
+      ) as HTMLButtonElement | null;
+      await act(async () => {
+        mdTab!.click();
+      });
+      expect(preview?.textContent).toContain('## Audit Findings');
+
+      const ssrModalHtml = renderToStaticMarkup(
+        <ReportExportModal
+          open={true}
+          snapshot={realDnssecBogusSnap}
+          initialTab="shell"
+          onClose={() => {}}
+        />
+      );
+      expect(ssrModalHtml).toContain('Incident Report &amp; CI Regression Check');
+      expect(ssrModalHtml).toContain('RRSIG &gt;=');
 
       await act(async () => {
         root.unmount();

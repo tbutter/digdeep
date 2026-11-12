@@ -1,7 +1,10 @@
 import {
   AlertTriangle,
   ArrowUpRight,
+  Check,
   CheckCircle2,
+  FileCode2,
+  FileText,
   Info,
   Server,
   ShieldAlert,
@@ -10,23 +13,36 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 import { formatDohShortLabel } from '../dns/constants';
+import { formatSnapshotMarkdownReport } from '../dns/reportExport';
 import type { AnalysisSnapshot, AuditFinding } from '../dns/types';
 import {
   type FocusedWireSubMode,
   findAuditFindingWireQuery,
 } from '../dns/wireQueryFilter';
+import { copyTextToClipboard, type ReportExportTab } from './ReportExportModal';
 import { StatusBadge } from './StatusBadge';
 
 export function AuditPanel({
   snapshot,
   onJumpToGraphTarget,
   onInspectWireQuery,
+  onOpenReportModal,
 }: {
   snapshot: AnalysisSnapshot;
   onJumpToGraphTarget: (targetId: string) => void;
   onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
+  onOpenReportModal?: (initialTab: ReportExportTab) => void;
 }) {
   const [filter, setFilter] = useState<'all' | AuditFinding['severity']>('all');
+  const [copiedReport, setCopiedReport] = useState(false);
+
+  const handleCopyMarkdown = async () => {
+    const md = formatSnapshotMarkdownReport(snapshot);
+    if (await copyTextToClipboard(md)) {
+      setCopiedReport(true);
+      setTimeout(() => setCopiedReport(false), 2000);
+    }
+  };
 
   const resolverCd0Query = snapshot.queries.find(
     (q) => !q.cd && !q.ecsSubnet && !q.purpose.startsWith('Consensus probe')
@@ -126,29 +142,70 @@ export function AuditPanel({
         </div>
       </div>
 
-      {/* Filter Bar */}
-      <div className="flex flex-wrap items-center gap-2">
-        {(
-          [
-            ['all', `All Findings (${snapshot.findings.length})`],
-            ['error', `Errors (${errors.length})`],
-            ['warning', `Warnings (${warnings.length})`],
-            ['info', `Notices (${infos.length})`],
-          ] as const
-        ).map(([key, label]) => (
+      {/* Filter Bar + Export Actions */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {(
+            [
+              ['all', `All Findings (${snapshot.findings.length})`],
+              ['error', `Errors (${errors.length})`],
+              ['warning', `Warnings (${warnings.length})`],
+              ['info', `Notices (${infos.length})`],
+            ] as const
+          ).map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => setFilter(key)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+                filter === key
+                  ? 'bg-cyan-500 text-slate-950 font-semibold'
+                  : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:border-slate-300 dark:hover:border-slate-700'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-1.5">
           <button
-            key={key}
             type="button"
-            onClick={() => setFilter(key)}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
-              filter === key
-                ? 'bg-cyan-500 text-slate-950 font-semibold'
-                : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:border-slate-300 dark:hover:border-slate-700'
+            data-testid="audit-copy-markdown-btn"
+            onClick={() => void handleCopyMarkdown()}
+            title="Copy self-contained GitHub-Flavored Markdown diagnostic report to clipboard"
+            className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
+              copiedReport
+                ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-cyan-500 text-slate-700 dark:text-slate-200'
             }`}
           >
-            {label}
+            {copiedReport ? (
+              <>
+                <Check className="w-3.5 h-3.5 text-emerald-500" />
+                <span>Copied MD!</span>
+              </>
+            ) : (
+              <>
+                <FileText className="w-3.5 h-3.5 text-cyan-500" />
+                <span>Copy Incident MD</span>
+              </>
+            )}
           </button>
-        ))}
+
+          {onOpenReportModal && (
+            <button
+              type="button"
+              data-testid="audit-open-ci-modal-btn"
+              onClick={() => onOpenReportModal('shell')}
+              title="Generate zero-dependency dig/delv CI shell script & GitHub Actions workflow"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-cyan-500 px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 transition-colors cursor-pointer"
+            >
+              <FileCode2 className="w-3.5 h-3.5 text-cyan-500" />
+              <span>CI Regression Check</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Findings List */}
