@@ -2,13 +2,14 @@ import {
   AlertTriangle,
   CheckCircle2,
   HelpCircle,
+  OctagonX,
   ShieldAlert,
   ShieldOff,
 } from 'lucide-react';
-import type { ValidationStatus } from '../dns/types';
+import type { SnapshotStatus } from '../dns/types';
 
 export const STATUS_META: Record<
-  ValidationStatus,
+  SnapshotStatus,
   {
     label: string;
     shortLabel: string;
@@ -74,6 +75,19 @@ export const STATUS_META: Record<
     svgBadgeBg: '#e11d48',
     svgBadgeText: '#ffffff',
   },
+  'policy-error': {
+    label: 'POLICY ERROR',
+    shortLabel: 'Policy Error',
+    badgeClass:
+      'bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/35',
+    dotClass: 'bg-rose-500',
+    borderClass: 'border-rose-500/50',
+    svgStroke: '#f43f5e',
+    svgFillDark: '#310b16',
+    svgFillLight: '#fff1f2',
+    svgBadgeBg: '#e11d48',
+    svgBadgeText: '#ffffff',
+  },
   indeterminate: {
     label: 'INDETERMINATE',
     shortLabel: 'Indeterminate',
@@ -93,7 +107,7 @@ export function StatusIcon({
   status,
   className = 'w-4 h-4',
 }: {
-  status: ValidationStatus;
+  status: SnapshotStatus;
   className?: string;
 }) {
   switch (status) {
@@ -105,6 +119,8 @@ export function StatusIcon({
       return <ShieldOff className={`${className} text-slate-400`} />;
     case 'bogus':
       return <ShieldAlert className={`${className} text-rose-500`} />;
+    case 'policy-error':
+      return <OctagonX className={`${className} text-rose-500`} />;
     case 'indeterminate':
       return <HelpCircle className={`${className} text-purple-400`} />;
   }
@@ -114,7 +130,7 @@ export function StatusBadge({
   status,
   size = 'sm',
 }: {
-  status: ValidationStatus;
+  status: SnapshotStatus;
   size?: 'xs' | 'sm' | 'md';
 }) {
   const meta = STATUS_META[status];

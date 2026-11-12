@@ -294,7 +294,19 @@ describe('RFC 7505, RFC 7672 (SMTP DANE), and RFC 7208 (SPF) Audit Scenarios', (
     expect(res.mailAnalysis.spf.verdict).toBe('permerror');
     expect(res.mailFindings.some((f) => f.code === 'SPF_DNS_LOOKUP_LIMIT_EXCEEDED')).toBe(true);
     expect(res.mailFindings.some((f) => f.code === 'SPF_DEPRECATED_PTR')).toBe(true);
-    expect(res.overallStatus).toBe('bogus');
+    expect(res.overallStatus).toBe('policy-error');
+    expect(res.overallSummary).toContain('Mail policy/DNS check failed:');
+
+    // When the target zone itself fails DNSSEC validation (`bogus`), overallStatus stays `'bogus'`
+    const bogusZoneRes = evaluateMailFromSnapshotData({
+      targetName: 'unsigned.example.',
+      queries,
+      zones: [{ ...unsignedZone, status: 'bogus' }],
+      cnameEdges: [],
+      targetDomainStatus: 'bogus',
+    });
+    expect(bogusZoneRes.overallStatus).toBe('bogus');
+    expect(bogusZoneRes.overallSummary).toContain('DNSSEC validation failed (BOGUS):');
   });
 
   it('performs exact 32-bit IPv4 and 128-bit IPv6 CIDR bitmask matching for SPF mechanisms', () => {

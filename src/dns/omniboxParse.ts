@@ -788,7 +788,10 @@ export function filterHistorySuggestions(
     const domain = snap.displayDomain.toLowerCase();
     const mode = (snap.mode ?? 'dnssec').toLowerCase();
     const types = snap.queryTypes.join(' ').toLowerCase();
-    const status = snap.overallStatus.toLowerCase();
+    const status =
+      snap.overallStatus === 'policy-error'
+        ? 'policy-error policy error'
+        : snap.overallStatus.toLowerCase();
     const resolver = formatDohShortLabel(snap.dohEndpoint).toLowerCase();
     const haystack = `${primary} ${domain} ${mode} ${types} ${status} ${resolver} ${snap.note?.toLowerCase() ?? ''}`;
 

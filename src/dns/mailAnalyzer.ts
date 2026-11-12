@@ -65,6 +65,7 @@ import type {
   SrvDiscoveredService,
   SrvDiscoveryAnalysis,
   SrvServiceRecordEntry,
+  SnapshotStatus,
   TlsaRecordDetail,
   TlsRptAnalysis,
   TlsRptUriDetail,
@@ -4733,6 +4734,11 @@ function evaluateSrvDiscoveryFromLogs(params: {
   };
 }
 
+function spfTreeHasBogusDnssec(node: SpfDomainNode): boolean {
+  if (node.dnssecStatus === 'bogus') return true;
+  return node.terms.some((t) => (t.childNode ? spfTreeHasBogusDnssec(t.childNode) : false));
+}
+
 /**
  * Pure, deterministic evaluation of MX, SMTP DANE (TLSA), SPF, DKIM, and DMARC from already-captured
  * `DohQueryLog[]` and WebCrypto-evaluated `ZoneAnalysis[]`.
@@ -4749,7 +4755,7 @@ export function evaluateMailFromSnapshotData(params: {
 }): {
   mailAnalysis: MailAnalysisResult;
   mailFindings: AuditFinding[];
-  overallStatus: ValidationStatus;
+  overallStatus: SnapshotStatus;
   overallSummary: string;
 } {
   const {
@@ -6019,9 +6025,29 @@ export function evaluateMailFromSnapshotData(params: {
     ...(srvDiscovery ? { srvDiscovery } : {}),
   };
 
-  // Compute unified top-level status & summary for Mail Mode
-  const hasMailError =
+  // Compute unified top-level status & summary for Mail Mode:
+  // Reserve `'bogus'` strictly for RFC 4033 cryptographic DNSSEC validation failures;
+  // use `'policy-error'` for non-DNSSEC mail protocol, syntax, or policy errors (e.g. SPF >10 lookups).
+  const hasMailDnssecBogus =
     targetDomainStatus === 'bogus' ||
+    mxDnssec.status === 'bogus' ||
+    nonNullHosts.some(
+      (h) =>
+        h.ipv4Status === 'bogus' ||
+        h.ipv6Status === 'bogus' ||
+        h.dane.dnssecStatus === 'bogus' ||
+        h.addresses.some((a) => a.ptrDnssecStatus === 'bogus')
+    ) ||
+    spfTreeHasBogusDnssec(rootSpfNode) ||
+    dmarc.dnssecStatus === 'bogus' ||
+    dkim.selectors.some((s) => s.dnssecStatus === 'bogus') ||
+    mtaSts.dnssecStatus === 'bogus' ||
+    tlsRpt.dnssecStatus === 'bogus' ||
+    bimi.dnssecStatus === 'bogus' ||
+    (srvDiscovery?.services.some((svc) => svc.dnssecStatus === 'bogus') ?? false);
+
+  const hasMailError =
+    hasMailDnssecBogus ||
     mxStatus === 'broken' ||
     daneStatus === 'bogus' ||
     spfVerdict === 'permerror' ||
@@ -6037,9 +6063,11 @@ export function evaluateMailFromSnapshotData(params: {
 
   const hasMailWarning = mailFindings.some((f) => f.severity === 'warning');
 
-  let overallStatus: ValidationStatus;
-  if (hasMailError) {
+  let overallStatus: SnapshotStatus;
+  if (hasMailDnssecBogus) {
     overallStatus = 'bogus';
+  } else if (hasMailError) {
+    overallStatus = 'policy-error';
   } else if (
     (daneStatus === 'all-valid' &&
       (spfVerdict === 'strict-fail' || spfVerdict === 'soft-fail') &&
@@ -6071,8 +6099,13 @@ export function evaluateMailFromSnapshotData(params: {
   if (overallStatus === 'bogus') {
     const firstErr = mailFindings.find((f) => f.severity === 'error');
     overallSummary = firstErr
-      ? `Mail DNS audit failed: ${firstErr.title}.`
-      : `DNSSEC or mail policy validation failed for ${dispTarget}.`;
+      ? `DNSSEC validation failed (BOGUS): ${firstErr.title}.`
+      : `DNSSEC validation failed (BOGUS) for ${dispTarget}.`;
+  } else if (overallStatus === 'policy-error') {
+    const firstErr = mailFindings.find((f) => f.severity === 'error');
+    overallSummary = firstErr
+      ? `Mail policy/DNS check failed: ${firstErr.title}.`
+      : `Mail policy validation failed for ${dispTarget}.`;
   } else if (mxStatus === 'null-mx') {
     overallSummary = `${dispTarget} Null MX (0 .) · SPF ${spfPresent ? `${spfState.effectiveAllQualifier ?? ''}all` : 'missing'} · ${dmarcLabel} · DNSSEC ${targetDomainStatus.toUpperCase()}.`;
   } else {

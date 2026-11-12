@@ -20,6 +20,7 @@ import { MailAnalysisView } from '../../components/MailAnalysisView';
 import { ResponsesPanel } from '../../components/ResponsesPanel';
 import { ReverseDnsCard } from '../../components/ReverseDnsCard';
 import { SettingsModal } from '../../components/SettingsModal';
+import { StatusBadge } from '../../components/StatusBadge';
 import { WebAnalysisView } from '../../components/WebAnalysisView';
 import {
   resetWireGridWidthPreference,
@@ -27,7 +28,7 @@ import {
 } from '../../components/WireDissectorView';
 import { isHealthyIntermediateParentZone, ZonesPanel } from '../../components/ZonesPanel';
 import { buildChainGraph } from '../../graph/layout';
-import { DEFAULT_USER_SETTINGS, saveSnapshot } from '../../storage/historyStore';
+import { DEFAULT_USER_SETTINGS, loadSnapshots, saveSnapshot } from '../../storage/historyStore';
 import {
   buildDeepLinkSearch,
   buildShareUrl,
@@ -267,7 +268,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v32');
+    expect(swCode).toContain('digdeep-shell-v33');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -2188,6 +2189,127 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
         root.unmount();
       });
     } finally {
+      if (prevWindow) {
+        Object.defineProperty(globalThis, 'window', prevWindow);
+      } else {
+        Reflect.deleteProperty(globalThis, 'window');
+      }
+      Reflect.deleteProperty(globalThis, 'document');
+    }
+  });
+
+  it('distinguishes POLICY ERROR from DNSSEC BOGUS in StatusBadge, App title/banner, and legacy snapshot loading', async () => {
+    const policyBadgeHtml = renderToStaticMarkup(<StatusBadge status="policy-error" size="md" />);
+    expect(policyBadgeHtml).toContain('POLICY ERROR');
+    expect(policyBadgeHtml).not.toContain('BOGUS');
+
+    const bogusBadgeHtml = renderToStaticMarkup(<StatusBadge status="bogus" size="md" />);
+    expect(bogusBadgeHtml).toContain('BOGUS');
+
+    const unsignedZone: ZoneAnalysis = {
+      zoneName: 'example.com.',
+      parentZone: 'com.',
+      depth: 2,
+      status: 'insecure',
+      statusReason: 'Provably unsigned delegation',
+      nsecMode: 'UNSIGNED',
+      dnskeys: [],
+      dsVerifications: [],
+      trustAnchorMatches: [],
+      rrsets: [],
+      negativeNodes: [],
+      nameservers: [],
+    };
+
+    const legacySpfPermerrorSnap: AnalysisSnapshot = {
+      id: 'snap-legacy-spf-permerror',
+      version: 1,
+      mode: 'mail',
+      targetName: 'example.com.',
+      displayDomain: 'example.com',
+      queryTypes: ['MX', 'TXT'],
+      dohEndpoint: 'https://cloudflare-dns.com/dns-query',
+      capturedAt: 1700000001000,
+      validatedAt: 1700000001000,
+      durationMs: 65,
+      // Simulate a pre-fix snapshot stored in localStorage with overallStatus: 'bogus' despite unsigned DNSSEC
+      overallStatus: 'bogus',
+      overallSummary: 'Mail policy/DNS check failed: SPF policy exceeds 10-DNS-lookup limit (11 / 10 lookups).',
+      zones: [unsignedZone],
+      cnameEdges: [],
+      findings: [
+        {
+          id: 'spf-limit-exceeded',
+          severity: 'error',
+          code: 'SPF_DNS_LOOKUP_LIMIT_EXCEEDED',
+          title: 'SPF policy exceeds 10-DNS-lookup limit (11 / 10 lookups)',
+          detail: 'RFC 7208 §4.6.4 limits SPF to 10 DNS-interactive lookups.',
+          rfc: 'RFC 7208 §4.6.4',
+        },
+      ],
+      queries: [],
+      trustAnchorsUsed: [],
+    };
+
+    const realDnssecBogusSnap: AnalysisSnapshot = {
+      ...legacySpfPermerrorSnap,
+      id: 'snap-real-dnssec-bogus',
+      capturedAt: 1700000000500,
+      zones: [{ ...unsignedZone, status: 'bogus', statusReason: 'RRSIG verification failed' }],
+    };
+
+    const { JSDOM } = (await import('jsdom' as string)) as {
+      JSDOM: new (
+        markup?: string,
+        options?: { url?: string }
+      ) => { window: Window & typeof globalThis };
+    };
+    const { createRoot } = await import('react-dom/client');
+    const { act } = await import('react');
+
+    const prevWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    try {
+      mem.clear();
+      // Write raw pre-fix JSON directly into localStorage to verify loadSnapshots() migration
+      globalThis.localStorage.setItem(
+        'digdeep:history:v1',
+        JSON.stringify([legacySpfPermerrorSnap, realDnssecBogusSnap])
+      );
+      const loaded = loadSnapshots();
+      expect(loaded.find((s) => s.id === 'snap-legacy-spf-permerror')?.overallStatus).toBe(
+        'policy-error'
+      );
+      expect(loaded.find((s) => s.id === 'snap-real-dnssec-bogus')?.overallStatus).toBe('bogus');
+
+      const dom = new JSDOM(
+        '<!doctype html><html><head><title></title></head><body><div id="root"></div></body></html>',
+        { url: 'https://digdeep.fyi/' }
+      );
+      (dom.window as unknown as { matchMedia: (q: string) => { matches: boolean } }).matchMedia =
+        () => ({ matches: false });
+      (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+      Object.defineProperty(globalThis, 'window', { value: dom.window, configurable: true });
+      Object.defineProperty(globalThis, 'document', {
+        value: dom.window.document,
+        configurable: true,
+      });
+
+      const container = dom.window.document.getElementById('root')!;
+      const root = createRoot(container);
+
+      await act(async () => {
+        root.render(<App />);
+      });
+
+      expect(dom.window.document.title).toContain('example.com (POLICY ERROR)');
+      expect(dom.window.document.title).not.toContain('example.com (BOGUS)');
+      expect(container.textContent).toContain('POLICY ERROR');
+
+      await act(async () => {
+        root.unmount();
+      });
+    } finally {
+      mem.clear();
       if (prevWindow) {
         Object.defineProperty(globalThis, 'window', prevWindow);
       } else {

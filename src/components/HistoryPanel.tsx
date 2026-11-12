@@ -15,7 +15,7 @@ import { formatDohShortLabel } from '../dns/constants';
 import type { AnalysisMode, AnalysisSnapshot } from '../dns/types';
 import { diffSnapshots, getStorageStats } from '../storage/historyStore';
 import { IpHoverBadge } from './IpHoverBadge';
-import { StatusBadge } from './StatusBadge';
+import { STATUS_META, StatusBadge } from './StatusBadge';
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -43,7 +43,9 @@ export function HistoryPanel({
   onImportJson: (text: string) => void;
 }) {
   const [query, setQuery] = useState('');
-  const [filter, setFilter] = useState<'all' | 'pinned' | 'secure' | 'bogus' | 'insecure'>('all');
+  const [filter, setFilter] = useState<
+    'all' | 'pinned' | 'secure' | 'bogus' | 'policy-error' | 'insecure'
+  >('all');
   const [diffAId, setDiffAId] = useState<string>(snapshots[1]?.id ?? snapshots[0]?.id ?? '');
   const [diffBId, setDiffBId] = useState<string>(snapshots[0]?.id ?? '');
   const [showDiff, setShowDiff] = useState(false);
@@ -60,6 +62,7 @@ export function HistoryPanel({
         return false;
       }
       if (filter === 'bogus' && s.overallStatus !== 'bogus') return false;
+      if (filter === 'policy-error' && s.overallStatus !== 'policy-error') return false;
       if (filter === 'insecure' && s.overallStatus !== 'insecure') return false;
       if (!q) return true;
       return (
@@ -204,7 +207,7 @@ export function HistoryPanel({
                 {snapshots.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.displayDomain} [{s.queryTypes.join(',')}] —{' '}
-                    {new Date(s.capturedAt).toLocaleString()} ({s.overallStatus.toUpperCase()})
+                    {new Date(s.capturedAt).toLocaleString()} ({STATUS_META[s.overallStatus].label})
                   </option>
                 ))}
               </select>
@@ -221,7 +224,7 @@ export function HistoryPanel({
                 {snapshots.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.displayDomain} [{s.queryTypes.join(',')}] —{' '}
-                    {new Date(s.capturedAt).toLocaleString()} ({s.overallStatus.toUpperCase()})
+                    {new Date(s.capturedAt).toLocaleString()} ({STATUS_META[s.overallStatus].label})
                   </option>
                 ))}
               </select>
@@ -356,7 +359,7 @@ export function HistoryPanel({
           />
         </div>
         <div className="flex flex-wrap gap-1.5">
-          {(['all', 'pinned', 'secure', 'bogus', 'insecure'] as const).map((f) => (
+          {(['all', 'pinned', 'secure', 'bogus', 'policy-error', 'insecure'] as const).map((f) => (
             <button
               key={f}
               type="button"
@@ -367,7 +370,7 @@ export function HistoryPanel({
                   : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300'
               }`}
             >
-              {f}
+              {f === 'policy-error' ? 'Policy Error' : f}
             </button>
           ))}
         </div>

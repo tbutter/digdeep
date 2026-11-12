@@ -678,7 +678,9 @@ export function App() {
 
   // Auto-upgrade any localStorage snapshots captured with an older validation engine version
   useEffect(() => {
-    const stale = snapshots.filter((s) => (s.version ?? 1) < SNAPSHOT_ENGINE_VERSION);
+    const stale = snapshots.filter(
+      (s) => (s.version ?? 1) < SNAPSHOT_ENGINE_VERSION && s.queries.length > 0
+    );
     if (stale.length === 0) return;
     let cancelled = false;
     void (async () => {

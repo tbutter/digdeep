@@ -445,7 +445,7 @@ export function formatSnapshotAsZonefile(
     '; DigDeep (https://digdeep.fyi) — RFC 1035 Master Zonefile Export',
     `; Target: ${snapshot.targetName} [${snapshot.queryTypes.join(', ')}]${snapshot.mode ? ` (mode: ${snapshot.mode})` : ''}`,
     `; Captured: ${new Date(snapshot.capturedAt).toISOString()} via ${snapshot.dohEndpoint}`,
-    `; Overall Validation Status: ${snapshot.overallStatus.toUpperCase()}`,
+    `; Overall Validation Status: ${snapshot.overallStatus === 'policy-error' ? 'POLICY ERROR' : snapshot.overallStatus.toUpperCase()}`,
     '; ============================================================================',
     '',
   ];

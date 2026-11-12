@@ -41,6 +41,7 @@ import type {
   EchConfigEntry,
   NegativeNode,
   RawCtIssuanceEntry,
+  SnapshotStatus,
   SshfpRecordDetail,
   SvcParamEntry,
   SvcbRdata,
@@ -1491,7 +1492,7 @@ export function evaluateWebFromSnapshotData(params: {
 }): {
   webAnalysis: WebAnalysisResult;
   webFindings: AuditFinding[];
-  overallStatus: ValidationStatus;
+  overallStatus: SnapshotStatus;
   overallSummary: string;
 } {
   const { targetName, queries, zones, targetDomainStatus, ctLogFetch, validatedAt } = params;
@@ -2146,17 +2147,27 @@ export function evaluateWebFromSnapshotData(params: {
     ...(ctAnalysis ? { ctAnalysis } : {}),
   };
 
-  // Synthesize overall status & summary for Web mode
-  let overallStatus: ValidationStatus = targetDomainStatus;
-  if (
-    httpsStatus === 'bogus' ||
-    caaStatus === 'invalid' ||
-    webDaneStatus === 'dane-bogus' ||
-    sshfpStatus === 'bogus'
-  ) {
+  // Synthesize overall status & summary for Web mode:
+  // Reserve `'bogus'` strictly for cryptographic DNSSEC failures; use `'policy-error'` for non-DNSSEC CAA/Web policy errors.
+  const hasWebDnssecBogus =
+    targetDomainStatus === 'bogus' ||
+    webAnalysis.addressDnssecStatus === 'bogus' ||
+    webAnalysis.httpsDnssecStatus === 'bogus' ||
+    caaAnalysis.dnssecStatus === 'bogus' ||
+    caaHops.some((h) => h.dnssecStatus === 'bogus') ||
+    tlsaDnssec.status === 'bogus' ||
+    sshfpDnssec.status === 'bogus';
+
+  const hasWebPolicyError =
+    caaStatus === 'invalid' || webFindings.some((f) => f.severity === 'error');
+
+  let overallStatus: SnapshotStatus = targetDomainStatus;
+  if (hasWebDnssecBogus) {
     overallStatus = 'bogus';
+  } else if (hasWebPolicyError) {
+    overallStatus = 'policy-error';
   } else if (
-    webFindings.some((f) => f.severity === 'error' || f.severity === 'warning') &&
+    webFindings.some((f) => f.severity === 'warning') &&
     overallStatus === 'secure'
   ) {
     overallStatus = 'warning';

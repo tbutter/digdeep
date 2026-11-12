@@ -2,6 +2,14 @@ import type { DohResolverRole, TrustAnchor } from './constants';
 
 export type ValidationStatus = 'secure' | 'insecure' | 'bogus' | 'warning' | 'indeterminate';
 
+/**
+ * Top-level snapshot verdict status:
+ * - `'bogus'` is reserved strictly for RFC 4033 cryptographic DNSSEC chain-of-trust failures.
+ * - `'policy-error'` denotes non-DNSSEC protocol, syntax, or policy errors (e.g. SPF >10-lookup
+ *   `permerror` / `+all`, malformed DMARC/MTA-STS/BIMI/CAA syntax, broken MX, or invalid cert/key RDATA).
+ */
+export type SnapshotStatus = ValidationStatus | 'policy-error';
+
 export type AnalysisMode = 'dnssec' | 'mail' | 'web' | 'consensus';
 
 export interface DnsHeaderFlags {
@@ -1686,7 +1694,7 @@ export interface AnalysisSnapshot {
   capturedAt: number; // ms epoch
   validatedAt: number; // ms epoch used for RRSIG timestamp checks
   durationMs: number;
-  overallStatus: ValidationStatus;
+  overallStatus: SnapshotStatus;
   overallSummary: string;
   resolverVerdict?: ResolverVerdict;
   zones: ZoneAnalysis[];

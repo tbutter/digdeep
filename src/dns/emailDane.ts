@@ -26,6 +26,7 @@ import type {
   EmailDaneSmimeaRecord,
   NegativeNode,
   OpenPgpSubkeyInfo,
+  SnapshotStatus,
   ValidationStatus,
   ZoneAnalysis,
 } from './types';
@@ -1190,7 +1191,7 @@ export async function evaluateEmailDaneFromSnapshotData(params: {
 }): Promise<{
   emailDane: EmailDaneAnalysis;
   findings: AuditFinding[];
-  overallStatusOverride?: ValidationStatus;
+  overallStatusOverride?: SnapshotStatus;
   overallSummaryOverride?: string;
 }> {
   const { derivedTargets, queries, zones, cnameEdges, dohEndpoint, validatedAt } = params;
@@ -1649,9 +1650,14 @@ export async function evaluateEmailDaneFromSnapshotData(params: {
     summary = `No OPENPGPKEY or SMIMEA records published for ${targetDisplay} (${domStatus === 'secure' ? 'authenticated denial of existence verified via NSEC/NSEC3' : domStatus.toUpperCase()}).`;
   }
 
-  let overallStatusOverride: ValidationStatus | undefined;
-  if (hasSpecError) {
+  const hasEmailDnssecBogus =
+    openpgpkeyResult?.dnssecStatus === 'bogus' || smimeaResult?.dnssecStatus === 'bogus';
+
+  let overallStatusOverride: SnapshotStatus | undefined;
+  if (hasEmailDnssecBogus) {
     overallStatusOverride = 'bogus';
+  } else if (hasSpecError) {
+    overallStatusOverride = 'policy-error';
   } else if (hasUnsignedPublished || hasLifecycleOrMismatchWarning) {
     overallStatusOverride = 'warning';
   }

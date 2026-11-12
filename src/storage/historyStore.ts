@@ -3,7 +3,7 @@ import {
   IANA_ROOT_TRUST_ANCHORS,
   type TrustAnchor,
 } from '../dns/constants';
-import type { AnalysisSnapshot, ValidationStatus } from '../dns/types';
+import type { AnalysisSnapshot, SpfDomainNode, ValidationStatus } from '../dns/types';
 
 const HISTORY_STORAGE_KEY = 'digdeep:history:v1';
 const SETTINGS_STORAGE_KEY = 'digdeep:settings:v1';
@@ -86,13 +86,92 @@ export function saveUserSettings(settings: UserSettings): void {
   }
 }
 
+function spfNodeHasBogus(node: SpfDomainNode | undefined): boolean {
+  if (!node) return false;
+  if (node.dnssecStatus === 'bogus') return true;
+  return node.terms.some((t) => spfNodeHasBogus(t.childNode));
+}
+
+export function normalizeLegacySnapshotStatus(snap: AnalysisSnapshot): AnalysisSnapshot {
+  if (snap.overallStatus !== 'bogus') {
+    return snap;
+  }
+  const mode = snap.mode ?? 'dnssec';
+  if (mode !== 'mail' && mode !== 'web' && !snap.emailDane) {
+    return snap;
+  }
+
+  const anyZoneBogus = snap.zones.some(
+    (z) =>
+      z.status === 'bogus' ||
+      z.rrsets.some((r) => r.status === 'bogus') ||
+      z.negativeNodes.some((n) => n.status === 'bogus') ||
+      z.dnskeys.some((k) => k.status === 'bogus') ||
+      z.dsVerifications.some((d) => d.status === 'bogus') ||
+      z.zonemd?.dnssecStatus === 'bogus'
+  );
+  if (anyZoneBogus || snap.consensusAnalysis?.overallVerdict === 'dnssec-bogus') {
+    return snap;
+  }
+
+  const m = snap.mailAnalysis;
+  const anyMailDnssecBogus = Boolean(
+    m &&
+      (m.mxDnssecStatus === 'bogus' ||
+        m.mxHosts.some(
+          (h) =>
+            h.ipv4Status === 'bogus' ||
+            h.ipv6Status === 'bogus' ||
+            h.dane.dnssecStatus === 'bogus' ||
+            h.addresses.some((a) => a.ptrDnssecStatus === 'bogus')
+        ) ||
+        spfNodeHasBogus(m.spf.rootNode) ||
+        m.dmarc.dnssecStatus === 'bogus' ||
+        m.dkim.selectors.some((s) => s.dnssecStatus === 'bogus') ||
+        m.mtaSts.dnssecStatus === 'bogus' ||
+        m.tlsRpt.dnssecStatus === 'bogus' ||
+        m.bimi.dnssecStatus === 'bogus' ||
+        (m.srvDiscovery?.services.some((svc) => svc.dnssecStatus === 'bogus') ?? false))
+  );
+  if (anyMailDnssecBogus) return snap;
+
+  const w = snap.webAnalysis;
+  const anyWebDnssecBogus = Boolean(
+    w &&
+      (w.addressDnssecStatus === 'bogus' ||
+        w.httpsDnssecStatus === 'bogus' ||
+        w.caa.dnssecStatus === 'bogus' ||
+        w.caa.hops.some((h) => h.dnssecStatus === 'bogus') ||
+        w.webDane.dnssecStatus === 'bogus' ||
+        w.sshfp.dnssecStatus === 'bogus')
+  );
+  if (anyWebDnssecBogus) return snap;
+
+  const ed = snap.emailDane;
+  const anyEmailDnssecBogus = Boolean(
+    ed && (ed.openpgpkey?.dnssecStatus === 'bogus' || ed.smimea?.dnssecStatus === 'bogus')
+  );
+  if (anyEmailDnssecBogus) return snap;
+
+  if (snap.zones.length === 0 && !m && !w && !ed) {
+    return snap;
+  }
+
+  return {
+    ...snap,
+    overallStatus: 'policy-error',
+  };
+}
+
 export function loadSnapshots(): AnalysisSnapshot[] {
   try {
     const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
     if (!raw) return [];
     const list = JSON.parse(raw);
     if (!Array.isArray(list)) return [];
-    return (list as AnalysisSnapshot[]).sort((a, b) => b.capturedAt - a.capturedAt);
+    return (list as AnalysisSnapshot[])
+      .map(normalizeLegacySnapshotStatus)
+      .sort((a, b) => b.capturedAt - a.capturedAt);
   } catch {
     return [];
   }
@@ -170,7 +249,7 @@ export function importSnapshotsFromJson(jsonText: string): AnalysisSnapshot[] {
   const existing = loadSnapshots();
   const byId = new Map<string, AnalysisSnapshot>();
   for (const s of existing) byId.set(s.id, s);
-  for (const s of valid) byId.set(s.id, s);
+  for (const s of valid) byId.set(s.id, normalizeLegacySnapshotStatus(s));
   return writeSnapshotsWithEviction(Array.from(byId.values()));
 }
 

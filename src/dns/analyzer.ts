@@ -76,6 +76,7 @@ import type {
   ReversePtrTargetEntry,
   RpkiRouteValidation,
   RrsigVerification,
+  SnapshotStatus,
   SoaAuditSummary,
   SoaRdata,
   SoaTimerIssue,
@@ -90,7 +91,7 @@ import type {
   ZonemdRecordDetail,
 } from './types';
 
-export const SNAPSHOT_ENGINE_VERSION = 15;
+export const SNAPSHOT_ENGINE_VERSION = 16;
 
 export interface AnalyzeOptions extends DohClientOptions {
   queryTypes?: string[];
@@ -2806,28 +2807,30 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     }
   }
 
-  let overallStatus: ValidationStatus = 'secure';
+  let dnssecOverallStatus: ValidationStatus = 'secure';
   const allRelevantStatuses = [
     ...targetLeafZones.map((z) => z.status),
     ...targetElementStatuses,
   ];
 
   if (allRelevantStatuses.includes('bogus')) {
-    overallStatus = 'bogus';
+    dnssecOverallStatus = 'bogus';
   } else if (
     targetElementStatuses.length > 0 &&
     targetElementStatuses.every((s) => s === 'insecure')
   ) {
-    overallStatus = 'insecure';
+    dnssecOverallStatus = 'insecure';
   } else if (targetLeafZones[targetLeafZones.length - 1]?.status === 'insecure') {
-    overallStatus = 'insecure';
+    dnssecOverallStatus = 'insecure';
   } else if (allRelevantStatuses.includes('indeterminate')) {
-    overallStatus = 'indeterminate';
+    dnssecOverallStatus = 'indeterminate';
   } else if (allRelevantStatuses.includes('warning')) {
-    overallStatus = 'warning';
+    dnssecOverallStatus = 'warning';
   } else {
-    overallStatus = 'secure';
+    dnssecOverallStatus = 'secure';
   }
+
+  let overallStatus: SnapshotStatus = dnssecOverallStatus;
 
   const deepestTargetZone =
     zones
@@ -2857,7 +2860,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       queries,
       zones,
       cnameEdges,
-      targetDomainStatus: overallStatus,
+      targetDomainStatus: dnssecOverallStatus,
       customDkimSelectors,
       mtaStsPolicyFetch,
     });
@@ -2874,7 +2877,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       queries,
       zones,
       cnameEdges,
-      targetDomainStatus: overallStatus,
+      targetDomainStatus: dnssecOverallStatus,
       ctLogFetch,
       validatedAt,
     });
@@ -2891,7 +2894,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       primaryEndpoint: dohEndpoint,
       queries,
       zones,
-      targetDomainStatus: overallStatus,
+      targetDomainStatus: dnssecOverallStatus,
     });
     consensusAnalysis = consensusResult.consensusAnalysis;
     findings.push(...consensusResult.consensusFindings);
@@ -2910,7 +2913,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       queries,
       zones,
       cnameEdges,
-      overallStatus,
+      overallStatus: dnssecOverallStatus,
     });
     reverseDns = rdnsEval.reverseDns;
     findings.push(...rdnsEval.findings);
@@ -2933,6 +2936,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       if (mode === 'dnssec') {
         if (
           emailEval.overallStatusOverride === 'bogus' ||
+          (emailEval.overallStatusOverride === 'policy-error' && overallStatus !== 'bogus') ||
           (emailEval.overallStatusOverride === 'warning' && overallStatus === 'secure')
         ) {
           overallStatus = emailEval.overallStatusOverride;
