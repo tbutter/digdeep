@@ -1,7 +1,10 @@
 import {
   AlertTriangle,
+  ArrowLeft,
   Binary,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Copy,
   Download,
   FileCode2,
@@ -64,10 +67,12 @@ export function ResponsesPanel({
   snapshot,
   focusedQuery = null,
   externalCustomWire = null,
+  resetToListSeq = 0,
 }: {
   snapshot: AnalysisSnapshot;
   focusedQuery?: FocusedWireQueryRequest | null;
   externalCustomWire?: ExternalCustomWireRequest | null;
+  resetToListSeq?: number;
 }) {
   seedIpAsnCacheFromSnapshot(snapshot);
   const [selectedId, setSelectedId] = useState<string>(() => {
@@ -82,6 +87,15 @@ export function ResponsesPanel({
         ? 'custom-decode'
         : (focusedQuery?.mode ?? (snapshot.queries.length === 0 ? 'custom-decode' : 'dig'))
   );
+  const [mobilePane, setMobilePane] = useState<'list' | 'detail'>(() => {
+    const hasValidFocusedQuery = Boolean(
+      focusedQuery && snapshot.queries.some((q) => q.id === focusedQuery.queryId)
+    );
+    if (externalCustomWire || hasValidFocusedQuery || snapshot.queries.length === 0) {
+      return 'detail';
+    }
+    return 'list';
+  });
   const [category, setCategory] = useState<WireQueryFilterCategory>('all');
   const [searchText, setSearchText] = useState<string>('');
   const [cliTool, setCliTool] = useState<'dig' | 'delv' | 'kdig'>('dig');
@@ -92,7 +106,11 @@ export function ResponsesPanel({
   );
   const [customSubView, setCustomSubView] = useState<'dissector' | 'dig'>('dissector');
   const rowRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const listPaneRef = useRef<HTMLDivElement | null>(null);
+  const detailPaneRef = useRef<HTMLDivElement | null>(null);
+  const packetScrollRef = useRef<HTMLDivElement | null>(null);
   const prevSnapshotIdRef = useRef<string>(snapshot.id);
+  const prevResetSeqRef = useRef<number>(resetToListSeq);
 
   // Sync external omnibox-pasted ?dns= / wire hex payloads into the Offline Wire Dissector
   useEffect(() => {
@@ -100,7 +118,18 @@ export function ResponsesPanel({
     setCustomWireInput(externalCustomWire.payload);
     setMode('custom-decode');
     setCustomSubView('dissector');
+    setMobilePane('detail');
   }, [externalCustomWire?.seq, externalCustomWire?.payload, externalCustomWire]);
+
+  // Return to mobile waterfall list when the user explicitly taps the Wire nav tab again
+  useEffect(() => {
+    if (prevResetSeqRef.current !== resetToListSeq) {
+      prevResetSeqRef.current = resetToListSeq;
+      if (snapshot.queries.length > 0) {
+        setMobilePane('list');
+      }
+    }
+  }, [resetToListSeq, snapshot.queries.length]);
 
   // Reset filters and selection when switching to a different snapshot while mounted
   useEffect(() => {
@@ -110,8 +139,10 @@ export function ResponsesPanel({
       setSearchText('');
       if (focusedQuery && snapshot.queries.some((q) => q.id === focusedQuery.queryId)) {
         setSelectedId(focusedQuery.queryId);
+        setMobilePane('detail');
       } else {
         setSelectedId(snapshot.queries[0]?.id ?? '');
+        setMobilePane(snapshot.queries.length === 0 ? 'detail' : 'list');
       }
     }
   }, [snapshot.id, snapshot.queries, focusedQuery]);
@@ -125,6 +156,7 @@ export function ResponsesPanel({
     if (focusedQuery.mode) {
       setMode(focusedQuery.mode);
     }
+    setMobilePane('detail');
     setCategory((prevCat) => (matchesWireQueryCategory(target, prevCat) ? prevCat : 'all'));
     setSearchText((prevSearch) => (matchesWireQuerySearch(target, prevSearch) ? prevSearch : ''));
     const timer = setTimeout(() => {
@@ -155,6 +187,63 @@ export function ResponsesPanel({
       snapshot.queries[0],
     [snapshot.queries, filteredQueries, selectedId]
   );
+
+  const navigationQueries = useMemo(() => {
+    if (
+      selectedLog &&
+      filteredQueries.length > 0 &&
+      filteredQueries.some((q) => q.id === selectedLog.id)
+    ) {
+      return filteredQueries;
+    }
+    return snapshot.queries;
+  }, [snapshot.queries, filteredQueries, selectedLog]);
+
+  const currentNavIndex = useMemo(() => {
+    if (!selectedLog) return -1;
+    return navigationQueries.findIndex((q) => q.id === selectedLog.id);
+  }, [navigationQueries, selectedLog]);
+
+  const prevQuery = currentNavIndex > 0 ? navigationQueries[currentNavIndex - 1] : null;
+  const nextQuery =
+    currentNavIndex >= 0 && currentNavIndex < navigationQueries.length - 1
+      ? navigationQueries[currentNavIndex + 1]
+      : null;
+
+  useEffect(() => {
+    if (packetScrollRef.current) {
+      packetScrollRef.current.scrollTop = 0;
+    }
+  }, [selectedLog?.id, mode]);
+
+  useEffect(() => {
+    if (mobilePane === 'detail') {
+      const el = detailPaneRef.current;
+      if (el && typeof el.getBoundingClientRect === 'function') {
+        const rect = el.getBoundingClientRect();
+        if (rect.top < 0 && typeof el.scrollIntoView === 'function') {
+          el.scrollIntoView({ block: 'start' });
+        }
+      }
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (selectedLog) {
+        const rowEl = rowRefs.current.get(selectedLog.id);
+        if (rowEl && typeof rowEl.scrollIntoView === 'function') {
+          rowEl.scrollIntoView({ block: 'nearest' });
+        }
+      }
+      const listEl = listPaneRef.current;
+      if (listEl && typeof listEl.getBoundingClientRect === 'function') {
+        const rect = listEl.getBoundingClientRect();
+        if (rect.top < 0 && typeof listEl.scrollIntoView === 'function') {
+          listEl.scrollIntoView({ block: 'start' });
+        }
+      }
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [mobilePane, selectedLog]);
 
   const maxLatency = useMemo(
     () => Math.max(1, ...snapshot.queries.map((q) => q.latencyMs)),
@@ -241,9 +330,19 @@ export function ResponsesPanel({
   const zoneFilename = `${snapshot.displayDomain === '.' ? 'root' : snapshot.displayDomain.replace(/[^a-z0-9.-]/gi, '_')}.zone`;
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 min-h-[540px]">
+    <div
+      data-testid="wire-responses-panel"
+      data-mobile-pane={mobilePane}
+      className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:min-h-[540px]"
+    >
       {/* Left: DoH Query Waterfall Table */}
-      <div className="lg:col-span-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 overflow-hidden flex flex-col max-h-[80vh]">
+      <div
+        ref={listPaneRef}
+        data-testid="wire-waterfall-pane"
+        className={`${
+          mobilePane === 'list' ? 'flex' : 'hidden lg:flex'
+        } lg:col-span-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 overflow-hidden flex-col max-h-[80vh]`}
+      >
         <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
           <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">
             {formatDohShortLabel(snapshot.dohEndpoint)} DoH Wire Queries (
@@ -252,7 +351,23 @@ export function ResponsesPanel({
               : snapshot.queries.length}
             )
           </div>
-          <div className="font-mono text-[11px] text-slate-400">application/dns-message</div>
+          <div className="flex items-center gap-2 shrink-0">
+            <div className="hidden sm:block font-mono text-[11px] text-slate-400">
+              application/dns-message
+            </div>
+            <button
+              type="button"
+              data-testid="wire-mobile-open-decoder"
+              onClick={() => {
+                setMode('custom-decode');
+                setMobilePane('detail');
+              }}
+              className="lg:hidden inline-flex items-center gap-1 rounded-md border border-fuchsia-500/35 bg-fuchsia-500/10 hover:bg-fuchsia-500/20 px-2 py-0.5 text-[11px] font-medium text-fuchsia-700 dark:text-fuchsia-300 cursor-pointer"
+            >
+              <Sparkles className="w-3 h-3" />
+              <span>Decode ?dns=</span>
+            </button>
+          </div>
         </div>
 
         {/* Search Input & Category Filter Pills */}
@@ -421,7 +536,13 @@ export function ResponsesPanel({
                   }}
                   data-query-id={q.id}
                   type="button"
-                  onClick={() => setSelectedId(q.id)}
+                  onClick={() => {
+                    setSelectedId(q.id);
+                    if (mode === 'custom-decode') {
+                      setMode('dig');
+                    }
+                    setMobilePane('detail');
+                  }}
                   className={`w-full text-left px-3.5 py-2.5 transition-colors cursor-pointer ${
                     active
                       ? 'bg-cyan-500/10 border-l-2 border-l-cyan-500'
@@ -452,9 +573,12 @@ export function ResponsesPanel({
                         </span>
                       )}
                     </div>
-                    <span className={`font-mono text-[11px] font-semibold shrink-0 ${rcodeColor}`}>
-                      {rcode}
-                    </span>
+                    <div className="inline-flex items-center gap-1 shrink-0">
+                      <span className={`font-mono text-[11px] font-semibold ${rcodeColor}`}>
+                        {rcode}
+                      </span>
+                      <ChevronRight className="w-3.5 h-3.5 text-slate-400 lg:hidden" />
+                    </div>
                   </div>
 
                   <div className="flex items-center justify-between text-[11px] text-slate-500 mt-1">
@@ -479,17 +603,128 @@ export function ResponsesPanel({
       </div>
 
       {/* Right: Packet Presentation (`dig`, RFC 1035 `.zone`, Interactive Wire Dissector & Offline Decoder) */}
-      <div className="lg:col-span-7 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 overflow-hidden flex flex-col max-h-[80vh]">
+      <div
+        ref={detailPaneRef}
+        data-testid="wire-detail-pane"
+        className={`${
+          mobilePane === 'detail' ? 'flex' : 'hidden lg:flex'
+        } lg:col-span-7 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 overflow-hidden flex-col max-h-[82vh] lg:max-h-[80vh]`}
+      >
+        {/* Sticky Mobile Packet Navigation Bar (`< lg`) */}
+        {snapshot.queries.length > 0 && (
+          <div
+            data-testid="wire-mobile-nav-bar"
+            className="lg:hidden sticky top-0 z-30 shrink-0 px-3 py-2 border-b border-slate-200 dark:border-slate-800 bg-slate-100/95 dark:bg-slate-900/95 backdrop-blur-sm space-y-1.5"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                data-testid="wire-mobile-back"
+                onClick={() => setMobilePane('list')}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-950 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400 shrink-0" />
+                <span>
+                  All Queries (
+                  {currentNavIndex >= 0
+                    ? `${currentNavIndex + 1}/${navigationQueries.length}`
+                    : navigationQueries.length}
+                  )
+                </span>
+              </button>
+
+              <div className="inline-flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  data-testid="wire-mobile-prev"
+                  disabled={!prevQuery}
+                  onClick={() => {
+                    if (!prevQuery) return;
+                    setSelectedId(prevQuery.id);
+                    if (mode === 'custom-decode') {
+                      setMode('dig');
+                    }
+                  }}
+                  aria-label="Previous DoH wire query"
+                  className="inline-flex items-center gap-0.5 rounded-lg border border-slate-200 dark:border-slate-700 enabled:hover:border-cyan-500 bg-white dark:bg-slate-950 px-2 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed enabled:cursor-pointer"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                  <span>Prev</span>
+                </button>
+                <button
+                  type="button"
+                  data-testid="wire-mobile-next"
+                  disabled={!nextQuery}
+                  onClick={() => {
+                    if (!nextQuery) return;
+                    setSelectedId(nextQuery.id);
+                    if (mode === 'custom-decode') {
+                      setMode('dig');
+                    }
+                  }}
+                  aria-label="Next DoH wire query"
+                  className="inline-flex items-center gap-0.5 rounded-lg border border-slate-200 dark:border-slate-700 enabled:hover:border-cyan-500 bg-white dark:bg-slate-950 px-2 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed enabled:cursor-pointer"
+                >
+                  <span>Next</span>
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+
+            {selectedLog && mode !== 'custom-decode' && (
+              <div
+                data-testid="wire-mobile-active-summary"
+                className="flex items-center justify-between gap-2 text-[11px]"
+              >
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="rounded bg-slate-200 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] font-bold text-slate-700 dark:text-slate-200 shrink-0">
+                    {selectedLog.qtypeName}
+                  </span>
+                  <span className="font-mono font-medium truncate text-slate-900 dark:text-slate-100">
+                    {selectedLog.qname}
+                  </span>
+                  {selectedLog.ecsSubnet && (
+                    <span className="rounded bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30 px-1.5 py-0.2 font-mono text-[10px] shrink-0">
+                      ECS {selectedLog.ecsSubnet}
+                    </span>
+                  )}
+                  {Boolean(selectedLog.endpoint) &&
+                    selectedLog.endpoint !== snapshot.dohEndpoint &&
+                    !selectedLog.ecsSubnet && (
+                      <span className="rounded bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border border-cyan-500/25 px-1.5 py-0.2 font-mono text-[10px] shrink-0">
+                        {formatDohShortLabel(selectedLog.endpoint)}
+                      </span>
+                    )}
+                </div>
+                <span className="font-mono text-[10px] text-slate-500 dark:text-slate-400 shrink-0">
+                  <span
+                    className={`font-semibold ${
+                      selectedLog.packet.flags.rcode === 0
+                        ? 'text-emerald-600 dark:text-emerald-400'
+                        : selectedLog.packet.flags.rcode === 3
+                          ? 'text-amber-600 dark:text-amber-400'
+                          : 'text-rose-600 dark:text-rose-400'
+                    }`}
+                  >
+                    {rcodeToString(selectedLog.packet.flags.rcode)}
+                  </span>{' '}
+                  · {selectedLog.packet.wireSize}B · {selectedLog.latencyMs}ms
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
         {selectedLog || mode === 'custom-decode' ? (
           <>
-            <div className="px-4 py-2.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
-              <div className="flex flex-wrap items-center gap-1.5">
+            <div className="px-3 sm:px-4 py-2 sm:py-2.5 shrink-0 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2 overflow-x-auto sm:flex-wrap">
+              <div className="flex items-center sm:flex-wrap gap-1.5 shrink-0">
                 {selectedLog && (
                   <>
                     <button
                       type="button"
                       onClick={() => setMode('dig')}
-                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer ${
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer ${
                         mode === 'dig'
                           ? 'bg-cyan-500 text-slate-950 font-semibold'
                           : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
@@ -501,7 +736,7 @@ export function ResponsesPanel({
                     <button
                       type="button"
                       onClick={() => setMode('zonefile')}
-                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer ${
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer ${
                         mode === 'zonefile'
                           ? 'bg-cyan-500 text-slate-950 font-semibold'
                           : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
@@ -513,7 +748,7 @@ export function ResponsesPanel({
                     <button
                       type="button"
                       onClick={() => setMode('hex-resp')}
-                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer ${
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer ${
                         mode === 'hex-resp'
                           ? 'bg-cyan-500 text-slate-950 font-semibold'
                           : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
@@ -525,7 +760,7 @@ export function ResponsesPanel({
                     <button
                       type="button"
                       onClick={() => setMode('hex-req')}
-                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer ${
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer ${
                         mode === 'hex-req'
                           ? 'bg-cyan-500 text-slate-950 font-semibold'
                           : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
@@ -539,7 +774,7 @@ export function ResponsesPanel({
                 <button
                   type="button"
                   onClick={() => setMode('custom-decode')}
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer ${
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer ${
                     mode === 'custom-decode'
                       ? 'bg-fuchsia-500 text-slate-950 font-semibold'
                       : 'text-fuchsia-700 dark:text-fuchsia-300 hover:bg-fuchsia-500/15'
@@ -550,12 +785,12 @@ export function ResponsesPanel({
                 </button>
               </div>
 
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1.5 shrink-0">
                 {(selectedLog || snapshot.zones.length > 0) && (
                   <button
                     type="button"
                     onClick={() => downloadTextFile(zonefileText, zoneFilename)}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 font-medium cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 font-medium whitespace-nowrap shrink-0 cursor-pointer"
                     title={`Download RFC 1035 Master Zonefile (${zoneFilename})`}
                   >
                     <Download className="w-3.5 h-3.5" />
@@ -579,7 +814,7 @@ export function ResponsesPanel({
                     setCopied(true);
                     setTimeout(() => setCopied(false), 1500);
                   }}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   {copied ? (
                     <Check className="w-3.5 h-3.5 text-emerald-500" />
@@ -593,7 +828,7 @@ export function ResponsesPanel({
 
             {/* CLI Command Reproducer Bar (dig / delv / kdig) */}
             {cliCommands && mode !== 'custom-decode' && (
-              <div className="px-4 py-2 border-b border-slate-200 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-900/90 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="px-3 sm:px-4 py-2 shrink-0 border-b border-slate-200 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-900/90 flex sm:flex-wrap items-center justify-between gap-2 text-xs">
                 <div className="flex items-center gap-1.5 min-w-0 flex-1">
                   <div className="inline-flex items-center rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 p-0.5 shrink-0">
                     {(['dig', 'delv', 'kdig'] as const).map((tool) => (
@@ -640,7 +875,10 @@ export function ResponsesPanel({
               </div>
             )}
 
-            <div className="p-2.5 sm:p-4 overflow-auto flex-1 bg-slate-950 text-slate-200 font-mono text-xs leading-relaxed">
+            <div
+              ref={packetScrollRef}
+              className="p-2.5 sm:p-4 overflow-auto flex-1 bg-slate-950 text-slate-200 font-mono text-xs leading-relaxed"
+            >
               {mode === 'dig' || mode === 'zonefile' ? (
                 <pre className="whitespace-pre overflow-x-auto">
                   {(mode === 'dig' ? digText : zonefileText).split('\n').map((line, idx, lines) => {

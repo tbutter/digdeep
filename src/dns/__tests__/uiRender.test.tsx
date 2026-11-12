@@ -35,10 +35,11 @@ import {
 } from '../../urlState';
 import { runDnsvizAnalysis } from '../analyzer';
 import { runConsensusAnalysis } from '../consensusAnalyzer';
-import { base64ToBytes, hexToBytes } from '../encoding';
+import { base64ToBytes, bytesToBase64, hexToBytes } from '../encoding';
 import { runMailAnalysis } from '../mailAnalyzer';
-import type { AnalysisSnapshot, ZoneAnalysis } from '../types';
+import type { AnalysisSnapshot, DohQueryLog, ZoneAnalysis } from '../types';
 import { runWebAnalysis } from '../webAnalyzer';
+import { buildDnsQuery, parseDnsPacket } from '../wire';
 import { dissectDnsWirePacket } from '../wireDissector';
 import {
   computeWireQueryCategoryCounts,
@@ -266,7 +267,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v31');
+    expect(swCode).toContain('digdeep-shell-v32');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -1961,6 +1962,232 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       } else {
         Reflect.deleteProperty(globalThis.navigator, 'clipboard');
       }
+      if (prevWindow) {
+        Object.defineProperty(globalThis, 'window', prevWindow);
+      } else {
+        Reflect.deleteProperty(globalThis, 'window');
+      }
+      Reflect.deleteProperty(globalThis, 'document');
+    }
+  });
+
+  it('supports mobile master-detail view switching and sticky Prev/Next packet navigation in ResponsesPanel', async () => {
+    const { JSDOM } = (await import('jsdom' as string)) as {
+      JSDOM: new (markup?: string) => { window: Window & typeof globalThis };
+    };
+    const { createRoot } = await import('react-dom/client');
+    const { act } = await import('react');
+
+    const makeLog = (
+      id: string,
+      qname: string,
+      qtype: number,
+      qtypeName: string,
+      purpose: string,
+      latencyMs: number
+    ): DohQueryLog => {
+      const reqBytes = buildDnsQuery(qname, qtype, { id: 0x1234 });
+      const respBytes = new Uint8Array(reqBytes);
+      respBytes[2] = 0x81; // QR=1, RD=1
+      respBytes[3] = 0xa0; // RA=1, AD=1, RCODE=0
+      const packet = parseDnsPacket(respBytes);
+      return {
+        id,
+        qname,
+        qtype,
+        qtypeName,
+        cd: false,
+        doBit: true,
+        endpoint: 'https://cloudflare-dns.com/dns-query',
+        startedAt: 1700000000000,
+        latencyMs,
+        httpStatus: 200,
+        wireBase64: bytesToBase64(respBytes),
+        requestWireBase64: bytesToBase64(reqBytes),
+        packet,
+        purpose,
+      };
+    };
+
+    const queries: DohQueryLog[] = [
+      makeLog('q-1', 'example.org.', 1, 'A', 'Target RRset query', 18),
+      makeLog('q-2', 'example.org.', 48, 'DNSKEY', 'Zone DNSKEY query', 24),
+      makeLog('q-3', 'example.org.', 43, 'DS', 'Parent DS delegation query', 21),
+      makeLog('q-4', 'example.org.', 28, 'AAAA', 'Target IPv6 RRset query', 15),
+    ];
+
+    const snap: AnalysisSnapshot = {
+      id: 'snap-wire-master-detail-test',
+      version: 1,
+      capturedAt: 1700000000000,
+      validatedAt: 1700000000000,
+      durationMs: 42,
+      targetName: 'example.org.',
+      displayDomain: 'example.org',
+      mode: 'dnssec',
+      queryTypes: ['A', 'AAAA'],
+      dohEndpoint: 'https://cloudflare-dns.com/dns-query',
+      overallStatus: 'secure',
+      overallSummary: 'DNSSEC chain verified',
+      zones: [],
+      cnameEdges: [],
+      findings: [],
+      queries,
+      trustAnchorsUsed: [],
+    };
+
+    // 1. SSR checks: default browse starts in mobile 'list' pane; focusedQuery starts in 'detail' pane
+    const defaultSsr = renderToStaticMarkup(<ResponsesPanel snapshot={snap} />);
+    expect(defaultSsr).toContain('data-mobile-pane="list"');
+    expect(defaultSsr).toContain('data-testid="wire-mobile-nav-bar"');
+    expect(defaultSsr).toContain('All Queries (1/4)');
+
+    const focusedSsr = renderToStaticMarkup(
+      <ResponsesPanel
+        snapshot={snap}
+        focusedQuery={{ queryId: 'q-3', mode: 'hex-resp', seq: 1 }}
+      />
+    );
+    expect(focusedSsr).toContain('data-mobile-pane="detail"');
+    expect(focusedSsr).toContain('All Queries (3/4)');
+
+    const customWireSsr = renderToStaticMarkup(
+      <ResponsesPanel
+        snapshot={snap}
+        externalCustomWire={{ payload: '1a2b81a000010000000000000000010001', seq: 1 }}
+      />
+    );
+    expect(customWireSsr).toContain('data-mobile-pane="detail"');
+
+    // 2. Interactive JSDOM flow: Waterfall list -> tap row -> Prev/Next steppers -> Back -> Filtered Prev/Next
+    const prevWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    try {
+      const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>');
+      (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+      Object.defineProperty(globalThis, 'window', { value: dom.window, configurable: true });
+      Object.defineProperty(globalThis, 'document', {
+        value: dom.window.document,
+        configurable: true,
+      });
+
+      const container = dom.window.document.getElementById('root')!;
+      const root = createRoot(container);
+
+      await act(async () => {
+        root.render(<ResponsesPanel snapshot={snap} resetToListSeq={0} />);
+      });
+
+      const getPanel = () => container.querySelector('[data-testid="wire-responses-panel"]')!;
+      const getWaterfallPane = () =>
+        container.querySelector('[data-testid="wire-waterfall-pane"]')!;
+      const getDetailPane = () => container.querySelector('[data-testid="wire-detail-pane"]')!;
+      const getBackBtn = () =>
+        container.querySelector('[data-testid="wire-mobile-back"]') as HTMLButtonElement;
+      const getPrevBtn = () =>
+        container.querySelector('[data-testid="wire-mobile-prev"]') as HTMLButtonElement;
+      const getNextBtn = () =>
+        container.querySelector('[data-testid="wire-mobile-next"]') as HTMLButtonElement;
+      const getSummary = () => container.querySelector('[data-testid="wire-mobile-active-summary"]');
+
+      // Starts on mobile waterfall list
+      expect(getPanel().getAttribute('data-mobile-pane')).toBe('list');
+      expect(getWaterfallPane().classList.contains('flex')).toBe(true);
+      expect(getWaterfallPane().classList.contains('hidden')).toBe(false);
+      expect(getDetailPane().classList.contains('hidden')).toBe(true);
+      expect(getDetailPane().classList.contains('lg:flex')).toBe(true);
+
+      // Tap query row q-2 (DNSKEY) -> switches to mobile detail pane at (2/4)
+      const row2 = container.querySelector('[data-query-id="q-2"]') as HTMLButtonElement;
+      await act(async () => {
+        row2.click();
+      });
+      expect(getPanel().getAttribute('data-mobile-pane')).toBe('detail');
+      expect(getWaterfallPane().classList.contains('hidden')).toBe(true);
+      expect(getWaterfallPane().classList.contains('lg:flex')).toBe(true);
+      expect(getDetailPane().classList.contains('flex')).toBe(true);
+      expect(getDetailPane().classList.contains('hidden')).toBe(false);
+      expect(getBackBtn().textContent).toContain('All Queries (2/4)');
+      expect(getSummary()?.textContent).toContain('DNSKEY');
+      expect(getPrevBtn().disabled).toBe(false);
+      expect(getNextBtn().disabled).toBe(false);
+
+      // Step Next -> (3/4) DS -> (4/4) AAAA (Next becomes disabled)
+      await act(async () => {
+        getNextBtn().click();
+      });
+      expect(getBackBtn().textContent).toContain('All Queries (3/4)');
+      expect(getSummary()?.textContent).toContain('DS');
+
+      await act(async () => {
+        getNextBtn().click();
+      });
+      expect(getBackBtn().textContent).toContain('All Queries (4/4)');
+      expect(getSummary()?.textContent).toContain('AAAA');
+      expect(getNextBtn().disabled).toBe(true);
+      expect(getPrevBtn().disabled).toBe(false);
+
+      // Step Prev back to (1/4) -> Prev becomes disabled
+      for (let i = 0; i < 3; i += 1) {
+        await act(async () => {
+          getPrevBtn().click();
+        });
+      }
+      expect(getBackBtn().textContent).toContain('All Queries (1/4)');
+      expect(getPrevBtn().disabled).toBe(true);
+
+      // Tap "All Queries (1/4)" back button -> returns to Waterfall list
+      await act(async () => {
+        getBackBtn().click();
+      });
+      expect(getPanel().getAttribute('data-mobile-pane')).toBe('list');
+
+      // Filter waterfall to DNSSEC (q-2 DNSKEY & q-3 DS), tap q-2, and verify (1/2) -> (2/2) stepping
+      const dnssecPill = container.querySelector(
+        '[data-testid="wire-filter-pill-dnssec"]'
+      ) as HTMLButtonElement;
+      await act(async () => {
+        dnssecPill.click();
+      });
+      const filteredRow2 = container.querySelector('[data-query-id="q-2"]') as HTMLButtonElement;
+      await act(async () => {
+        filteredRow2.click();
+      });
+      expect(getPanel().getAttribute('data-mobile-pane')).toBe('detail');
+      expect(getBackBtn().textContent).toContain('All Queries (1/2)');
+      expect(getPrevBtn().disabled).toBe(true);
+      expect(getNextBtn().disabled).toBe(false);
+
+      await act(async () => {
+        getNextBtn().click();
+      });
+      expect(getBackBtn().textContent).toContain('All Queries (2/2)');
+      expect(getSummary()?.textContent).toContain('DS');
+      expect(getNextBtn().disabled).toBe(true);
+
+      // Return to list, open offline decoder via mobile quick button, then reset via resetToListSeq
+      await act(async () => {
+        getBackBtn().click();
+      });
+      expect(getPanel().getAttribute('data-mobile-pane')).toBe('list');
+
+      const openDecoderBtn = container.querySelector(
+        '[data-testid="wire-mobile-open-decoder"]'
+      ) as HTMLButtonElement;
+      await act(async () => {
+        openDecoderBtn.click();
+      });
+      expect(getPanel().getAttribute('data-mobile-pane')).toBe('detail');
+      expect(container.textContent).toContain('Offline Raw DNS Wire Packet Decoder');
+
+      await act(async () => {
+        root.render(<ResponsesPanel snapshot={snap} resetToListSeq={1} />);
+      });
+      expect(getPanel().getAttribute('data-mobile-pane')).toBe('list');
+
+      await act(async () => {
+        root.unmount();
+      });
+    } finally {
       if (prevWindow) {
         Object.defineProperty(globalThis, 'window', prevWindow);
       } else {

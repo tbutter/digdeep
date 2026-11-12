@@ -272,6 +272,7 @@ export function App() {
     initialBootState.focusedTarget
   );
   const [focusedWireQuery, setFocusedWireQuery] = useState<FocusedWireQueryRequest | null>(null);
+  const [wireListResetSeq, setWireListResetSeq] = useState(0);
   const handleInspectWireQuery = useCallback(
     (queryId: string, mode: FocusedWireSubMode = 'dig') => {
       setFocusedWireQuery((prev) => ({
@@ -492,6 +493,7 @@ export function App() {
         setSnapshots(updatedList);
         setActiveSnapshot(snap);
         setFocusedWireQuery(null);
+        setExternalCustomWire(null);
 
         let nextTab: ActiveTab = activeTab;
         if (modeToRun === 'mail') {
@@ -1933,7 +1935,16 @@ export function App() {
                     type="button"
                     data-testid={`nav-tab-${tab.id}`}
                     title={tab.label}
-                    onClick={() => setActiveTab(tab.id)}
+                    onClick={() => {
+                      if (tab.id === 'responses') {
+                        setFocusedWireQuery(null);
+                        if (activeSnapshot.queries.length > 0) {
+                          setExternalCustomWire(null);
+                        }
+                        setWireListResetSeq((s) => s + 1);
+                      }
+                      setActiveTab(tab.id);
+                    }}
                     className={`inline-flex items-center gap-1.5 sm:gap-2 shrink-0 whitespace-nowrap px-2.5 sm:px-3.5 py-2 rounded-xl text-xs font-medium transition-colors cursor-pointer ${
                       active
                         ? 'bg-cyan-500 text-slate-950 font-semibold shadow-sm'
@@ -2016,7 +2027,14 @@ export function App() {
                 key={activeSnapshot.id}
                 snapshot={activeSnapshot}
                 onOpenChainGraph={() => setActiveTab('graph')}
-                onOpenWireResponses={() => setActiveTab('responses')}
+                onOpenWireResponses={() => {
+                  setFocusedWireQuery(null);
+                  if (activeSnapshot.queries.length > 0) {
+                    setExternalCustomWire(null);
+                  }
+                  setWireListResetSeq((s) => s + 1);
+                  setActiveTab('responses');
+                }}
                 onInspectWireQuery={handleInspectWireQuery}
               />
             )}
@@ -2061,6 +2079,7 @@ export function App() {
                 snapshot={activeSnapshot}
                 focusedQuery={focusedWireQuery}
                 externalCustomWire={externalCustomWire}
+                resetToListSeq={wireListResetSeq}
               />
             )}
 
