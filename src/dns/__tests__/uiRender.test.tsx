@@ -2386,6 +2386,22 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(ssrVerifierHtml).toContain('100% Local WebCrypto · Zero Upload');
       expect(ssrVerifierHtml).toContain('data-testid="email-verifier-textarea"');
       expect(ssrVerifierHtml).toContain('Verify DKIM / ARC / DMARC');
+      expect(ssrVerifierHtml).toContain('text-base sm:text-xs');
+
+      // Verify #44 mobile input zoom prevention & DNS keyboard attributes on App omnibox + PSL overlay
+      const omniboxInput = container.querySelector(
+        'input[aria-label="Search domain, URL, email, IP, CLI command, or DNS wire packet"]'
+      ) as HTMLInputElement | null;
+      expect(omniboxInput).not.toBeNull();
+      expect(omniboxInput!.className).toContain('text-base sm:text-sm');
+      expect(omniboxInput!.getAttribute('autocapitalize')).toBe('none');
+      expect(omniboxInput!.getAttribute('autocorrect')).toBe('off');
+      expect(omniboxInput!.getAttribute('spellcheck')).toBe('false');
+      expect(omniboxInput!.getAttribute('enterkeyhint')).toBe('search');
+      const pslOverlay = container.querySelector('[data-testid="search-psl-overlay"]');
+      if (pslOverlay) {
+        expect(pslOverlay.className).toContain('text-base sm:text-sm');
+      }
 
       await act(async () => {
         root.unmount();

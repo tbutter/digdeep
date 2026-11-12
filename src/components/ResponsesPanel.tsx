@@ -378,6 +378,10 @@ export function ResponsesPanel({
               <input
                 type="text"
                 value={searchText}
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                enterKeyHint="search"
                 onChange={(e) => {
                   const next = e.target.value;
                   setSearchText(next);
@@ -389,7 +393,7 @@ export function ResponsesPanel({
                 placeholder="Filter qname, type, resolver, ECS, RCODE, EDE…"
                 aria-label="Filter DoH wire queries"
                 data-testid="wire-query-search"
-                className="w-full rounded-lg border border-slate-200 dark:border-slate-700/90 bg-white dark:bg-slate-900 pl-8 pr-7 py-1.5 text-xs font-mono text-slate-900 dark:text-slate-100 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500"
+                className="w-full rounded-lg border border-slate-200 dark:border-slate-700/90 bg-white dark:bg-slate-900 pl-8 pr-7 py-1.5 text-base sm:text-xs font-mono text-slate-900 dark:text-slate-100 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500"
               />
               {searchText.length > 0 && (
                 <button
@@ -985,9 +989,11 @@ export function ResponsesPanel({
                       value={customWireInput}
                       onChange={(e) => setCustomWireInput(e.target.value)}
                       rows={3}
+                      autoCapitalize="none"
+                      autoCorrect="off"
                       spellCheck={false}
                       placeholder="https://1.1.1.1/dns-query?dns=AAABAAAB... or Base64url or hex bytes (1a 2b 81 a0 ...)"
-                      className="w-full rounded-md border border-slate-700 focus:border-cyan-500 focus:outline-none bg-slate-950 px-3 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-600"
+                      className="w-full rounded-md border border-slate-700 focus:border-cyan-500 focus:outline-none bg-slate-950 px-3 py-2 font-mono text-base sm:text-xs text-slate-100 placeholder:text-slate-600"
                     />
 
                     {customDecodeResult?.detectedFormat && customDecodeResult.dissected && (

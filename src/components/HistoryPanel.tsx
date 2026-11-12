@@ -202,7 +202,7 @@ export function HistoryPanel({
               <select
                 value={diffAId}
                 onChange={(e) => setDiffAId(e.target.value)}
-                className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-1.5 text-xs font-mono"
+                className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-1.5 text-base sm:text-xs font-mono"
               >
                 {snapshots.map((s) => (
                   <option key={s.id} value={s.id}>
@@ -219,7 +219,7 @@ export function HistoryPanel({
               <select
                 value={diffBId}
                 onChange={(e) => setDiffBId(e.target.value)}
-                className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-1.5 text-xs font-mono"
+                className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-1.5 text-base sm:text-xs font-mono"
               >
                 {snapshots.map((s) => (
                   <option key={s.id} value={s.id}>
@@ -353,9 +353,13 @@ export function HistoryPanel({
           <input
             type="text"
             value={query}
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            enterKeyHint="search"
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Filter historic snapshots in localStorage by domain or RR type…"
-            className="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 pl-9 pr-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:border-cyan-500"
+            className="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 pl-9 pr-3 py-2 text-base sm:text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:border-cyan-500"
           />
         </div>
         <div className="flex flex-wrap gap-1.5">

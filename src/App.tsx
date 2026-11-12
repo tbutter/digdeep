@@ -1275,7 +1275,7 @@ export function App() {
                   ref={inputOverlayRef}
                   aria-hidden="true"
                   data-testid="search-psl-overlay"
-                  className="pointer-events-none absolute inset-0 flex items-center rounded-xl border border-transparent pl-10 pr-24 py-2.5 font-mono text-sm whitespace-pre overflow-hidden select-none z-10"
+                  className="pointer-events-none absolute inset-0 flex items-center rounded-xl border border-transparent pl-10 pr-24 py-2.5 font-mono text-base sm:text-sm whitespace-pre overflow-hidden select-none z-10"
                 >
                   <span className="text-slate-900 dark:text-slate-100">
                     {searchSuffixParts.leadingWhitespace}
@@ -1297,6 +1297,10 @@ export function App() {
                 ref={inputRef}
                 type="text"
                 value={domainInput}
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                enterKeyHint="search"
                 onFocus={() => setAutocompleteOpen(true)}
                 onChange={(e) => {
                   setDomainInput(e.target.value);
@@ -1313,7 +1317,7 @@ export function App() {
                 }}
                 aria-label="Search domain, URL, email, IP, CLI command, or DNS wire packet"
                 placeholder="Domain, URL, email, IP, dig command, or ?dns= packet — press / to focus"
-                className={`w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 pl-10 pr-24 py-2.5 font-mono text-sm placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20 ${
+                className={`w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 pl-10 pr-24 py-2.5 font-mono text-base sm:text-sm placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20 ${
                   searchSuffixParts
                     ? 'text-transparent caret-slate-900 dark:caret-slate-100 selection:bg-cyan-500/25 selection:text-transparent'
                     : 'text-slate-900 dark:text-slate-100'

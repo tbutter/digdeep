@@ -173,12 +173,17 @@ export function SettingsModal({
               <input
                 type="text"
                 value={manualDoh}
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                inputMode="url"
+                enterKeyHint="go"
                 onChange={(e) => {
                   setManualDoh(e.target.value);
                   if (manualDohErr) setManualDohErr(null);
                 }}
                 placeholder="Enter custom DoH URL or IP (e.g. https://8.8.4.4/dns-query)"
-                className="flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-1.5 font-mono text-xs"
+                className="flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-1.5 font-mono text-base sm:text-xs"
               />
               <button
                 type="submit"
@@ -234,7 +239,7 @@ export function SettingsModal({
                     type="datetime-local"
                     value={customIsoTime}
                     onChange={(e) => setCustomIsoTime(e.target.value)}
-                    className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1 font-mono text-xs"
+                    className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1 font-mono text-base sm:text-xs"
                   />
                   <button
                     type="button"
@@ -315,28 +320,39 @@ export function SettingsModal({
                 <input
                   type="text"
                   value={customZone}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   onChange={(e) => setCustomZone(e.target.value)}
                   placeholder="Zone (e.g. example.com.)"
-                  className="rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 font-mono"
+                  className="rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 font-mono text-base sm:text-xs"
                 />
                 <input
                   type="text"
                   value={customKeyTag}
+                  inputMode="numeric"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   onChange={(e) => setCustomKeyTag(e.target.value)}
                   placeholder="Key Tag (e.g. 2371)"
-                  className="rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 font-mono"
+                  className="rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 font-mono text-base sm:text-xs"
                 />
                 <input
                   type="text"
                   value={customAlg}
+                  inputMode="numeric"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   onChange={(e) => setCustomAlg(e.target.value)}
                   placeholder="Alg (8, 13, 15)"
-                  className="rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 font-mono"
+                  className="rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 font-mono text-base sm:text-xs"
                 />
                 <select
                   value={customDigestType}
                   onChange={(e) => setCustomDigestType(e.target.value)}
-                  className="rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2 py-1.5 font-mono"
+                  className="rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2 py-1.5 font-mono text-base sm:text-xs"
                 >
                   <option value="2">2 (SHA-256)</option>
                   <option value="4">4 (SHA-384)</option>
@@ -347,16 +363,20 @@ export function SettingsModal({
                 <input
                   type="text"
                   value={customDigest}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   onChange={(e) => setCustomDigest(e.target.value)}
                   placeholder="DS Hex Digest (SHA-256 / SHA-384)"
-                  className="flex-1 rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 font-mono"
+                  className="flex-1 rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 font-mono text-base sm:text-xs"
                 />
                 <input
                   type="text"
                   value={customLabel}
+                  autoCorrect="off"
                   onChange={(e) => setCustomLabel(e.target.value)}
                   placeholder="Optional label"
-                  className="sm:w-40 rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5"
+                  className="sm:w-40 rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 text-base sm:text-xs"
                 />
                 <button
                   type="button"

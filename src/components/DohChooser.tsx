@@ -185,12 +185,17 @@ export function DohChooser({
               <input
                 type="text"
                 value={manualInput}
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                inputMode="url"
+                enterKeyHint="go"
                 onChange={(e) => {
                   setManualInput(e.target.value);
                   if (inputError) setInputError(null);
                 }}
                 placeholder="https://8.8.4.4/dns-query"
-                className="flex-1 min-w-0 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 font-mono text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:border-cyan-500"
+                className="flex-1 min-w-0 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 font-mono text-base sm:text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:border-cyan-500"
               />
               <button
                 type="submit"

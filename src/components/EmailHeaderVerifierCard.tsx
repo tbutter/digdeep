@@ -625,9 +625,11 @@ export function EmailHeaderVerifierCard({
               value={rawInput}
               onChange={(e) => setRawInput(e.target.value)}
               rows={7}
+              autoCapitalize="none"
+              autoCorrect="off"
               spellCheck={false}
               placeholder={`Paste raw RFC 5322 email headers ("Show Original" / "View Message Source") or drop a full .eml file here…\n\nAuthentication-Results: mx.example.net; dkim=pass header.d=${snapshot.displayDomain}; spf=pass; dmarc=pass\nReceived: from mail.${snapshot.displayDomain} ([192.0.2.25]) by mx.example.net ...\nDKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=${snapshot.displayDomain}; s=selector1; bh=...; b=...\nFrom: sender@${snapshot.displayDomain}`}
-              className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 p-3 font-mono text-xs text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:border-cyan-500 resize-y"
+              className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 p-3 font-mono text-base sm:text-xs text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:border-cyan-500 resize-y"
             />
 
             <input

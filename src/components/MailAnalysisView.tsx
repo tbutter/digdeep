@@ -1720,9 +1720,13 @@ export function MailAnalysisView({
                   <input
                     type="text"
                     value={spfTestIp}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    enterKeyHint="done"
                     onChange={(e) => setSpfTestIp(e.target.value)}
                     placeholder="Enter candidate sender IPv4 or IPv6 (e.g. 192.0.2.1 or 2001:db8::1)…"
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 font-mono text-xs text-slate-900 dark:text-slate-100 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500"
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 font-mono text-base sm:text-xs text-slate-900 dark:text-slate-100 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500"
                   />
                 </div>
                 <div>
@@ -1732,9 +1736,14 @@ export function MailAnalysisView({
                   <input
                     type="text"
                     value={spfTestSender}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    inputMode="email"
+                    enterKeyHint="done"
                     onChange={(e) => setSpfTestSender(e.target.value)}
                     placeholder={`postmaster@${snapshot.displayDomain}`}
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 font-mono text-xs text-slate-900 dark:text-slate-100 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500"
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 font-mono text-base sm:text-xs text-slate-900 dark:text-slate-100 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500"
                   />
                 </div>
               </div>
@@ -2170,9 +2179,13 @@ export function MailAnalysisView({
                 <input
                   type="text"
                   value={dkimInput}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  enterKeyHint="go"
                   onChange={(e) => setDkimInput(e.target.value)}
                   placeholder="Enter DKIM selector(s) (e.g. selector1, google, ietf1) or paste a DKIM-Signature: header…"
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 pl-9 pr-3 py-2 font-mono text-xs text-slate-900 dark:text-slate-100 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500"
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 pl-9 pr-3 py-2 font-mono text-base sm:text-xs text-slate-900 dark:text-slate-100 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:border-cyan-500"
                 />
               </div>
               <button

@@ -710,10 +710,14 @@ function EcsGeoSection({
           <input
             type="text"
             value={customSubnet}
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            enterKeyHint="go"
             onChange={(e) => setCustomSubnet(e.target.value)}
             placeholder="e.g. 81.2.69.0/24 or 2601:140:4000::/56"
             aria-label="Custom ECS Client Subnet CIDR"
-            className="flex-1 min-w-[200px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:border-cyan-500"
+            className="flex-1 min-w-[200px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-base sm:text-xs font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:border-cyan-500"
           />
 
           <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-0.5 text-xs font-mono">
@@ -737,7 +741,7 @@ function EcsGeoSection({
             value={customEndpoint}
             onChange={(e) => setCustomEndpoint(e.target.value)}
             aria-label="ECS DoH Resolver"
-            className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 text-xs text-slate-700 dark:text-slate-200 focus:outline-none focus:border-cyan-500"
+            className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 text-base sm:text-xs text-slate-700 dark:text-slate-200 focus:outline-none focus:border-cyan-500"
           >
             {ECS_DOH_ENDPOINTS.map((ep) => (
               <option key={ep.url} value={ep.url}>

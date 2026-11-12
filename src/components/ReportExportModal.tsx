@@ -348,6 +348,7 @@ export function ReportExportModal({
                       id="report-min-rrsig-hours"
                       data-testid="report-min-rrsig-input"
                       type="number"
+                      inputMode="numeric"
                       min={1}
                       max={720}
                       value={effectiveMinRrsigHours}
@@ -360,7 +361,7 @@ export function ReportExportModal({
                           });
                         }
                       }}
-                      className="w-16 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 font-mono text-xs text-slate-900 dark:text-slate-100"
+                      className="w-16 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 font-mono text-base sm:text-xs text-slate-900 dark:text-slate-100"
                     />
                     <div className="inline-flex items-center gap-1">
                       {RRSIG_HOUR_PRESETS.map((hrs) => (
@@ -396,7 +397,7 @@ export function ReportExportModal({
                       data-testid="report-cron-select"
                       value={cronSchedule}
                       onChange={(e) => setCronSchedule(e.target.value)}
-                      className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-xs text-slate-900 dark:text-slate-100"
+                      className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-base sm:text-xs text-slate-900 dark:text-slate-100"
                     >
                       {CRON_PRESETS.map((p) => (
                         <option key={p.value} value={p.value}>
