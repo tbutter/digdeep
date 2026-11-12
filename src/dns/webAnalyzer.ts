@@ -12,6 +12,7 @@ import {
   discoverZoneCutsForName,
   evaluateSnapshotFromLogs,
   findLog,
+  probeLeafNameserverAddresses,
   type AnalyzeOptions,
 } from './analyzer';
 import { DohSession } from './doh';
@@ -2578,6 +2579,7 @@ export async function runWebAnalysis(
       return tasks;
     })
   );
+  await probeLeafNameserverAddresses(session, zoneList, targetName);
 
   currentPhase = 'validating';
   options.onProgress?.({

@@ -1,5 +1,5 @@
 import type { GraphSelection } from '../components/GraphInspector';
-import { DOH_SERVER_PRESETS, formatDohShortLabel, rcodeToString } from './constants';
+import { DOH_SERVER_PRESETS, RR_TYPES, formatDohShortLabel, rcodeToString } from './constants';
 import { displayFqdn, normalizeFqdn } from './encoding';
 import type {
   AnalysisSnapshot,
@@ -550,6 +550,95 @@ export function findAuditFindingWireQuery(
       return findWireQueryByOwnerAndType(queries, finding.zone, 'SOA', { preferCd: true });
     }
     if (code.includes('NS_') || code.includes('NAMESERVER') || code.includes('LAME')) {
+      const zoneNorm = normalizeFqdn(finding.zone);
+      const zoneObj = snapshot.zones.find((z) => z.zoneName === zoneNorm);
+
+      if (code === 'NS_RRSET_INCONSISTENT') {
+        const divId = zoneObj?.nsConsistency?.divergentObservations[0]?.sourceQueryId;
+        if (divId) {
+          const divQuery = queries.find((q) => q.id === divId);
+          if (divQuery) return divQuery;
+        }
+      }
+
+      if (code === 'NS_TARGET_IS_CNAME') {
+        const nsEntry =
+          zoneObj?.nameservers.find(
+            (n) => (n.cnameChain?.length ?? 0) > 0 && finding.id.endsWith(`-${n.hostname}`)
+          ) ?? zoneObj?.nameservers.find((n) => (n.cnameChain?.length ?? 0) > 0);
+        if (nsEntry) {
+          const cnameQuery =
+            queries.find(
+              (q) =>
+                q.purpose.startsWith('Nameserver IP') &&
+                normalizeFqdn(q.qname) === nsEntry.hostname &&
+                q.packet.answers.some((a) => a.type === RR_TYPES.CNAME)
+            ) ?? findWireQueryByOwnerAndType(queries, nsEntry.hostname, 'A');
+          if (cnameQuery) return cnameQuery;
+        }
+      }
+
+      if (code === 'NS_BOGON_IP') {
+        const nsEntry =
+          zoneObj?.nameservers.find(
+            (n) => (n.bogonIps?.length ?? 0) > 0 && finding.id.endsWith(`-${n.hostname}`)
+          ) ?? zoneObj?.nameservers.find((n) => (n.bogonIps?.length ?? 0) > 0);
+        if (nsEntry) {
+          const wantQtype = nsEntry.bogonIps?.[0]?.family === 6 ? 'AAAA' : 'A';
+          const bogonQuery =
+            queries.find(
+              (q) =>
+                q.purpose.startsWith('Nameserver IP') &&
+                normalizeFqdn(q.qname) === nsEntry.hostname &&
+                q.qtypeName === wantQtype
+            ) ?? findWireQueryByOwnerAndType(queries, nsEntry.hostname, wantQtype);
+          if (bogonQuery) return bogonQuery;
+        }
+      }
+
+      if (code === 'DANGLING_NS_TARGET') {
+        const dHost =
+          zoneObj?.nsDiversity?.danglingHosts.find((h) => finding.id.endsWith(`-${h}`)) ??
+          zoneObj?.nsDiversity?.danglingHosts[0];
+        if (dHost) {
+          const dQuery =
+            queries.find(
+              (q) => q.purpose.startsWith('Nameserver IP') && normalizeFqdn(q.qname) === dHost
+            ) ?? findWireQueryByOwnerAndType(queries, dHost, 'A');
+          if (dQuery) return dQuery;
+        }
+      }
+
+      if (code === 'NS_NO_IPV6') {
+        const host =
+          zoneObj?.nsDiversity?.ipv4OnlyHosts?.[0] ?? zoneObj?.nameservers[0]?.hostname;
+        if (host) {
+          const aaaaQuery =
+            queries.find(
+              (q) =>
+                q.purpose.startsWith('Nameserver IP') &&
+                normalizeFqdn(q.qname) === host &&
+                q.qtypeName === 'AAAA'
+            ) ?? findWireQueryByOwnerAndType(queries, host, 'AAAA');
+          if (aaaaQuery) return aaaaQuery;
+        }
+      }
+
+      if (code === 'NS_NO_IPV4') {
+        const host =
+          zoneObj?.nsDiversity?.ipv6OnlyHosts?.[0] ?? zoneObj?.nameservers[0]?.hostname;
+        if (host) {
+          const aQuery =
+            queries.find(
+              (q) =>
+                q.purpose.startsWith('Nameserver IP') &&
+                normalizeFqdn(q.qname) === host &&
+                q.qtypeName === 'A'
+            ) ?? findWireQueryByOwnerAndType(queries, host, 'A');
+          if (aQuery) return aQuery;
+        }
+      }
+
       return findWireQueryByOwnerAndType(queries, finding.zone, 'NS', { preferCd: true });
     }
     if (code.includes('ZONEMD')) {

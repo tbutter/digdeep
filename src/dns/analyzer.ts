@@ -27,6 +27,7 @@ import {
   normalizeFqdn,
 } from './encoding';
 import {
+  classifyIpAddress,
   evaluateDnsblAuditForIp,
   formatCanonicalIpv6,
   getCachedRpkiValidation,
@@ -68,8 +69,11 @@ import type {
   DsVerification,
   EmailDaneAnalysis,
   MtaStsPolicyFetchResult,
+  NameserverBogonIp,
   NameserverEntry,
+  NsConsistencyAudit,
   NsDiversityAnalysis,
+  NsObservationEntry,
   ResolverVerdict,
   ReverseDnsAnalysis,
   ReverseIpBgpInfo,
@@ -91,7 +95,7 @@ import type {
   ZonemdRecordDetail,
 } from './types';
 
-export const SNAPSHOT_ENGINE_VERSION = 16;
+export const SNAPSHOT_ENGINE_VERSION = 17;
 
 export interface AnalyzeOptions extends DohClientOptions {
   queryTypes?: string[];
@@ -109,6 +113,234 @@ export function findLog(
 ): DohQueryLog | undefined {
   const norm = normalizeFqdn(qname);
   return logs.find((l) => !l.ecsSubnet && l.qname === norm && l.qtype === qtype && l.cd === cd);
+}
+
+/**
+ * Selects authoritative nameserver hostnames to probe for IPv4 (`A`) & IPv6 (`AAAA`) across all
+ * non-TLD/non-root discovered zones (`depth >= 2`), plus `targetName` itself when querying `.` or a TLD directly.
+ */
+export function collectZoneNameserverHostsToProbe(
+  zoneList: string[],
+  logs: DohQueryLog[],
+  targetName: string
+): string[] {
+  const normTarget = normalizeFqdn(targetName);
+  const candidateZones = [...zoneList]
+    .filter((z) => {
+      const normZ = normalizeFqdn(z);
+      return getDomainHierarchy(normZ).length >= 3 || normZ === normTarget;
+    })
+    .sort((a, b) => getDomainHierarchy(b).length - getDomainHierarchy(a).length);
+
+  const nsHosts = new Set<string>();
+  for (const z of candidateZones) {
+    const nsLog = findLog(logs, z, RR_TYPES.NS, true);
+    let perZoneCount = 0;
+    for (const rec of nsLog?.packet.answers ?? []) {
+      if (rec.type === RR_TYPES.NS && rec.parsed.kind === 'GENERIC' && rec.parsed.target) {
+        nsHosts.add(normalizeFqdn(rec.parsed.target));
+        perZoneCount++;
+        if (perZoneCount >= 13 || nsHosts.size >= 26) break;
+      }
+    }
+    if (nsHosts.size >= 26) break;
+  }
+  return Array.from(nsHosts);
+}
+
+/**
+ * Resolves IPv4 (`A`) and IPv6 (`AAAA`) addresses for leaf/custom zone authoritative nameservers
+ * so RFC 2181 §10.3 CNAME, bogon IP, and RFC 3901 dual-stack readiness checks run across all modes.
+ */
+export async function probeLeafNameserverAddresses(
+  session: DohSession,
+  zoneList: string[],
+  targetName: string
+): Promise<void> {
+  const currentLogs = session.getLogs();
+  const nsHosts = collectZoneNameserverHostsToProbe(zoneList, currentLogs, targetName);
+  if (nsHosts.length === 0) return;
+
+  await Promise.all(
+    nsHosts.flatMap((host) => [
+      session
+        .query(host, RR_TYPES.A, {
+          cd: true,
+          doBit: false,
+          purpose: `Nameserver IP (${host} A)`,
+        })
+        .catch(() => undefined),
+      session
+        .query(host, RR_TYPES.AAAA, {
+          cd: true,
+          doBit: false,
+          purpose: `Nameserver IPv6 (${host} AAAA)`,
+        })
+        .catch(() => undefined),
+    ])
+  );
+}
+
+function evaluateZoneNsConsistency(params: {
+  zoneName: string;
+  nsLog?: DohQueryLog;
+  queries: DohQueryLog[];
+  primaryEndpoint: string;
+}): NsConsistencyAudit | undefined {
+  const { zoneName, nsLog, queries, primaryEndpoint } = params;
+  if (!nsLog || nsLog.packet.flags.rcode !== 0 || nsLog.packet.flags.tc) {
+    return undefined;
+  }
+
+  const authSet = new Set<string>();
+  for (const r of nsLog.packet.answers) {
+    if (
+      normalizeFqdn(r.name) === zoneName &&
+      r.type === RR_TYPES.NS &&
+      r.parsed.kind === 'GENERIC' &&
+      r.parsed.target
+    ) {
+      authSet.add(normalizeFqdn(r.parsed.target));
+    }
+  }
+  const authoritativeNs = Array.from(authSet).sort();
+  if (authoritativeNs.length === 0) return undefined;
+
+  const POLICY_BLOCK_EDES = new Set([4, 15, 16, 17, 18]);
+  const observations: NsObservationEntry[] = [];
+  const seenObsKeys = new Set<string>();
+
+  for (const q of queries) {
+    if (q.id === nsLog.id) continue;
+    if (q.httpStatus !== 200 || q.packet.flags.rcode !== 0 || q.packet.flags.tc) continue;
+    if (q.packet.edns?.ede.some((e) => POLICY_BLOCK_EDES.has(e.infoCode))) continue;
+    if (
+      q.purpose.startsWith('BGP ASN lookup') ||
+      q.purpose.startsWith('DNSBL reputation lookup') ||
+      q.purpose.startsWith('PSL lookup') ||
+      q.purpose.startsWith('Wildcard probe') ||
+      q.purpose.startsWith('Reverse FCrDNS lookup')
+    ) {
+      continue;
+    }
+
+    const hasSinkhole = q.packet.answers.some((ans) => {
+      if (ans.type !== RR_TYPES.A && ans.type !== RR_TYPES.AAAA) return false;
+      const ip = ans.rdataText.trim().toLowerCase();
+      return (
+        ip === '0.0.0.0' ||
+        ip === '127.0.0.1' ||
+        ip === '127.0.0.2' ||
+        ip === '::' ||
+        ip === '::1'
+      );
+    });
+    if (hasSinkhole) continue;
+
+    const ep = q.endpoint || primaryEndpoint;
+
+    // 1. Secondary / Multi-DoH qtype=NS ANSWER observations for this zone
+    if (q.qtype === RR_TYPES.NS && normalizeFqdn(q.qname) === zoneName) {
+      const obsTargets = Array.from(
+        new Set(
+          q.packet.answers
+            .filter(
+              (r) =>
+                normalizeFqdn(r.name) === zoneName &&
+                r.type === RR_TYPES.NS &&
+                r.parsed.kind === 'GENERIC' &&
+                Boolean(r.parsed.target)
+            )
+            .map((r) => normalizeFqdn((r.parsed as { target: string }).target))
+        )
+      ).sort();
+      if (obsTargets.length > 0) {
+        const obsKey = `answer|${ep}|${q.ecsSubnet ?? ''}|${q.cd ? 'cd1' : 'cd0'}|${obsTargets.join(',')}`;
+        if (!seenObsKeys.has(obsKey)) {
+          seenObsKeys.add(obsKey);
+          const missingTargets = authoritativeNs.filter((t) => !obsTargets.includes(t));
+          const extraTargets = obsTargets.filter((t) => !authoritativeNs.includes(t));
+          observations.push({
+            sourceQueryId: q.id,
+            qname: q.qname,
+            qtypeName: q.qtypeName,
+            section: 'answer',
+            endpoint: ep,
+            nsTargets: obsTargets,
+            missingTargets,
+            extraTargets,
+            matchesAuthoritative: missingTargets.length === 0 && extraTargets.length === 0,
+          });
+        }
+      }
+      continue;
+    }
+
+    // 2. AUTHORITY section NS RRset on positive responses (A / AAAA / SOA / MX / TXT / DNSKEY / etc.)
+    const isPositiveAnswer = q.packet.answers.length > 0;
+    if (!isPositiveAnswer) continue;
+
+    const authNsTargets = Array.from(
+      new Set(
+        q.packet.authorities
+          .filter(
+            (r) =>
+              normalizeFqdn(r.name) === zoneName &&
+              r.type === RR_TYPES.NS &&
+              r.parsed.kind === 'GENERIC' &&
+              Boolean(r.parsed.target)
+          )
+          .map((r) => normalizeFqdn((r.parsed as { target: string }).target))
+      )
+    ).sort();
+
+    if (authNsTargets.length > 0) {
+      const obsKey = `authority|${ep}|${q.qname}|${q.qtypeName}|${authNsTargets.join(',')}`;
+      if (!seenObsKeys.has(obsKey)) {
+        seenObsKeys.add(obsKey);
+        const missingTargets = authoritativeNs.filter((t) => !authNsTargets.includes(t));
+        const extraTargets = authNsTargets.filter((t) => !authoritativeNs.includes(t));
+        observations.push({
+          sourceQueryId: q.id,
+          qname: q.qname,
+          qtypeName: q.qtypeName,
+          section: 'authority',
+          endpoint: ep,
+          nsTargets: authNsTargets,
+          missingTargets,
+          extraTargets,
+          matchesAuthoritative: missingTargets.length === 0 && extraTargets.length === 0,
+        });
+      }
+    }
+  }
+
+  const divergentObservations = observations.filter((o) => !o.matchesAuthoritative);
+  const consistent = divergentObservations.length === 0;
+  let summary: string;
+  if (observations.length === 0) {
+    summary = `Authoritative NS RRset (${authoritativeNs.length} server${authoritativeNs.length === 1 ? '' : 's'}) verified via qtype=NS; positive responses use RFC 9471 minimal authority sections.`;
+  } else if (consistent) {
+    summary = `Authoritative NS RRset (${authoritativeNs.length} server${authoritativeNs.length === 1 ? '' : 's'}) is consistent across ${observations.length} additional AUTHORITY / Multi-DoH observation${observations.length === 1 ? '' : 's'}.`;
+  } else {
+    const sample = divergentObservations[0];
+    const diffParts: string[] = [];
+    if (sample.extraTargets.length > 0) {
+      diffParts.push(`+${sample.extraTargets.map(displayFqdn).join(', +')}`);
+    }
+    if (sample.missingTargets.length > 0) {
+      diffParts.push(`-${sample.missingTargets.map(displayFqdn).join(', -')}`);
+    }
+    summary = `NS RRset skew detected across ${divergentObservations.length} of ${observations.length} observation${observations.length === 1 ? '' : 's'} (e.g. ${displayFqdn(sample.qname)} ${sample.qtypeName} ${sample.section.toUpperCase()}: ${diffParts.join('; ')}), indicating out-of-sync secondary nameservers or stale apex NS records.`;
+  }
+
+  return {
+    authoritativeNs,
+    checkedObservations: observations.length,
+    consistent,
+    divergentObservations,
+    summary,
+  };
 }
 
 /**
@@ -477,24 +709,15 @@ export async function runDnsvizAnalysis(
     })
   );
 
-  // Phase 4: Resolve IPv4 / IPv6 for the leaf zone(s) authoritative nameservers (up to 6 hosts)
+  // Phase 4: Resolve IPv4 / IPv6 for custom/leaf zone(s) authoritative nameservers
   // and probe CDS / CDNSKEY (RFC 7344 / RFC 8078) on leaf zone(s)
   currentPhase = 'nameservers';
   const leafZones = zoneList
     .sort((a, b) => getDomainHierarchy(b).length - getDomainHierarchy(a).length)
     .slice(0, 2);
   const nonRootLeafZones = leafZones.filter((lz) => lz !== '.');
-  const nsHosts = new Set<string>();
   const currentLogs = session.getLogs();
-  for (const lz of leafZones) {
-    const nsLog = findLog(currentLogs, lz, RR_TYPES.NS, true);
-    for (const rec of nsLog?.packet.answers ?? []) {
-      if (rec.type === RR_TYPES.NS && rec.parsed.kind === 'GENERIC' && rec.parsed.target) {
-        nsHosts.add(normalizeFqdn(rec.parsed.target));
-        if (nsHosts.size >= 6) break;
-      }
-    }
-  }
+  const nsHosts = collectZoneNameserverHostsToProbe(zoneList, currentLogs, targetName);
 
   await Promise.all([
     ...zoneList
@@ -565,7 +788,7 @@ export async function runDnsvizAnalysis(
       }
       return tasks;
     }),
-    ...Array.from(nsHosts).flatMap((host) => [
+    ...nsHosts.flatMap((host) => [
       session
         .query(host, RR_TYPES.A, { cd: true, doBit: false, purpose: `Nameserver IP (${host} A)` })
         .catch(() => undefined),
@@ -1207,7 +1430,8 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     };
   };
 
-  // Resolve NS IP map & resolution status from helper logs
+  // Resolve NS IP map, RFC 2181 §10.3 CNAME chains & resolution status from helper logs
+  const POLICY_SINKHOLE_EDES = new Set([15, 16, 17]);
   const nsIpMap = new Map<
     string,
     {
@@ -1217,51 +1441,67 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       probedAAAA: boolean;
       rcodeA?: number;
       rcodeAAAA?: number;
+      cnameChain: string[];
+      policyBlockedA?: boolean;
+      policyBlockedAAAA?: boolean;
     }
   >();
   for (const log of queries) {
     if (!log.purpose.startsWith('Nameserver IP')) continue;
-    const entry = nsIpMap.get(log.qname) ?? {
+    const qnameNorm = normalizeFqdn(log.qname);
+    const entry = nsIpMap.get(qnameNorm) ?? {
       ipv4: [],
       ipv6: [],
       probedA: false,
       probedAAAA: false,
+      cnameChain: [],
     };
+    const isPolicyBlocked =
+      log.packet.edns?.ede.some((e) => POLICY_SINKHOLE_EDES.has(e.infoCode)) ?? false;
     if (log.qtype === RR_TYPES.A) {
       entry.probedA = true;
       entry.rcodeA = log.packet.flags.rcode;
+      if (isPolicyBlocked) entry.policyBlockedA = true;
     } else if (log.qtype === RR_TYPES.AAAA) {
       entry.probedAAAA = true;
       entry.rcodeAAAA = log.packet.flags.rcode;
+      if (isPolicyBlocked) entry.policyBlockedAAAA = true;
     }
 
-    // Follow CNAME hops inside packet if NS hostname aliases to another name
-    let owner = log.qname;
+    // Follow CNAME hops inside packet if NS hostname aliases to another name (RFC 2181 §10.3)
+    let owner = qnameNorm;
     const visited = new Set<string>([owner]);
+    const hopChain: string[] = [];
     for (let hop = 0; hop < 6; hop++) {
       const cnameAns = log.packet.answers.find(
-        (r) => r.name === owner && r.type === RR_TYPES.CNAME
+        (r) => normalizeFqdn(r.name) === owner && r.type === RR_TYPES.CNAME
       );
       if (!cnameAns || cnameAns.parsed.kind !== 'GENERIC' || !cnameAns.parsed.target) break;
       const next = normalizeFqdn(cnameAns.parsed.target);
+      hopChain.push(next);
       if (visited.has(next)) break;
       visited.add(next);
       owner = next;
     }
+    if (hopChain.length > 0 && entry.cnameChain.length === 0) {
+      entry.cnameChain = hopChain;
+    }
 
     for (const ans of log.packet.answers) {
-      if (ans.name === owner && ans.type === RR_TYPES.A && !entry.ipv4.includes(ans.rdataText)) {
-        entry.ipv4.push(ans.rdataText);
+      if (normalizeFqdn(ans.name) === owner && ans.type === RR_TYPES.A) {
+        const ip = ans.rdataText.trim();
+        if (ip && !entry.ipv4.includes(ip)) {
+          entry.ipv4.push(ip);
+        }
       }
-      if (
-        ans.name === owner &&
-        ans.type === RR_TYPES.AAAA &&
-        !entry.ipv6.includes(ans.rdataText)
-      ) {
-        entry.ipv6.push(ans.rdataText);
+      if (normalizeFqdn(ans.name) === owner && ans.type === RR_TYPES.AAAA) {
+        const ip = ans.rdataText.trim();
+        if (ip && !entry.ipv6.includes(ip)) {
+          entry.ipv6.push(ip);
+        }
       }
     }
-    nsIpMap.set(log.qname, entry);
+    nsIpMap.set(qnameNorm, entry);
   }
 
   // Evaluate zones top-down (root -> TLD -> SLD -> subzones)
@@ -1919,16 +2159,55 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     const nsLog = findLog(cdLogs, zoneName, RR_TYPES.NS, true);
     const nameservers: NameserverEntry[] = [];
     for (const r of nsLog?.packet.answers ?? []) {
-      if (r.name === zoneName && r.type === RR_TYPES.NS && r.parsed.kind === 'GENERIC' && r.parsed.target) {
+      if (
+        normalizeFqdn(r.name) === zoneName &&
+        r.type === RR_TYPES.NS &&
+        r.parsed.kind === 'GENERIC' &&
+        r.parsed.target
+      ) {
         const host = normalizeFqdn(r.parsed.target);
         if (!nameservers.some((n) => n.hostname === host)) {
           const ips = nsIpMap.get(host);
           const ipv4 = ips?.ipv4 ?? [];
           const ipv6 = ips?.ipv6 ?? [];
+          const cnameChain =
+            ips?.cnameChain && ips.cnameChain.length > 0 ? ips.cnameChain : undefined;
+
+          const bogonIps: NameserverBogonIp[] = [];
+          let publicIpv4Count = 0;
+          let publicIpv6Count = 0;
+          for (const ip of ipv4) {
+            if (ips?.policyBlockedA && (ip === '0.0.0.0' || ip === '127.0.0.1')) continue;
+            const cls = classifyIpAddress(ip, 4);
+            if (cls.isPublic) {
+              publicIpv4Count++;
+            } else {
+              bogonIps.push({
+                ip,
+                family: 4,
+                reason: cls.note ?? 'Non-public IPv4 address',
+              });
+            }
+          }
+          for (const ip of ipv6) {
+            if (ips?.policyBlockedAAAA && (ip === '::' || ip === '::1')) continue;
+            const cls = classifyIpAddress(ip, 6);
+            if (cls.isPublic) {
+              publicIpv6Count++;
+            } else {
+              bogonIps.push({
+                ip,
+                family: 6,
+                reason: cls.note ?? 'Non-public IPv6 address',
+              });
+            }
+          }
+
+          const wasProbed = Boolean(ips && (ips.probedA || ips.probedAAAA));
           let nsStatus: NameserverEntry['status'];
           if (ipv4.length > 0 || ipv6.length > 0) {
             nsStatus = 'ok';
-          } else if (ips && (ips.probedA || ips.probedAAAA)) {
+          } else if (wasProbed && ips) {
             const aFailed =
               ips.probedA && (ips.rcodeA === 3 || ips.rcodeA === 2 || ips.rcodeA === 5);
             const aaaaFailed =
@@ -1938,6 +2217,19 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
               ips.rcodeAAAA === 5 ||
               ips.rcodeAAAA === 0;
             nsStatus = aFailed && aaaaFailed ? 'dangling' : 'nodata';
+          }
+
+          let addressStack: NameserverEntry['addressStack'];
+          if (wasProbed || ipv4.length > 0 || ipv6.length > 0) {
+            if (publicIpv4Count > 0 && publicIpv6Count > 0) {
+              addressStack = 'dual-stack';
+            } else if (publicIpv4Count > 0) {
+              addressStack = 'ipv4-only';
+            } else if (publicIpv6Count > 0) {
+              addressStack = 'ipv6-only';
+            } else {
+              addressStack = 'none';
+            }
           }
 
           // Aggregate BGP ASN & routed prefixes across all resolved IPs for this nameserver
@@ -1968,6 +2260,9 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
             ipv4,
             ipv6,
             ...(nsStatus ? { status: nsStatus } : {}),
+            ...(addressStack ? { addressStack } : {}),
+            ...(cnameChain ? { cnameChain } : {}),
+            ...(bogonIps.length > 0 ? { bogonIps } : {}),
             ...(hostAsnsMap.size > 0 ? { asns: Array.from(hostAsnsMap.values()) } : {}),
             ...(hostPrefixes.size > 0 ? { bgpPrefixes: Array.from(hostPrefixes) } : {}),
             ...(hostCountry ? { country: hostCountry } : {}),
@@ -1979,20 +2274,45 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       }
     }
 
-    // Evaluate Nameserver Infrastructure & BGP ASN Diversity
+    // Evaluate Nameserver Infrastructure, RFC 2181 §10.3 Hygiene, RFC 3901 Dual-Stack & BGP ASN Diversity
+    const isAuditableCustomZone = isLeafDelegatedZone || depth >= 2 || zoneName === targetName;
     let nsDiversity: NsDiversityAnalysis | undefined;
     if (nameservers.length > 0) {
       const zoneAsnsMap = new Map<number, BgpAsnOrganization>();
       const zonePrefixes = new Set<string>();
       const danglingHosts: string[] = [];
-      let hasIpv4 = false;
-      let hasIpv6 = false;
+      const ipv4OnlyHosts: string[] = [];
+      const ipv6OnlyHosts: string[] = [];
+      const cnameHosts: string[] = [];
+      const bogonHosts: string[] = [];
+      let probedCount = 0;
+      let ipv4NsCount = 0;
+      let ipv6NsCount = 0;
+      let dualStackNsCount = 0;
       let anyNsProbed = false;
 
       for (const ns of nameservers) {
-        if (ns.ipv4.length > 0) hasIpv4 = true;
-        if (ns.ipv6.length > 0) hasIpv6 = true;
-        if (ns.status !== undefined) anyNsProbed = true;
+        if (ns.status !== undefined) {
+          anyNsProbed = true;
+          probedCount++;
+        }
+        if (ns.addressStack === 'dual-stack') {
+          ipv4NsCount++;
+          ipv6NsCount++;
+          dualStackNsCount++;
+        } else if (ns.addressStack === 'ipv4-only') {
+          ipv4NsCount++;
+          ipv4OnlyHosts.push(ns.hostname);
+        } else if (ns.addressStack === 'ipv6-only') {
+          ipv6NsCount++;
+          ipv6OnlyHosts.push(ns.hostname);
+        }
+        if (ns.cnameChain && ns.cnameChain.length > 0) {
+          cnameHosts.push(ns.hostname);
+        }
+        if (ns.bogonIps && ns.bogonIps.length > 0) {
+          bogonHosts.push(ns.hostname);
+        }
         if (ns.status === 'dangling') danglingHosts.push(ns.hostname);
         for (const a of ns.asns ?? []) {
           if (!zoneAsnsMap.has(a.asn)) zoneAsnsMap.set(a.asn, a);
@@ -2001,6 +2321,11 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
           zonePrefixes.add(pfx);
         }
       }
+
+      const hasIpv4 = ipv4NsCount > 0;
+      const hasIpv6 = ipv6NsCount > 0;
+      const dualStackReady = ipv4NsCount >= 2 && ipv6NsCount >= 2;
+      const unprobedCount = nameservers.length - probedCount;
 
       const uniqueAsns = Array.from(zoneAsnsMap.values());
       const uniquePrefixes = Array.from(zonePrefixes);
@@ -2019,6 +2344,9 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       }
 
       let divSummary = `${nameservers.length} authoritative nameserver${nameservers.length === 1 ? '' : 's'}`;
+      if (probedCount > 0) {
+        divSummary += ` (${ipv4NsCount}/${probedCount} IPv4, ${ipv6NsCount}/${probedCount} IPv6${dualStackReady ? ', RFC 3901 dual-stack ready' : ''})`;
+      }
       if (uniqueAsns.length > 0) {
         const asnLabels = uniqueAsns
           .map((a) => `AS${a.asn}${a.asName ? ` (${a.asName})` : ''}`)
@@ -2033,10 +2361,19 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       if (anyNsProbed || uniqueAsns.length > 0) {
         nsDiversity = {
           nameserverCount: nameservers.length,
+          probedCount,
           uniqueAsns,
           uniquePrefixes,
           hasIpv4,
           hasIpv6,
+          ipv4NsCount,
+          ipv6NsCount,
+          dualStackNsCount,
+          dualStackReady,
+          ipv4OnlyHosts,
+          ipv6OnlyHosts,
+          cnameHosts,
+          bogonHosts,
           danglingHosts,
           singleAsn,
           singlePrefix,
@@ -2045,7 +2382,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
         };
       }
 
-      if (isLeafDelegatedZone && anyNsProbed) {
+      if (isAuditableCustomZone && anyNsProbed) {
         for (const dHost of danglingHosts) {
           const dMeta = nsIpMap.get(dHost);
           const rcodeName =
@@ -2060,7 +2397,120 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
             zone: zoneName,
           });
         }
-        if (singleAsn && uniqueAsns[0]) {
+
+        // RFC 2181 §10.3: NS target must not be an alias (CNAME)
+        for (const ns of nameservers) {
+          if (ns.cnameChain && ns.cnameChain.length > 0) {
+            const chainDisplay = [ns.hostname, ...ns.cnameChain].map(displayFqdn).join(' → ');
+            findings.push({
+              id: `warn-ns-cname-${zoneName}-${ns.hostname}`,
+              severity: 'warning',
+              code: 'NS_TARGET_IS_CNAME',
+              title: `Authoritative NS ${displayFqdn(ns.hostname)} in ${zoneName} is a CNAME alias`,
+              detail: `RFC 2181 §10.3 forbids NS records from pointing to an alias (${chainDisplay}). Stub and iterative resolvers may fail to follow CNAME chains during glue/referral resolution, causing extra round-trips or lame delegation failures.`,
+              rfc: 'RFC 2181 §10.3',
+              zone: zoneName,
+            });
+          }
+
+          if (ns.bogonIps && ns.bogonIps.length > 0) {
+            const bogonList = ns.bogonIps.map((b) => `${b.ip} (${b.reason})`).join(', ');
+            findings.push({
+              id: `warn-ns-bogon-${zoneName}-${ns.hostname}`,
+              severity: 'warning',
+              code: 'NS_BOGON_IP',
+              title: `Authoritative NS ${displayFqdn(ns.hostname)} in ${zoneName} resolves to non-public bogon IP (${ns.bogonIps.map((b) => b.ip).join(', ')})`,
+              detail: `Authoritative nameserver ${displayFqdn(ns.hostname)} for ${zoneName} resolves to non-globally-routable address space: ${bogonList}. Public recursive resolvers on the Internet cannot reach private, loopback, link-local, documentation, or CGNAT nameservers.`,
+              rfc: 'RFC 1918 / RFC 6598 / RFC 4193',
+              zone: zoneName,
+            });
+          }
+        }
+
+        // RFC 2182 §5 / RFC 3901: Minimum 2 authoritative nameservers
+        if (nameservers.length < 2) {
+          findings.push({
+            id: `warn-ns-single-server-${zoneName}`,
+            severity: 'warning',
+            code: 'NS_INSUFFICIENT_REDUNDANCY',
+            title: `Single authoritative nameserver (${displayFqdn(nameservers[0].hostname)}) for ${zoneName}`,
+            detail: `${zoneName} publishes only 1 authoritative NS record (${displayFqdn(nameservers[0].hostname)}). RFC 2182 §5 and RFC 3901 require at least 2 independent authoritative nameservers reachable over both IPv4 and IPv6.`,
+            rfc: 'RFC 2182 §5 / RFC 3901',
+            zone: zoneName,
+          });
+        }
+
+        // RFC 3901 Dual-Stack IPv6 readiness check
+        if (ipv6NsCount + unprobedCount < 2 && (ipv4NsCount > 0 || ipv6NsCount === 1)) {
+          if (ipv6NsCount === 0) {
+            findings.push({
+              id: `warn-ns-no-ipv6-${zoneName}`,
+              severity: 'warning',
+              code: 'NS_NO_IPV6',
+              title: `IPv4-only authoritative nameservers for ${zoneName} (no public AAAA records)`,
+              detail: `None of the probed authoritative nameservers for ${zoneName} (${nameservers.map((n) => displayFqdn(n.hostname)).join(', ')}) publish public IPv6 AAAA addresses. RFC 3901 / BCP 91 recommends at least 2 authoritative nameservers reachable over IPv6.`,
+              rfc: 'RFC 3901',
+              zone: zoneName,
+            });
+          } else if (nameservers.length >= 2) {
+            findings.push({
+              id: `warn-ns-no-ipv6-${zoneName}`,
+              severity: 'warning',
+              code: 'NS_NO_IPV6',
+              title: `Insufficient IPv6 authoritative nameserver redundancy for ${zoneName} (1 of ${probedCount} has AAAA)`,
+              detail: `Only 1 authoritative nameserver for ${zoneName} resolves to a public IPv6 AAAA address${ipv4OnlyHosts.length > 0 ? `, while ${ipv4OnlyHosts.map(displayFqdn).join(', ')} ${ipv4OnlyHosts.length === 1 ? 'is' : 'are'} IPv4-only` : ''}. RFC 3901 / BCP 91 recommends at least 2 IPv6-reachable authoritative nameservers so IPv6-only resolvers retain redundancy.`,
+              rfc: 'RFC 3901',
+              zone: zoneName,
+            });
+          }
+        } else if (ipv6NsCount >= 2 && ipv4OnlyHosts.length > 0) {
+          findings.push({
+            id: `info-ns-no-ipv6-${zoneName}`,
+            severity: 'info',
+            code: 'NS_NO_IPV6',
+            title: `Partial IPv6 nameserver coverage in ${zoneName} (${ipv4OnlyHosts.length} IPv4-only NS: ${ipv4OnlyHosts.map(displayFqdn).join(', ')})`,
+            detail: `While ${zoneName} meets the RFC 3901 minimum with ${ipv6NsCount} IPv6-reachable nameservers, ${ipv4OnlyHosts.map(displayFqdn).join(', ')} only publish${ipv4OnlyHosts.length === 1 ? 'es' : ''} IPv4 A records (no AAAA), reducing capacity for IPv6-only recursive resolvers.`,
+            rfc: 'RFC 3901',
+            zone: zoneName,
+          });
+        }
+
+        // RFC 3901 Dual-Stack IPv4 readiness check
+        if (ipv4NsCount + unprobedCount < 2 && (ipv6NsCount > 0 || ipv4NsCount === 1)) {
+          if (ipv4NsCount === 0) {
+            findings.push({
+              id: `warn-ns-no-ipv4-${zoneName}`,
+              severity: 'warning',
+              code: 'NS_NO_IPV4',
+              title: `IPv6-only authoritative nameservers for ${zoneName} (no public A records)`,
+              detail: `None of the probed authoritative nameservers for ${zoneName} (${nameservers.map((n) => displayFqdn(n.hostname)).join(', ')}) publish public IPv4 A addresses. RFC 3901 / BCP 91 requires authoritative zones to remain reachable over IPv4 as well as IPv6.`,
+              rfc: 'RFC 3901',
+              zone: zoneName,
+            });
+          } else if (nameservers.length >= 2) {
+            findings.push({
+              id: `warn-ns-no-ipv4-${zoneName}`,
+              severity: 'warning',
+              code: 'NS_NO_IPV4',
+              title: `Insufficient IPv4 authoritative nameserver redundancy for ${zoneName} (1 of ${probedCount} has A)`,
+              detail: `Only 1 authoritative nameserver for ${zoneName} resolves to a public IPv4 A address${ipv6OnlyHosts.length > 0 ? `, while ${ipv6OnlyHosts.map(displayFqdn).join(', ')} ${ipv6OnlyHosts.length === 1 ? 'is' : 'are'} IPv6-only` : ''}. RFC 3901 / BCP 91 recommends at least 2 IPv4-reachable authoritative nameservers.`,
+              rfc: 'RFC 3901',
+              zone: zoneName,
+            });
+          }
+        } else if (ipv4NsCount >= 2 && ipv6OnlyHosts.length > 0) {
+          findings.push({
+            id: `info-ns-no-ipv4-${zoneName}`,
+            severity: 'info',
+            code: 'NS_NO_IPV4',
+            title: `Partial IPv4 nameserver coverage in ${zoneName} (${ipv6OnlyHosts.length} IPv6-only NS: ${ipv6OnlyHosts.map(displayFqdn).join(', ')})`,
+            detail: `While ${zoneName} meets the RFC 3901 minimum with ${ipv4NsCount} IPv4-reachable nameservers, ${ipv6OnlyHosts.map(displayFqdn).join(', ')} only publish${ipv6OnlyHosts.length === 1 ? 'es' : ''} IPv6 AAAA records (no A), making ${ipv6OnlyHosts.length === 1 ? 'it' : 'them'} unreachable to IPv4-only recursive resolvers.`,
+            rfc: 'RFC 3901',
+            zone: zoneName,
+          });
+        }
+
+        if (isLeafDelegatedZone && singleAsn && uniqueAsns[0]) {
           const onlyAsn = uniqueAsns[0];
           findings.push({
             id: `info-ns-single-asn-${zoneName}`,
@@ -2072,7 +2522,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
             zone: zoneName,
           });
         }
-        if (singlePrefix && uniquePrefixes[0]) {
+        if (isLeafDelegatedZone && singlePrefix && uniquePrefixes[0]) {
           findings.push({
             id: `info-ns-single-prefix-${zoneName}`,
             severity: 'info',
@@ -2080,17 +2530,6 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
             title: `All authoritative nameservers for ${zoneName} reside in a single routed BGP prefix (${uniquePrefixes[0]})`,
             detail: `Every resolved nameserver IP for ${zoneName} is announced within ${uniquePrefixes[0]}. A single BGP route withdrawal or prefix hijack would affect all authoritative nameservers simultaneously.`,
             rfc: 'RFC 2182 §3.1',
-            zone: zoneName,
-          });
-        }
-        if (hasIpv4 && !hasIpv6) {
-          findings.push({
-            id: `info-ns-no-ipv6-${zoneName}`,
-            severity: 'info',
-            code: 'NS_NO_IPV6',
-            title: `IPv4-only authoritative nameservers for ${zoneName} (no AAAA records)`,
-            detail: `None of the probed authoritative nameservers for ${zoneName} (${nameservers.map((n) => displayFqdn(n.hostname)).join(', ')}) publish IPv6 AAAA glue/addresses.`,
-            rfc: 'RFC 3901',
             zone: zoneName,
           });
         }
@@ -2113,6 +2552,30 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
           }
         }
       }
+    }
+
+    // Check 3: Intra-Zone NS Consistency (ANSWER vs. AUTHORITY / Multi-DoH)
+    const nsConsistency = isAuditableCustomZone
+      ? evaluateZoneNsConsistency({
+          zoneName,
+          nsLog,
+          queries,
+          primaryEndpoint: dohEndpoint,
+        })
+      : undefined;
+    if (nsConsistency && !nsConsistency.consistent) {
+      const authList = nsConsistency.authoritativeNs.map(displayFqdn).join(', ');
+      const sample = nsConsistency.divergentObservations[0];
+      const sampleList = sample.nsTargets.map(displayFqdn).join(', ');
+      findings.push({
+        id: `warn-ns-inconsistent-${zoneName}`,
+        severity: 'warning',
+        code: 'NS_RRSET_INCONSISTENT',
+        title: `Inconsistent NS RRset observed for ${zoneName} across ${nsConsistency.divergentObservations.length} response${nsConsistency.divergentObservations.length === 1 ? '' : 's'}`,
+        detail: `${nsConsistency.summary} Primary qtype=NS ANSWER returned [${authList}], whereas ${displayFqdn(sample.qname)} ${sample.qtypeName} (${sample.section.toUpperCase()}) returned [${sampleList}].`,
+        rfc: 'RFC 2181 §5 / RFC 1912 §2.8',
+        zone: zoneName,
+      });
     }
 
     // Evaluate Automated DNSSEC Rollover Sync (CDS / CDNSKEY — RFC 7344 & RFC 8078)
@@ -2445,6 +2908,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       ...(soaAudit ? { soaAudit } : {}),
       ...(cdsRollover ? { cdsRollover } : {}),
       ...(nsDiversity ? { nsDiversity } : {}),
+      ...(nsConsistency ? { nsConsistency } : {}),
       ...(zonemd ? { zonemd } : {}),
       ...(wildcardAudit ? { wildcardAudit } : {}),
       ...(txtHygiene ? { txtHygiene } : {}),

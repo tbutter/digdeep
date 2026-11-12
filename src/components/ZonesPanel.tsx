@@ -16,7 +16,7 @@ import {
   Server,
   Sparkles,
 } from 'lucide-react';
-import { formatAlgorithm, formatDigestType } from '../dns/constants';
+import { formatAlgorithm, formatDigestType, formatDohShortLabel } from '../dns/constants';
 import {
   downloadTextFile,
   formatSnapshotAsZonefile,
@@ -47,7 +47,18 @@ export function isHealthyIntermediateParentZone(
   if (!hasDelegatedChild) return false;
   if (zone.status !== 'secure') return false;
   if (zone.soaAudit && !zone.soaAudit.valid) return false;
-  if (zone.nameservers.some((ns) => ns.status === 'dangling')) return false;
+  if (
+    zone.nameservers.some(
+      (ns) =>
+        ns.status === 'dangling' ||
+        (ns.cnameChain?.length ?? 0) > 0 ||
+        (ns.bogonIps?.length ?? 0) > 0
+    )
+  ) {
+    return false;
+  }
+  if (zone.nsDiversity?.dualStackReady === false) return false;
+  if (zone.nsConsistency && !zone.nsConsistency.consistent) return false;
   if (zone.cdsRollover?.present && zone.cdsRollover.status !== 'in-sync') return false;
   if (zone.zonemd?.present && zone.zonemd.status !== 'valid-sync') return false;
   if (zone.wildcardAudit && zone.wildcardAudit.status !== 'no-wildcard') return false;
@@ -480,9 +491,9 @@ export function ZonesPanel({
                       <Server className="w-3.5 h-3.5" />
                       Authoritative Nameservers ({zone.nameservers.length})
                     </div>
-                    {zone.nsDiversity && (
+                    {(zone.nsDiversity || zone.nsConsistency) && (
                       <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono">
-                        {zone.nsDiversity.uniqueAsns.length > 0 && (
+                        {zone.nsDiversity && zone.nsDiversity.uniqueAsns.length > 0 && (
                           <span
                             className={`rounded px-1.5 py-0.5 font-semibold border ${
                               zone.nsDiversity.singleAsn
@@ -494,7 +505,7 @@ export function ZonesPanel({
                             {zone.nsDiversity.uniqueAsns.length === 1 ? '' : 's'}
                           </span>
                         )}
-                        {zone.nsDiversity.uniquePrefixes.length > 0 && (
+                        {zone.nsDiversity && zone.nsDiversity.uniquePrefixes.length > 0 && (
                           <span
                             className={`rounded px-1.5 py-0.5 font-semibold border ${
                               zone.nsDiversity.singlePrefix
@@ -506,88 +517,214 @@ export function ZonesPanel({
                             {zone.nsDiversity.uniquePrefixes.length === 1 ? '' : 'es'}
                           </span>
                         )}
-                        <span
-                          className={`rounded px-1.5 py-0.5 font-semibold border ${
-                            zone.nsDiversity.hasIpv6
-                              ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25'
-                              : 'bg-slate-200/70 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-300 dark:border-slate-700'
-                          }`}
-                        >
-                          {zone.nsDiversity.hasIpv6 ? 'IPv4 + IPv6' : 'IPv4 Only'}
-                        </span>
+                        {zone.nsDiversity &&
+                          (zone.nsDiversity.dualStackReady !== undefined ? (
+                            <span
+                              className={`rounded px-1.5 py-0.5 font-semibold border ${
+                                zone.nsDiversity.dualStackReady
+                                  ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25'
+                                  : 'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/25'
+                              }`}
+                              title="RFC 3901 Dual-Stack IPv4 + IPv6 Nameserver Readiness (minimum 2 IPv4 + 2 IPv6 authoritative nameservers)"
+                            >
+                              {zone.nsDiversity.dualStackReady
+                                ? `Dual-Stack Ready (${zone.nsDiversity.ipv4NsCount ?? 0}v4 / ${zone.nsDiversity.ipv6NsCount ?? 0}v6 ✓)`
+                                : !zone.nsDiversity.hasIpv6 && zone.nsDiversity.hasIpv4
+                                  ? `IPv4 Only (${zone.nsDiversity.ipv4NsCount ?? 0}v4 / 0v6)`
+                                  : !zone.nsDiversity.hasIpv4 && zone.nsDiversity.hasIpv6
+                                    ? `IPv6 Only (0v4 / ${zone.nsDiversity.ipv6NsCount ?? 0}v6)`
+                                    : `Partial Dual-Stack (${zone.nsDiversity.ipv4NsCount ?? 0}v4 / ${zone.nsDiversity.ipv6NsCount ?? 0}v6)`}
+                            </span>
+                          ) : (
+                            <span
+                              className={`rounded px-1.5 py-0.5 font-semibold border ${
+                                zone.nsDiversity.hasIpv6
+                                  ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25'
+                                  : 'bg-slate-200/70 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-300 dark:border-slate-700'
+                              }`}
+                            >
+                              {zone.nsDiversity.hasIpv6 ? 'IPv4 + IPv6' : 'IPv4 Only'}
+                            </span>
+                          ))}
+                        {zone.nsConsistency &&
+                          (zone.nsConsistency.checkedObservations > 0 ||
+                            !zone.nsConsistency.consistent) && (
+                            <span
+                              className={`rounded px-1.5 py-0.5 font-semibold border ${
+                                zone.nsConsistency.consistent
+                                  ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25'
+                                  : 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30'
+                              }`}
+                              title={zone.nsConsistency.summary}
+                            >
+                              {zone.nsConsistency.consistent
+                                ? `NS Set Consistent (${zone.nsConsistency.checkedObservations} obs ✓)`
+                                : `NS Set Skew (${zone.nsConsistency.divergentObservations.length})`}
+                            </span>
+                          )}
                       </div>
                     )}
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-xs">
-                    {zone.nameservers.map((ns) => (
-                      <div
-                        key={ns.hostname}
-                        className={`rounded border px-2.5 py-1.5 ${
-                          ns.status === 'dangling'
-                            ? 'border-rose-500/40 bg-rose-500/5'
-                            : 'border-slate-100 dark:border-slate-800/90 bg-slate-50 dark:bg-slate-950/50'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-1.5">
-                          <div className="font-mono font-medium text-slate-800 dark:text-slate-200 truncate">
-                            {displayFqdn(ns.hostname)}
+                    {zone.nameservers.map((ns) => {
+                      const hasHygieneWarning =
+                        (ns.cnameChain?.length ?? 0) > 0 || (ns.bogonIps?.length ?? 0) > 0;
+                      return (
+                        <div
+                          key={ns.hostname}
+                          className={`rounded border px-2.5 py-1.5 ${
+                            ns.status === 'dangling'
+                              ? 'border-rose-500/40 bg-rose-500/5'
+                              : hasHygieneWarning
+                                ? 'border-amber-500/40 bg-amber-500/5'
+                                : 'border-slate-100 dark:border-slate-800/90 bg-slate-50 dark:bg-slate-950/50'
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-1.5">
+                            <div className="font-mono font-medium text-slate-800 dark:text-slate-200 truncate">
+                              {displayFqdn(ns.hostname)}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1">
+                              {ns.status === 'dangling' && (
+                                <span className="shrink-0 rounded bg-rose-500/15 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-rose-600 dark:text-rose-400">
+                                  DANGLING
+                                </span>
+                              )}
+                              {ns.cnameChain && ns.cnameChain.length > 0 && (
+                                <span
+                                  className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-700 dark:text-amber-300"
+                                  title="RFC 2181 §10.3: Authoritative NS target must not be a CNAME alias"
+                                >
+                                  CNAME ALIAS
+                                </span>
+                              )}
+                              {ns.bogonIps && ns.bogonIps.length > 0 && (
+                                <span
+                                  className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-700 dark:text-amber-300"
+                                  title="Resolves to private, loopback, link-local, documentation, or CGNAT bogon space"
+                                >
+                                  BOGON IP
+                                </span>
+                              )}
+                              {ns.addressStack === 'dual-stack' && (
+                                <span className="shrink-0 rounded bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-emerald-700 dark:text-emerald-300">
+                                  v4+v6
+                                </span>
+                              )}
+                              {ns.addressStack === 'ipv4-only' && (
+                                <span className="shrink-0 rounded bg-amber-500/10 border border-amber-500/25 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-amber-700 dark:text-amber-300">
+                                  IPv4-only
+                                </span>
+                              )}
+                              {ns.addressStack === 'ipv6-only' && (
+                                <span className="shrink-0 rounded bg-amber-500/10 border border-amber-500/25 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-amber-700 dark:text-amber-300">
+                                  IPv6-only
+                                </span>
+                              )}
+                            </div>
                           </div>
-                          {ns.status === 'dangling' && (
-                            <span className="shrink-0 rounded bg-rose-500/15 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-rose-600 dark:text-rose-400">
-                              DANGLING
-                            </span>
+                          {ns.cnameChain && ns.cnameChain.length > 0 && (
+                            <div className="mt-0.5 font-mono text-[10px] text-amber-700 dark:text-amber-300">
+                              RFC 2181 §10.3 alias → {ns.cnameChain.map(displayFqdn).join(' → ')}
+                            </div>
+                          )}
+                          {ns.bogonIps && ns.bogonIps.length > 0 && (
+                            <div className="mt-0.5 font-mono text-[10px] text-amber-700 dark:text-amber-300">
+                              Non-public:{' '}
+                              {ns.bogonIps.map((b) => `${b.ip} (${b.reason})`).join(', ')}
+                            </div>
+                          )}
+                          {(ns.ipv4.length > 0 || ns.ipv6.length > 0) && (
+                            <div className="font-mono text-[10px] text-slate-500 flex flex-wrap gap-x-1.5 gap-y-0.5 mt-0.5">
+                              {[...ns.ipv4, ...ns.ipv6].map((ip, ipIdx, arr) => (
+                                <span key={ip}>
+                                  <IpHoverBadge ip={ip} />
+                                  {ipIdx < arr.length - 1 ? ',' : ''}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {((ns.asns && ns.asns.length > 0) ||
+                            (ns.bgpPrefixes && ns.bgpPrefixes.length > 0) ||
+                            ns.rpkiStatus) && (
+                            <div className="flex flex-wrap items-center gap-1 mt-1">
+                              {ns.asns?.map((a) => (
+                                <span
+                                  key={a.asn}
+                                  className="inline-flex items-center gap-1 rounded bg-cyan-500/10 border border-cyan-500/25 px-1.5 py-0.5 font-mono text-[10px] text-cyan-700 dark:text-cyan-300"
+                                >
+                                  <span className="font-bold">AS{a.asn}</span>
+                                  {a.asName && (
+                                    <span className="truncate max-w-[140px] opacity-85">
+                                      · {a.asName}
+                                    </span>
+                                  )}
+                                </span>
+                              ))}
+                              {ns.bgpPrefixes?.map((pfx) => (
+                                <span
+                                  key={pfx}
+                                  className="rounded bg-slate-200/80 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-600 dark:text-slate-300"
+                                >
+                                  {pfx}
+                                </span>
+                              ))}
+                              {ns.rpkiStatus && ns.rpkiStatus !== 'error' && (
+                                <RpkiStatusBadge
+                                  status={ns.rpkiStatus}
+                                  validation={ns.rpkiValidations?.[0]}
+                                  compact
+                                />
+                              )}
+                            </div>
                           )}
                         </div>
-                        {(ns.ipv4.length > 0 || ns.ipv6.length > 0) && (
-                          <div className="font-mono text-[10px] text-slate-500 flex flex-wrap gap-x-1.5 gap-y-0.5 mt-0.5">
-                            {[...ns.ipv4, ...ns.ipv6].map((ip, ipIdx, arr) => (
-                              <span key={ip}>
-                                <IpHoverBadge ip={ip} />
-                                {ipIdx < arr.length - 1 ? ',' : ''}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                        {((ns.asns && ns.asns.length > 0) ||
-                          (ns.bgpPrefixes && ns.bgpPrefixes.length > 0) ||
-                          ns.rpkiStatus) && (
-                          <div className="flex flex-wrap items-center gap-1 mt-1">
-                            {ns.asns?.map((a) => (
-                              <span
-                                key={a.asn}
-                                className="inline-flex items-center gap-1 rounded bg-cyan-500/10 border border-cyan-500/25 px-1.5 py-0.5 font-mono text-[10px] text-cyan-700 dark:text-cyan-300"
-                              >
-                                <span className="font-bold">AS{a.asn}</span>
-                                {a.asName && (
-                                  <span className="truncate max-w-[140px] opacity-85">
-                                    · {a.asName}
-                                  </span>
-                                )}
-                              </span>
-                            ))}
-                            {ns.bgpPrefixes?.map((pfx) => (
-                              <span
-                                key={pfx}
-                                className="rounded bg-slate-200/80 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-600 dark:text-slate-300"
-                              >
-                                {pfx}
-                              </span>
-                            ))}
-                            {ns.rpkiStatus && ns.rpkiStatus !== 'error' && (
-                              <RpkiStatusBadge
-                                status={ns.rpkiStatus}
-                                validation={ns.rpkiValidations?.[0]}
-                                compact
-                              />
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                   {zone.nsDiversity && (
                     <div className="text-[11px] text-slate-500 dark:text-slate-400">
                       {zone.nsDiversity.summary}
+                    </div>
+                  )}
+                  {zone.nsConsistency && !zone.nsConsistency.consistent && (
+                    <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-2.5 py-2 text-[11px] text-amber-800 dark:text-amber-200 space-y-1">
+                      <div className="flex items-center gap-1.5 font-semibold">
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-amber-500" />
+                        <span>Intra-Zone NS RRset Skew (ANSWER vs. AUTHORITY / Multi-DoH)</span>
+                      </div>
+                      <div className="text-amber-700/90 dark:text-amber-300/90">
+                        {zone.nsConsistency.summary}
+                      </div>
+                      <div className="space-y-0.5 font-mono text-[10px]">
+                        {zone.nsConsistency.divergentObservations.slice(0, 4).map((obs) => (
+                          <div
+                            key={`${obs.sourceQueryId}-${obs.section}`}
+                            className="flex flex-wrap items-center gap-x-2 gap-y-0.5"
+                          >
+                            <span className="font-semibold">
+                              {displayFqdn(obs.qname)} {obs.qtypeName} ({obs.section.toUpperCase()}{' '}
+                              via {formatDohShortLabel(obs.endpoint)}):
+                            </span>
+                            {obs.extraTargets.map((t) => (
+                              <span
+                                key={`extra-${t}`}
+                                className="rounded bg-amber-500/15 px-1 py-0.5 text-amber-800 dark:text-amber-200"
+                              >
+                                +{displayFqdn(t)}
+                              </span>
+                            ))}
+                            {obs.missingTargets.map((t) => (
+                              <span
+                                key={`missing-${t}`}
+                                className="rounded bg-rose-500/15 px-1 py-0.5 text-rose-700 dark:text-rose-300"
+                              >
+                                -{displayFqdn(t)}
+                              </span>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </div>

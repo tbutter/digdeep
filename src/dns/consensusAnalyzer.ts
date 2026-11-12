@@ -11,6 +11,7 @@ import {
 import {
   discoverZoneCutsForName,
   evaluateSnapshotFromLogs,
+  probeLeafNameserverAddresses,
   type AnalyzeOptions,
 } from './analyzer';
 import { DohSession } from './doh';
@@ -806,6 +807,13 @@ export async function runConsensusAnalysis(
             purpose: `Consensus probe (${preset.shortLabel} DNSKEY)`,
           })
           .catch(() => undefined),
+        rSession
+          .query(deepestSoaZone, RR_TYPES.NS, {
+            cd: true,
+            doBit: true,
+            purpose: `Consensus probe (${preset.shortLabel} NS)`,
+          })
+          .catch(() => undefined),
       ];
       if (deepestSoaZone !== '.') {
         tasks.push(
@@ -844,6 +852,7 @@ export async function runConsensusAnalysis(
     }).then((logs) => {
       ecsLogs = logs;
     }),
+    probeLeafNameserverAddresses(primarySession, zoneList, targetName),
   ]);
 
   currentPhase = 'validating';

@@ -158,7 +158,7 @@ export function classifyIpAddress(ip: string, family: 4 | 6): IpClassification {
     if (!parts) {
       return { isPublic: false, note: 'Malformed IPv4 literal' };
     }
-    const [a, b, c] = parts;
+    const [a, b, c, d] = parts;
     if (a === 0) return { isPublic: false, note: '0.0.0.0/8 ("this" network, RFC 1122)' };
     if (a === 10) return { isPublic: false, note: '10.0.0.0/8 private (RFC 1918)' };
     if (a === 100 && b >= 64 && b <= 127) {
@@ -168,6 +168,9 @@ export function classifyIpAddress(ip: string, family: 4 | 6): IpClassification {
     if (a === 169 && b === 254) return { isPublic: false, note: '169.254.0.0/16 link-local (RFC 3927)' };
     if (a === 172 && b >= 16 && b <= 31) {
       return { isPublic: false, note: '172.16.0.0/12 private (RFC 1918)' };
+    }
+    if (a === 192 && b === 0 && c === 0 && d !== 9 && d !== 10) {
+      return { isPublic: false, note: '192.0.0.0/24 IETF protocol assignments (RFC 6890)' };
     }
     if (a === 192 && b === 0 && c === 2) {
       return { isPublic: false, note: '192.0.2.0/24 TEST-NET-1 documentation (RFC 5737)' };
@@ -184,8 +187,14 @@ export function classifyIpAddress(ip: string, family: 4 | 6): IpClassification {
     if (a === 203 && b === 0 && c === 113) {
       return { isPublic: false, note: '203.0.113.0/24 TEST-NET-3 documentation (RFC 5737)' };
     }
+    if (a === 255 && b === 255 && c === 255 && d === 255) {
+      return { isPublic: false, note: '255.255.255.255/32 limited broadcast (RFC 919)' };
+    }
+    if (a >= 240) {
+      return { isPublic: false, note: '240.0.0.0/4 reserved IPv4 range (RFC 1112)' };
+    }
     if (a >= 224) {
-      return { isPublic: false, note: 'Multicast / reserved IPv4 range' };
+      return { isPublic: false, note: '224.0.0.0/4 multicast IPv4 range (RFC 5771)' };
     }
     return { isPublic: true };
   }
@@ -206,11 +215,20 @@ export function classifyIpAddress(ip: string, family: 4 | 6): IpClassification {
   ) {
     return { isPublic: false, note: '::ffff:0:0/96 IPv4-mapped IPv6 address (RFC 4291)' };
   }
+  if (groups[0] === 0x0064 && groups[1] === 0xff9b && (groups[2] === 0 || groups[2] === 1)) {
+    return { isPublic: false, note: '64:ff9b::/96 NAT64 translation prefix (RFC 6052 / RFC 8215)' };
+  }
+  if (groups[0] === 0x0100 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0) {
+    return { isPublic: false, note: '100::/64 discard-only IPv6 prefix (RFC 6666)' };
+  }
   if ((groups[0] & 0xfe00) === 0xfc00) {
     return { isPublic: false, note: 'fc00::/7 Unique Local Address (RFC 4193)' };
   }
   if ((groups[0] & 0xffc0) === 0xfe80) {
     return { isPublic: false, note: 'fe80::/10 link-local IPv6 address (RFC 4291)' };
+  }
+  if (groups[0] === 0x2001 && groups[1] === 0x0002 && groups[2] === 0) {
+    return { isPublic: false, note: '2001:2::/48 benchmarking IPv6 range (RFC 5180)' };
   }
   if (groups[0] === 0x2001 && groups[1] === 0x0db8) {
     return { isPublic: false, note: '2001:db8::/32 documentation IPv6 range (RFC 3849)' };

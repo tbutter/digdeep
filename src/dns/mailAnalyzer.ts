@@ -12,6 +12,7 @@ import {
   discoverZoneCutsForName,
   evaluateSnapshotFromLogs,
   findLog,
+  probeLeafNameserverAddresses,
   type AnalyzeOptions,
 } from './analyzer';
 import { DohSession } from './doh';
@@ -7051,6 +7052,7 @@ export async function runMailAnalysis(
       return tasks;
     })
   );
+  await probeLeafNameserverAddresses(session, zoneList, targetName);
 
   // Step 7: Cryptographic validation + MX/DANE/SPF/DKIM/DMARC synthesis
   currentPhase = 'validating';

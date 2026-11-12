@@ -25,6 +25,7 @@ import {
 } from '../digFormat';
 import {
   base64ToBytes,
+  bytesToBase64,
   compareCanonicalDnsNames,
   computeKeyTag,
   concatBytes,
@@ -32,6 +33,7 @@ import {
 } from '../encoding';
 import {
   classifyDnsblReturnIp,
+  classifyIpAddress,
   getCachedRpkiValidation,
   ipToCymruOriginQname,
   ipToDnsblQname,
@@ -44,6 +46,8 @@ import {
   validateRpkiRoute,
 } from '../ipUtils';
 import { buildDnsQuery, decodeDnsName, encodeDnsName, parseDnsPacket } from '../wire';
+import type { DnsRecord } from '../types';
+import { findAuditFindingWireQuery } from '../wireQueryFilter';
 import {
   mapCtIssuerToCaaDomains,
   parseCaaRecordEntry,
@@ -418,15 +422,69 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
       expect(cfLeaf?.cdsRollover?.cdsRecords[0]?.matchesParentDs).toBe(true);
       expect(cfSnap.findings.some((f) => f.code === 'CDS_PARENT_IN_SYNC')).toBe(true);
 
-      // Nameserver BGP ASN diversity on cloudflare.com (all in AS13335)
+      // Nameserver BGP ASN diversity & #6 RFC 3901 dual-stack / hygiene on cloudflare.com (all in AS13335)
+      expect(cfLeaf!.nameservers.length).toBeGreaterThanOrEqual(4);
+      expect(cfLeaf?.nsDiversity?.probedCount).toBe(cfLeaf?.nameservers.length);
+      expect(cfLeaf?.nsDiversity?.ipv4NsCount).toBe(cfLeaf?.nameservers.length);
+      expect(cfLeaf?.nsDiversity?.ipv6NsCount).toBe(cfLeaf?.nameservers.length);
+      expect(cfLeaf?.nsDiversity?.dualStackReady).toBe(true);
       expect(cfLeaf?.nsDiversity?.uniqueAsns.some((a) => a.asn === 13335)).toBe(true);
       expect(cfLeaf?.nsDiversity?.singleAsn).toBe(true);
       expect(cfLeaf?.nsDiversity?.hasIpv6).toBe(true);
+      expect(cfLeaf?.nsConsistency?.consistent).toBe(true);
       expect(cfSnap.findings.some((f) => f.code === 'NS_SINGLE_ASN')).toBe(true);
+      expect(cfSnap.findings.some((f) => f.code === 'NS_TARGET_IS_CNAME')).toBe(false);
+      expect(cfSnap.findings.some((f) => f.code === 'NS_BOGON_IP')).toBe(false);
+      expect(cfSnap.findings.some((f) => f.code === 'NS_NO_IPV6')).toBe(false);
+      expect(cfSnap.findings.some((f) => f.code === 'NS_NO_IPV4')).toBe(false);
+      expect(cfSnap.findings.some((f) => f.code === 'NS_RRSET_INCONSISTENT')).toBe(false);
       expect(cfLeaf?.soaAudit?.valid).toBe(true);
 
-      // 3. Synthetic evaluation for SOA timer anomalies, RFC 8078 CDS delete signal, dangling NS, and dangling CNAME
-      const firstNsHost = cfLeaf?.nameservers[0]?.hostname ?? 'ns3.cloudflare.com.';
+      // Verify special-purpose / bogon IP classifier (RFC 1918 / 6598 / 4193 / 5737 / 3849 / 6890)
+      expect(classifyIpAddress('10.0.0.53', 4).isPublic).toBe(false);
+      expect(classifyIpAddress('100.64.0.53', 4).isPublic).toBe(false);
+      expect(classifyIpAddress('198.51.100.10', 4).isPublic).toBe(false);
+      expect(classifyIpAddress('192.0.0.1', 4).isPublic).toBe(false);
+      expect(classifyIpAddress('192.0.0.9', 4).isPublic).toBe(true); // RFC 7723 PCP anycast
+      expect(classifyIpAddress('240.0.0.1', 4).isPublic).toBe(false);
+      expect(classifyIpAddress('fd00::53', 6).isPublic).toBe(false);
+      expect(classifyIpAddress('2001:db8::53', 6).isPublic).toBe(false);
+      expect(classifyIpAddress('64:ff9b::1', 6).isPublic).toBe(false);
+      expect(classifyIpAddress('100::1', 6).isPublic).toBe(false);
+      expect(classifyIpAddress('173.245.58.100', 4).isPublic).toBe(true);
+      expect(classifyIpAddress('2400:cb00:2049:1::adf5:3a64', 6).isPublic).toBe(true);
+
+      // 3. Synthetic evaluation for SOA timer anomalies, RFC 8078 CDS delete signal, dangling NS,
+      //    and #6 NS hygiene (NS_TARGET_IS_CNAME, NS_BOGON_IP, NS_NO_IPV6, NS_NO_IPV4, NS_RRSET_INCONSISTENT)
+      const firstNsHost = cfLeaf!.nameservers[0].hostname;
+      const secondNsHost = cfLeaf!.nameservers[1].hostname;
+      const thirdNsHost = cfLeaf!.nameservers[2].hostname;
+      const fourthNsHost = cfLeaf!.nameservers[3].hostname;
+
+      const makeGenericRec = (
+        name: string,
+        type: number,
+        typeName: string,
+        rdataBytes: Uint8Array,
+        rdataText: string,
+        section: DnsRecord['section'],
+        target?: string
+      ): DnsRecord => {
+        const b64 = bytesToBase64(rdataBytes);
+        return {
+          name,
+          type,
+          typeName,
+          rrclass: 1,
+          ttl: 300,
+          rdataBase64: b64,
+          canonicalRdataBase64: b64,
+          rdataText,
+          parsed: target ? { kind: 'GENERIC', target } : { kind: 'GENERIC' },
+          section,
+        };
+      };
+
       const mutatedQueries = cfSnap.queries.map((q) => {
         // Mutate cloudflare.com SOA to have retry >= refresh and minimum > 86400
         if (q.qname === 'cloudflare.com.' && q.qtype === RR_TYPES.SOA) {
@@ -485,7 +543,149 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
             },
           };
         }
+        // Simulate second NS hostname resolving via a CNAME alias (RFC 2181 §10.3 violation)
+        if (
+          q.purpose.startsWith('Nameserver IP') &&
+          q.qname === secondNsHost &&
+          q.qtype === RR_TYPES.A
+        ) {
+          const aliasTarget = 'alias-ns.cloudflare.net.';
+          return {
+            ...q,
+            packet: {
+              ...q.packet,
+              answers: [
+                makeGenericRec(
+                  secondNsHost,
+                  RR_TYPES.CNAME,
+                  'CNAME',
+                  encodeDnsName(aliasTarget, false),
+                  aliasTarget,
+                  'answer',
+                  aliasTarget
+                ),
+                ...q.packet.answers.map((ans) =>
+                  ans.type === RR_TYPES.A ? { ...ans, name: aliasTarget } : ans
+                ),
+              ],
+            },
+          };
+        }
+        // Simulate third NS hostname resolving exclusively to bogon IPs (RFC 1918 + RFC 6598 + RFC 4193)
+        if (q.purpose.startsWith('Nameserver IP') && q.qname === thirdNsHost) {
+          if (q.qtype === RR_TYPES.A) {
+            return {
+              ...q,
+              packet: {
+                ...q.packet,
+                answers: [
+                  makeGenericRec(
+                    thirdNsHost,
+                    RR_TYPES.A,
+                    'A',
+                    new Uint8Array([10, 0, 0, 53]),
+                    '10.0.0.53',
+                    'answer'
+                  ),
+                  makeGenericRec(
+                    thirdNsHost,
+                    RR_TYPES.A,
+                    'A',
+                    new Uint8Array([100, 64, 0, 53]),
+                    '100.64.0.53',
+                    'answer'
+                  ),
+                ],
+              },
+            };
+          }
+          if (q.qtype === RR_TYPES.AAAA) {
+            return {
+              ...q,
+              packet: {
+                ...q.packet,
+                answers: [
+                  makeGenericRec(
+                    thirdNsHost,
+                    RR_TYPES.AAAA,
+                    'AAAA',
+                    new Uint8Array([0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x53]),
+                    'fd00::53',
+                    'answer'
+                  ),
+                ],
+              },
+            };
+          }
+        }
+        // Simulate fourth NS hostname missing IPv6 (IPv4-only while zone still has >=2 IPv6 NS)
+        if (
+          q.purpose.startsWith('Nameserver IP') &&
+          q.qname === fourthNsHost &&
+          q.qtype === RR_TYPES.AAAA
+        ) {
+          return {
+            ...q,
+            packet: {
+              ...q.packet,
+              answers: [],
+            },
+          };
+        }
+        // Simulate positive A response carrying an out-of-sync AUTHORITY NS RRset (Check 3)
+        if (q.qname === 'cloudflare.com.' && q.qtype === RR_TYPES.A && q.cd) {
+          const staleNs = 'stale-secondary.example.net.';
+          return {
+            ...q,
+            packet: {
+              ...q.packet,
+              authorities: [
+                ...q.packet.authorities,
+                makeGenericRec(
+                  'cloudflare.com.',
+                  RR_TYPES.NS,
+                  'NS',
+                  encodeDnsName(firstNsHost, false),
+                  firstNsHost,
+                  'authority',
+                  firstNsHost
+                ),
+                makeGenericRec(
+                  'cloudflare.com.',
+                  RR_TYPES.NS,
+                  'NS',
+                  encodeDnsName(staleNs, false),
+                  staleNs,
+                  'authority',
+                  staleNs
+                ),
+              ],
+            },
+          };
+        }
         return q;
+      });
+
+      // Also inject a secondary Multi-DoH qtype=NS observation with missing NS targets
+      const primaryNsLog = cfSnap.queries.find(
+        (q) => q.qname === 'cloudflare.com.' && q.qtype === RR_TYPES.NS && q.cd
+      )!;
+      mutatedQueries.push({
+        ...primaryNsLog,
+        id: 'q-secondary-doh-ns-skew',
+        endpoint: 'https://dns.google/dns-query',
+        purpose: 'Consensus probe (Google NS)',
+        packet: {
+          ...primaryNsLog.packet,
+          answers: primaryNsLog.packet.answers.filter(
+            (r) =>
+              !(
+                r.type === RR_TYPES.NS &&
+                r.parsed.kind === 'GENERIC' &&
+                r.parsed.target === secondNsHost
+              )
+          ),
+        },
       });
 
       const mutatedSnap = await evaluateSnapshotFromLogs({
@@ -508,6 +708,103 @@ describe('Live 1.1.1.1 DoH DNSViz Client-Side Engine', () => {
       expect(mutatedSnap.findings.some((f) => f.code === 'CDS_DELETE_SIGNAL')).toBe(true);
       expect(mutLeaf?.nsDiversity?.danglingHosts).toContain(firstNsHost);
       expect(mutatedSnap.findings.some((f) => f.code === 'DANGLING_NS_TARGET')).toBe(true);
+
+      // Verify #6 Check 1: NS_TARGET_IS_CNAME & NS_BOGON_IP
+      const mutSecondNs = mutLeaf?.nameservers.find((n) => n.hostname === secondNsHost);
+      expect(mutSecondNs?.cnameChain).toEqual(['alias-ns.cloudflare.net.']);
+      expect(mutLeaf?.nsDiversity?.cnameHosts).toContain(secondNsHost);
+      const cnameFinding = mutatedSnap.findings.find((f) => f.code === 'NS_TARGET_IS_CNAME');
+      expect(cnameFinding?.severity).toBe('warning');
+      expect(findAuditFindingWireQuery(cnameFinding!, mutatedSnap)?.qname).toBe(secondNsHost);
+
+      const mutThirdNs = mutLeaf?.nameservers.find((n) => n.hostname === thirdNsHost);
+      expect(mutThirdNs?.bogonIps?.length).toBe(3);
+      expect(mutThirdNs?.addressStack).toBe('none');
+      expect(mutLeaf?.nsDiversity?.bogonHosts).toContain(thirdNsHost);
+      const bogonFinding = mutatedSnap.findings.find((f) => f.code === 'NS_BOGON_IP');
+      expect(bogonFinding?.severity).toBe('warning');
+      expect(findAuditFindingWireQuery(bogonFinding!, mutatedSnap)?.qname).toBe(thirdNsHost);
+
+      // Verify #6 Check 2: Partial IPv6 (info when >= 2 IPv6 NS still reachable, 1 IPv4-only NS)
+      const mutFourthNs = mutLeaf?.nameservers.find((n) => n.hostname === fourthNsHost);
+      expect(mutFourthNs?.addressStack).toBe('ipv4-only');
+      expect(mutLeaf?.nsDiversity?.ipv4OnlyHosts).toContain(fourthNsHost);
+      const partialIpv6Finding = mutatedSnap.findings.find((f) => f.code === 'NS_NO_IPV6');
+      expect(partialIpv6Finding?.severity).toBe('info');
+      expect(findAuditFindingWireQuery(partialIpv6Finding!, mutatedSnap)?.qtypeName).toBe('AAAA');
+
+      // Verify #6 Check 3: Intra-zone NS consistency (AUTHORITY skew + Multi-DoH ANSWER skew)
+      expect(mutLeaf?.nsConsistency?.consistent).toBe(false);
+      expect(mutLeaf?.nsConsistency?.divergentObservations.length).toBeGreaterThanOrEqual(2);
+      const inconsistentFinding = mutatedSnap.findings.find(
+        (f) => f.code === 'NS_RRSET_INCONSISTENT'
+      );
+      expect(inconsistentFinding?.severity).toBe('warning');
+      expect(findAuditFindingWireQuery(inconsistentFinding!, mutatedSnap)?.id).toBe(
+        mutLeaf?.nsConsistency?.divergentObservations[0]?.sourceQueryId
+      );
+
+      // Verify zone-level RFC 3901 warnings when < 2 IPv6 NS, < 2 IPv4 NS, or single NS
+      const v4OnlyQueries = cfSnap.queries.map((q) =>
+        q.purpose.startsWith('Nameserver IP') && q.qtype === RR_TYPES.AAAA
+          ? { ...q, packet: { ...q.packet, answers: [] } }
+          : q
+      );
+      const v4OnlySnap = await evaluateSnapshotFromLogs({
+        id: 'test-ns-v4-only',
+        targetName: cfSnap.targetName,
+        queryTypes: cfSnap.queryTypes,
+        dohEndpoint: cfSnap.dohEndpoint,
+        capturedAt: cfSnap.capturedAt,
+        validatedAt: cfSnap.validatedAt,
+        durationMs: cfSnap.durationMs,
+        queries: v4OnlyQueries,
+        trustAnchors: cfSnap.trustAnchorsUsed,
+      });
+      const v4OnlyLeaf = v4OnlySnap.zones.find((z) => z.zoneName === 'cloudflare.com.');
+      expect(v4OnlyLeaf?.nsDiversity?.dualStackReady).toBe(false);
+      expect(v4OnlyLeaf?.nsDiversity?.ipv6NsCount).toBe(0);
+      expect(v4OnlySnap.findings.find((f) => f.code === 'NS_NO_IPV6')?.severity).toBe('warning');
+      expect(v4OnlySnap.overallStatus).toBe('secure');
+
+      const singleNsV6OnlyQueries = cfSnap.queries.map((q) => {
+        if (q.qname === 'cloudflare.com.' && q.qtype === RR_TYPES.NS) {
+          let keptOne = false;
+          return {
+            ...q,
+            packet: {
+              ...q.packet,
+              answers: q.packet.answers.filter((r) => {
+                if (r.type !== RR_TYPES.NS) return true;
+                if (!keptOne) {
+                  keptOne = true;
+                  return true;
+                }
+                return false;
+              }),
+            },
+          };
+        }
+        if (q.purpose.startsWith('Nameserver IP') && q.qtype === RR_TYPES.A) {
+          return { ...q, packet: { ...q.packet, answers: [] } };
+        }
+        return q;
+      });
+      const singleNsSnap = await evaluateSnapshotFromLogs({
+        id: 'test-ns-single-v6-only',
+        targetName: cfSnap.targetName,
+        queryTypes: cfSnap.queryTypes,
+        dohEndpoint: cfSnap.dohEndpoint,
+        capturedAt: cfSnap.capturedAt,
+        validatedAt: cfSnap.validatedAt,
+        durationMs: cfSnap.durationMs,
+        queries: singleNsV6OnlyQueries,
+        trustAnchors: cfSnap.trustAnchorsUsed,
+      });
+      expect(
+        singleNsSnap.findings.find((f) => f.code === 'NS_INSUFFICIENT_REDUNDANCY')?.severity
+      ).toBe('warning');
+      expect(singleNsSnap.findings.find((f) => f.code === 'NS_NO_IPV4')?.severity).toBe('warning');
     },
     25000
   );

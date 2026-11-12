@@ -484,11 +484,20 @@ export interface RpkiRouteValidation {
   summary: string;
 }
 
+export interface NameserverBogonIp {
+  ip: string;
+  family: 4 | 6;
+  reason: string;
+}
+
 export interface NameserverEntry {
   hostname: string;
   ipv4: string[];
   ipv6: string[];
   status?: 'ok' | 'dangling' | 'nodata';
+  addressStack?: 'dual-stack' | 'ipv4-only' | 'ipv6-only' | 'none';
+  cnameChain?: string[];
+  bogonIps?: NameserverBogonIp[];
   asns?: BgpAsnOrganization[];
   bgpPrefixes?: string[];
   country?: string;
@@ -546,14 +555,43 @@ export interface SoaAuditSummary {
 
 export interface NsDiversityAnalysis {
   nameserverCount: number;
+  probedCount?: number;
   uniqueAsns: BgpAsnOrganization[];
   uniquePrefixes: string[];
   hasIpv4: boolean;
   hasIpv6: boolean;
+  ipv4NsCount?: number;
+  ipv6NsCount?: number;
+  dualStackNsCount?: number;
+  dualStackReady?: boolean;
+  ipv4OnlyHosts?: string[];
+  ipv6OnlyHosts?: string[];
+  cnameHosts?: string[];
+  bogonHosts?: string[];
   danglingHosts: string[];
   singleAsn: boolean;
   singlePrefix: boolean;
   status: 'diverse' | 'single-asn' | 'single-prefix' | 'dangling' | 'insufficient';
+  summary: string;
+}
+
+export interface NsObservationEntry {
+  sourceQueryId: string;
+  qname: string;
+  qtypeName: string;
+  section: 'answer' | 'authority';
+  endpoint: string;
+  nsTargets: string[];
+  missingTargets: string[];
+  extraTargets: string[];
+  matchesAuthoritative: boolean;
+}
+
+export interface NsConsistencyAudit {
+  authoritativeNs: string[];
+  checkedObservations: number;
+  consistent: boolean;
+  divergentObservations: NsObservationEntry[];
   summary: string;
 }
 
@@ -690,6 +728,7 @@ export interface ZoneAnalysis {
   soaAudit?: SoaAuditSummary;
   cdsRollover?: CdsRolloverAnalysis;
   nsDiversity?: NsDiversityAnalysis;
+  nsConsistency?: NsConsistencyAudit;
   zonemd?: ZonemdAuditSummary;
   wildcardAudit?: WildcardAuditSummary;
   txtHygiene?: TxtHygieneAudit;

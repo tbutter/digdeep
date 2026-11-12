@@ -275,7 +275,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexCss).toContain('env(safe-area-inset-bottom');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v36');
+    expect(swCode).toContain('digdeep-shell-v37');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -2597,5 +2597,225 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       }
       Reflect.deleteProperty(globalThis, 'document');
     }
+  });
+
+  it('renders #6 RFC 2181 §10.3 CNAME alias, bogon IP, RFC 3901 dual-stack readiness, and intra-zone NS RRset skew in ZonesPanel and AuditPanel', () => {
+    const nsAuditSnap: AnalysisSnapshot = {
+      id: 'snap-ns-audit-6',
+      version: 17,
+      mode: 'dnssec',
+      targetName: 'app.sub.example.com.',
+      displayDomain: 'app.sub.example.com',
+      queryTypes: ['A'],
+      dohEndpoint: 'https://1.1.1.1/dns-query',
+      capturedAt: 1700000000000,
+      validatedAt: 1700000000000,
+      durationMs: 95,
+      overallStatus: 'secure',
+      overallSummary: 'DNSSEC chain verified',
+      zones: [
+        {
+          zoneName: '.',
+          parentZone: null,
+          depth: 0,
+          status: 'secure',
+          statusReason: 'Trusted root',
+          nsecMode: 'NSEC',
+          dnskeys: [],
+          dsVerifications: [],
+          trustAnchorMatches: [],
+          rrsets: [],
+          negativeNodes: [],
+          nameservers: [{ hostname: 'a.root-servers.net.', ipv4: [], ipv6: [] }],
+        },
+        {
+          // Intermediate zone with NS hygiene issues -> must NOT be considered a healthy auto-collapsible parent!
+          zoneName: 'example.com.',
+          parentZone: '.',
+          depth: 2,
+          status: 'secure',
+          statusReason: 'Validated via DS',
+          nsecMode: 'NSEC3',
+          dnskeys: [],
+          dsVerifications: [],
+          trustAnchorMatches: [],
+          rrsets: [],
+          negativeNodes: [],
+          nameservers: [
+            {
+              hostname: 'ns1.example.com.',
+              ipv4: ['93.184.216.34'],
+              ipv6: [],
+              status: 'ok',
+              addressStack: 'ipv4-only',
+              cnameChain: ['alias-ns1.example.net.'],
+            },
+            {
+              hostname: 'ns2.example.com.',
+              ipv4: ['10.0.0.53'],
+              ipv6: ['2606:2800:220:1:248:1893:25c8:1946'],
+              status: 'ok',
+              addressStack: 'ipv6-only',
+              bogonIps: [{ ip: '10.0.0.53', family: 4, reason: 'Private-use IPv4 (RFC 1918)' }],
+            },
+          ],
+          nsDiversity: {
+            nameserverCount: 2,
+            probedCount: 2,
+            uniqueAsns: [],
+            uniquePrefixes: [],
+            hasIpv4: true,
+            hasIpv6: true,
+            ipv4NsCount: 1,
+            ipv6NsCount: 1,
+            dualStackNsCount: 0,
+            dualStackReady: false,
+            ipv4OnlyHosts: ['ns1.example.com.'],
+            ipv6OnlyHosts: ['ns2.example.com.'],
+            cnameHosts: ['ns1.example.com.'],
+            bogonHosts: ['ns2.example.com.'],
+            danglingHosts: [],
+            singleAsn: false,
+            singlePrefix: false,
+            status: 'diverse',
+            summary: '2 authoritative nameservers (1/2 IPv4, 1/2 IPv6).',
+          },
+          nsConsistency: {
+            authoritativeNs: ['ns1.example.com.', 'ns2.example.com.'],
+            checkedObservations: 2,
+            consistent: false,
+            divergentObservations: [
+              {
+                sourceQueryId: 'q-skew-1',
+                qname: 'example.com.',
+                qtypeName: 'SOA',
+                section: 'authority',
+                endpoint: 'https://1.1.1.1/dns-query',
+                nsTargets: ['ns1.example.com.', 'ns3-stale.example.com.'],
+                missingTargets: ['ns2.example.com.'],
+                extraTargets: ['ns3-stale.example.com.'],
+                matchesAuthoritative: false,
+              },
+            ],
+            summary: 'NS RRset skew detected across 1 of 2 observations.',
+          },
+        },
+        {
+          zoneName: 'sub.example.com.',
+          parentZone: 'example.com.',
+          depth: 3,
+          status: 'secure',
+          statusReason: 'Validated via DS',
+          nsecMode: 'NSEC3',
+          dnskeys: [],
+          dsVerifications: [],
+          trustAnchorMatches: [],
+          rrsets: [],
+          negativeNodes: [],
+          nameservers: [
+            {
+              hostname: 'ns1.sub.example.com.',
+              ipv4: ['93.184.216.34'],
+              ipv6: ['2606:2800:220:1:248:1893:25c8:1946'],
+              status: 'ok',
+              addressStack: 'dual-stack',
+            },
+            {
+              hostname: 'ns2.sub.example.com.',
+              ipv4: ['93.184.216.35'],
+              ipv6: ['2606:2800:220:1:248:1893:25c8:1947'],
+              status: 'ok',
+              addressStack: 'dual-stack',
+            },
+          ],
+          nsDiversity: {
+            nameserverCount: 2,
+            probedCount: 2,
+            uniqueAsns: [],
+            uniquePrefixes: [],
+            hasIpv4: true,
+            hasIpv6: true,
+            ipv4NsCount: 2,
+            ipv6NsCount: 2,
+            dualStackNsCount: 2,
+            dualStackReady: true,
+            ipv4OnlyHosts: [],
+            ipv6OnlyHosts: [],
+            cnameHosts: [],
+            bogonHosts: [],
+            danglingHosts: [],
+            singleAsn: false,
+            singlePrefix: false,
+            status: 'diverse',
+            summary: '2 authoritative nameservers (2/2 IPv4, 2/2 IPv6, RFC 3901 dual-stack ready).',
+          },
+          nsConsistency: {
+            authoritativeNs: ['ns1.sub.example.com.', 'ns2.sub.example.com.'],
+            checkedObservations: 3,
+            consistent: true,
+            divergentObservations: [],
+            summary: 'Authoritative NS RRset (2 servers) is consistent across 3 additional observations.',
+          },
+        },
+      ],
+      cnameEdges: [],
+      findings: [
+        {
+          id: 'warn-ns-cname-example.com.-ns1.example.com.',
+          severity: 'warning',
+          code: 'NS_TARGET_IS_CNAME',
+          title: 'Authoritative NS ns1.example.com in example.com. is a CNAME alias',
+          detail: 'RFC 2181 §10.3 forbids NS records from pointing to an alias.',
+          rfc: 'RFC 2181 §10.3',
+          zone: 'example.com.',
+        },
+        {
+          id: 'warn-ns-bogon-example.com.-ns2.example.com.',
+          severity: 'warning',
+          code: 'NS_BOGON_IP',
+          title: 'Authoritative NS ns2.example.com in example.com. resolves to non-public bogon IP (10.0.0.53)',
+          detail: 'Private-use IPv4 (RFC 1918)',
+          rfc: 'RFC 1918 / RFC 6598 / RFC 4193',
+          zone: 'example.com.',
+        },
+        {
+          id: 'warn-ns-inconsistent-example.com.',
+          severity: 'warning',
+          code: 'NS_RRSET_INCONSISTENT',
+          title: 'Inconsistent NS RRset observed for example.com. across 1 response',
+          detail: 'NS RRset skew detected.',
+          rfc: 'RFC 2181 §5 / RFC 1912 §2.8',
+          zone: 'example.com.',
+        },
+      ],
+      queries: [],
+      trustAnchorsUsed: [],
+    };
+
+    expect(isHealthyIntermediateParentZone(nsAuditSnap.zones[0], nsAuditSnap)).toBe(true);
+    expect(isHealthyIntermediateParentZone(nsAuditSnap.zones[1], nsAuditSnap)).toBe(false);
+
+    const zonesHtml = renderToStaticMarkup(
+      <ZonesPanel snapshot={nsAuditSnap} defaultMobileCollapse={true} />
+    );
+    expect(zonesHtml).toContain('Partial Dual-Stack (1v4 / 1v6)');
+    expect(zonesHtml).toContain('Dual-Stack Ready (2v4 / 2v6 ✓)');
+    expect(zonesHtml).toContain('NS Set Skew (1)');
+    expect(zonesHtml).toContain('NS Set Consistent (3 obs ✓)');
+    expect(zonesHtml).toContain('CNAME ALIAS');
+    expect(zonesHtml).toContain('alias-ns1.example.net');
+    expect(zonesHtml).toContain('BOGON IP');
+    expect(zonesHtml).toContain('Private-use IPv4 (RFC 1918)');
+    expect(zonesHtml).toContain('IPv4-only');
+    expect(zonesHtml).toContain('IPv6-only');
+    expect(zonesHtml).toContain('+ns3-stale.example.com');
+    expect(zonesHtml).toContain('-ns2.example.com');
+
+    const auditHtml = renderToStaticMarkup(
+      <AuditPanel snapshot={nsAuditSnap} onJumpToGraphTarget={() => {}} />
+    );
+    expect(auditHtml).toContain('NS_TARGET_IS_CNAME');
+    expect(auditHtml).toContain('NS_BOGON_IP');
+    expect(auditHtml).toContain('NS_RRSET_INCONSISTENT');
   });
 });
