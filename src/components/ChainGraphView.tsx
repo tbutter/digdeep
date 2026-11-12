@@ -5,6 +5,7 @@ import {
   HelpCircle,
   Maximize2,
   RotateCcw,
+  Share2,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
@@ -654,9 +655,12 @@ export function ChainGraphView({
     return set;
   }, [activeFocusId, graph.edges]);
 
-  const exportDiagram = (format: 'svg' | 'png') => {
+  const canNativeShare =
+    typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+
+  const renderDiagramPngBlob = (): Promise<{ blob: Blob; filename: string } | null> => {
     const svgEl = svgRef.current;
-    if (!svgEl) return;
+    if (!svgEl) return Promise.resolve(null);
 
     const { clone, exportWidth, exportHeight } = prepareExportSvgElement(
       svgEl,
@@ -668,8 +672,47 @@ export function ChainGraphView({
     const serializer = new XMLSerializer();
     const svgString = serializer.serializeToString(clone);
     const safeName = snapshot.displayDomain.replace(/[^a-z0-9.-]/gi, '_') || 'root';
+    const filename = `digdeep-${safeName}.png`;
+
+    return new Promise((resolve) => {
+      const img = new Image();
+      const svgBlob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(svgBlob);
+      img.onload = () => {
+        const scale = 2;
+        const canvas = document.createElement('canvas');
+        canvas.width = exportWidth * scale;
+        canvas.height = exportHeight * scale;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.scale(scale, scale);
+          ctx.drawImage(img, 0, 0);
+          canvas.toBlob((pngBlob) => {
+            URL.revokeObjectURL(url);
+            resolve(pngBlob ? { blob: pngBlob, filename } : null);
+          }, 'image/png');
+        } else {
+          URL.revokeObjectURL(url);
+          resolve(null);
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(null);
+      };
+      img.src = url;
+    });
+  };
+
+  const exportDiagram = (format: 'svg' | 'png') => {
+    const svgEl = svgRef.current;
+    if (!svgEl) return;
 
     if (format === 'svg') {
+      const { clone } = prepareExportSvgElement(svgEl, snapshot, graph, theme);
+      const serializer = new XMLSerializer();
+      const svgString = serializer.serializeToString(clone);
+      const safeName = snapshot.displayDomain.replace(/[^a-z0-9.-]/gi, '_') || 'root';
       const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -680,32 +723,41 @@ export function ChainGraphView({
       return;
     }
 
-    const img = new Image();
-    const svgBlob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
-    const url = URL.createObjectURL(svgBlob);
-    img.onload = () => {
-      const scale = 2;
-      const canvas = document.createElement('canvas');
-      canvas.width = exportWidth * scale;
-      canvas.height = exportHeight * scale;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.scale(scale, scale);
-        ctx.drawImage(img, 0, 0);
-        canvas.toBlob((pngBlob) => {
-          if (pngBlob) {
-            const pngUrl = URL.createObjectURL(pngBlob);
-            const a = document.createElement('a');
-            a.href = pngUrl;
-            a.download = `digdeep-${safeName}.png`;
-            a.click();
-            URL.revokeObjectURL(pngUrl);
-          }
-        }, 'image/png');
+    void renderDiagramPngBlob().then((rendered) => {
+      if (!rendered) return;
+      const pngUrl = URL.createObjectURL(rendered.blob);
+      const a = document.createElement('a');
+      a.href = pngUrl;
+      a.download = rendered.filename;
+      a.click();
+      URL.revokeObjectURL(pngUrl);
+    });
+  };
+
+  const shareDiagramPng = async () => {
+    if (!canNativeShare) return;
+    const rendered = await renderDiagramPngBlob();
+    if (!rendered) return;
+
+    try {
+      const file = new File([rendered.blob], rendered.filename, { type: 'image/png' });
+      const title = `DigDeep Chain Graph — ${snapshot.displayDomain}`;
+      if (typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title,
+          text: snapshot.overallSummary,
+        });
+      } else {
+        await navigator.share({
+          title,
+          text: snapshot.overallSummary,
+          url: typeof window !== 'undefined' ? window.location.href : undefined,
+        });
       }
-      URL.revokeObjectURL(url);
-    };
-    img.src = url;
+    } catch {
+      // User dismissed share sheet or share canceled
+    }
   };
 
   const isDark = theme === 'dark';
@@ -842,6 +894,18 @@ export function ChainGraphView({
               <FileImage className="w-3.5 h-3.5" />
               <span>PNG</span>
             </button>
+            {canNativeShare && (
+              <button
+                type="button"
+                data-testid="share-png-diagram-btn"
+                onClick={() => void shareDiagramPng()}
+                className="inline-flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium cursor-pointer"
+                title="Share high-DPI PNG chain diagram via native OS share sheet"
+              >
+                <Share2 className="w-3.5 h-3.5 text-cyan-500" />
+                <span>Share</span>
+              </button>
+            )}
             <div className="h-4 w-px bg-slate-200 dark:bg-slate-800 mx-0.5" />
             <button
               type="button"

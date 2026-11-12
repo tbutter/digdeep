@@ -17,6 +17,7 @@ import {
   RefreshCw,
   Search,
   Settings,
+  Share2,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
@@ -1095,6 +1096,35 @@ export function App() {
     }
   };
 
+  const canNativeShare =
+    typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+
+  const handleNativeShareLink = async () => {
+    if (!activeSnapshot || typeof window === 'undefined' || !canNativeShare) return;
+    const shareUrl = buildShareUrl(window.location.href, {
+      name: activeSnapshot.queriedEmail ?? activeSnapshot.displayDomain,
+      mode: activeSnapshot.mode,
+      types: activeSnapshot.queryTypes,
+      dkimSelectors: activeSnapshot.customDkimSelectors,
+      dohEndpoint: activeSnapshot.dohEndpoint,
+      tab: activeTab,
+      focus: focusedGraphTarget,
+      showSoaAndNs: settings.showSoaAndNs,
+      showStandbyKeys: settings.showStandbyKeys,
+    });
+    const subjectName =
+      activeSnapshot.queriedEmail ?? activeSnapshot.queriedIp ?? activeSnapshot.displayDomain;
+    try {
+      await navigator.share({
+        title: `DigDeep — ${subjectName} (${activeSnapshot.overallStatus.toUpperCase()})`,
+        text: activeSnapshot.overallSummary,
+        url: shareUrl,
+      });
+    } catch {
+      // User dismissed share sheet or share canceled
+    }
+  };
+
   const handleCopyShareLink = async () => {
     if (!activeSnapshot || typeof window === 'undefined') return;
     const shareUrl = buildShareUrl(window.location.href, {
@@ -1189,7 +1219,7 @@ export function App() {
   return (
     <div className="min-h-screen bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col">
       {/* Top Header Bar — sticky on tablet/desktop; scrolls naturally on narrow mobile screens so the graph gets 100% viewport height */}
-      <header className="border-b border-slate-200 dark:border-slate-800/90 bg-white/90 dark:bg-slate-950/90 backdrop-blur md:sticky md:top-0 z-30">
+      <header className="safe-area-header border-b border-slate-200 dark:border-slate-800/90 bg-white/90 dark:bg-slate-950/90 backdrop-blur md:sticky md:top-0 z-30">
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-400 to-emerald-500 flex items-center justify-center shadow-sm shadow-cyan-500/20">
@@ -1740,7 +1770,7 @@ export function App() {
       </header>
 
       {/* Live Progress / Error Banner */}
-      <main className="max-w-[1600px] w-full mx-auto px-4 sm:px-6 py-4 flex-1 space-y-4">
+      <main className="safe-area-x max-w-[1600px] w-full mx-auto px-4 sm:px-6 py-4 flex-1 space-y-4">
         {untrustedDohPending && !loading && (
           <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-800 dark:text-amber-200">
             <span>
@@ -1861,6 +1891,19 @@ export function App() {
                   {activeSnapshot.queries.length} queries ({activeSnapshot.durationMs}ms)
                 </div>
                 <div className="flex flex-wrap items-center gap-1.5">
+                  {canNativeShare && (
+                    <button
+                      type="button"
+                      data-testid="share-deep-link-btn"
+                      onClick={() => void handleNativeShareLink()}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-cyan-500 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 transition-colors cursor-pointer"
+                      title="Share deep link via native OS share sheet"
+                    >
+                      <Share2 className="w-3.5 h-3.5 text-cyan-500" />
+                      <span>Share</span>
+                    </button>
+                  )}
+
                   <button
                     type="button"
                     onClick={() => void handleCopyShareLink()}
@@ -2323,7 +2366,7 @@ export function App() {
         )}
       </main>
 
-      <footer className="border-t border-slate-200/80 dark:border-slate-800/80 bg-white/60 dark:bg-slate-950/60">
+      <footer className="safe-area-footer border-t border-slate-200/80 dark:border-slate-800/80 bg-white/60 dark:bg-slate-950/60">
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span>

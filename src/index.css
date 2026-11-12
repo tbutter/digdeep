@@ -27,3 +27,25 @@
   background-image: radial-gradient(rgba(71, 85, 105, 0.35) 1px, transparent 1px);
   background-size: 20px 20px;
 }
+
+/* Standalone iOS / Android PWA safe-area inset utilities (viewport-fit=cover) */
+.safe-area-header {
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+.safe-area-x {
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+.safe-area-footer {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+.safe-area-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}

@@ -268,6 +268,11 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     const indexHtml = fs.readFileSync(new URL('../../../index.html', import.meta.url), 'utf8') as string;
     expect(indexHtml).toContain('rel="manifest" href="./manifest.webmanifest"');
     expect(indexHtml).toContain('name="theme-color"');
+    expect(indexHtml).toContain('viewport-fit=cover');
+
+    const indexCss = fs.readFileSync(new URL('../../index.css', import.meta.url), 'utf8') as string;
+    expect(indexCss).toContain('env(safe-area-inset-top');
+    expect(indexCss).toContain('env(safe-area-inset-bottom');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
     expect(swCode).toContain('digdeep-shell-v35');
@@ -291,6 +296,8 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     try {
       const appHtml = renderToStaticMarkup(<App />);
       expect(appHtml).toContain('Offline · Local History');
+      expect(appHtml).toContain('safe-area-header');
+      expect(appHtml).toContain('safe-area-footer');
       expect(appHtml).toContain('value="digdeep.butter.eu"');
       expect(appHtml).toContain('data-testid="omnibox-clear-button"');
       expect(appHtml).toContain('aria-label="Clear search input"');
@@ -2401,6 +2408,47 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       const pslOverlay = container.querySelector('[data-testid="search-psl-overlay"]');
       if (pslOverlay) {
         expect(pslOverlay.className).toContain('text-base sm:text-sm');
+      }
+
+      // Verify #50 native Web Share Sheet buttons when navigator.share is available
+      const prevShare = Object.getOwnPropertyDescriptor(globalThis.navigator, 'share');
+      let sharedPayload: { title?: string; text?: string; url?: string } | null = null;
+      Object.defineProperty(globalThis.navigator, 'share', {
+        value: async (data: { title?: string; text?: string; url?: string }) => {
+          sharedPayload = data;
+        },
+        configurable: true,
+      });
+      try {
+        const shareGraphHtml = renderToStaticMarkup(
+          <ChainGraphView
+            snapshot={realDnssecBogusSnap}
+            theme="dark"
+            filters={{ showSoaAndNs: false, showStandbyKeys: false }}
+            onChangeFilters={() => {}}
+          />
+        );
+        expect(shareGraphHtml).toContain('data-testid="share-png-diagram-btn"');
+
+        // Re-render mounted App to expose share-deep-link-btn and invoke it
+        await act(async () => {
+          root.render(<App />);
+        });
+        const shareBtn = container.querySelector(
+          '[data-testid="share-deep-link-btn"]'
+        ) as HTMLButtonElement | null;
+        expect(shareBtn).not.toBeNull();
+        await act(async () => {
+          shareBtn!.click();
+        });
+        expect(sharedPayload).not.toBeNull();
+        expect(sharedPayload!.url).toContain('name=example.com');
+      } finally {
+        if (prevShare) {
+          Object.defineProperty(globalThis.navigator, 'share', prevShare);
+        } else {
+          Reflect.deleteProperty(globalThis.navigator, 'share');
+        }
       }
 
       await act(async () => {

@@ -227,7 +227,7 @@ export function GraphInspector({
     : null;
 
   return (
-    <aside className="w-full lg:w-[390px] shrink-0 rounded-xl border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md shadow-lg flex flex-col sticky bottom-3 lg:top-44 lg:bottom-auto z-20 max-h-[46vh] lg:max-h-[calc(100vh-12rem)] overflow-hidden">
+    <aside className="safe-area-bottom w-full lg:w-[390px] shrink-0 rounded-xl border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md shadow-lg flex flex-col sticky bottom-[max(0.75rem,env(safe-area-inset-bottom,0px))] lg:top-44 lg:bottom-auto z-20 max-h-[46vh] lg:max-h-[calc(100vh-12rem)] overflow-hidden">
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-800">
         <div className="flex items-center gap-2 min-w-0">
           {selection.kind === 'zone' && <Layers className="w-4 h-4 text-cyan-500 shrink-0" />}
