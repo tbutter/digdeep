@@ -626,6 +626,69 @@ export function App() {
     ]
   );
 
+  const modalOverlayOpen = settingsOpen || reportModalOpen;
+  const mobileInspectorOpen = Boolean(
+    focusedGraphTarget &&
+      activeTab === 'graph' &&
+      typeof window !== 'undefined' &&
+      window.matchMedia?.('(max-width: 1023px)')?.matches
+  );
+  const modalOverlayOpenRef = useRef(modalOverlayOpen);
+  modalOverlayOpenRef.current = modalOverlayOpen;
+  const mobileInspectorOpenRef = useRef(mobileInspectorOpen);
+  mobileInspectorOpenRef.current = mobileInspectorOpen;
+  const prevModalOpenRef = useRef(modalOverlayOpen);
+  const prevMobileInspectorOpenRef = useRef(mobileInspectorOpen);
+  const pushedOverlayCountRef = useRef(0);
+  const closingOverlayViaPopCountRef = useRef(0);
+
+  // Push transient history state when mobile/modal overlays open so Android Back / iOS edge-swipe dismisses them cleanly
+  useEffect(() => {
+    const pushTransientOverlay = (kind: string) => {
+      if (typeof window === 'undefined' || typeof window.history?.pushState !== 'function') return;
+      const baseState =
+        typeof window.history.state === 'object' && window.history.state !== null
+          ? window.history.state
+          : {};
+      window.history.pushState(
+        { ...baseState, digdeepOverlay: kind },
+        '',
+        window.location.href
+      );
+      pushedOverlayCountRef.current += 1;
+    };
+
+    const popTransientOverlay = () => {
+      if (pushedOverlayCountRef.current <= 0) return;
+      pushedOverlayCountRef.current -= 1;
+      if (typeof window !== 'undefined' && typeof window.history?.back === 'function') {
+        closingOverlayViaPopCountRef.current += 1;
+        window.history.back();
+        setTimeout(() => {
+          if (closingOverlayViaPopCountRef.current > 0) {
+            closingOverlayViaPopCountRef.current -= 1;
+          }
+        }, 100);
+      }
+    };
+
+    if (!prevModalOpenRef.current && modalOverlayOpen) {
+      prevModalOpenRef.current = true;
+      pushTransientOverlay(settingsOpen ? 'settings' : 'report');
+    } else if (prevModalOpenRef.current && !modalOverlayOpen) {
+      prevModalOpenRef.current = false;
+      popTransientOverlay();
+    }
+
+    if (!prevMobileInspectorOpenRef.current && mobileInspectorOpen) {
+      prevMobileInspectorOpenRef.current = true;
+      pushTransientOverlay('inspector');
+    } else if (prevMobileInspectorOpenRef.current && !mobileInspectorOpen) {
+      prevMobileInspectorOpenRef.current = false;
+      popTransientOverlay();
+    }
+  }, [modalOverlayOpen, mobileInspectorOpen, settingsOpen]);
+
   // Keep browser URL query string in sync as user switches tabs, selects graph elements, or toggles filters
   useEffect(() => {
     if (!activeSnapshot || loading || activeSnapshot.id.startsWith('offline-wire-')) return;
@@ -645,7 +708,7 @@ export function App() {
     });
     if (url.search !== nextSearch) {
       url.search = nextSearch;
-      window.history.replaceState({}, '', url.toString());
+      window.history.replaceState(window.history.state ?? {}, '', url.toString());
     }
   }, [
     activeSnapshot,
@@ -659,6 +722,23 @@ export function App() {
   // Support browser Back / Forward navigation across deep-linked traces
   useEffect(() => {
     const onPopState = () => {
+      if (closingOverlayViaPopCountRef.current > 0) {
+        closingOverlayViaPopCountRef.current -= 1;
+        return;
+      }
+      if (modalOverlayOpenRef.current) {
+        pushedOverlayCountRef.current = Math.max(0, pushedOverlayCountRef.current - 1);
+        prevModalOpenRef.current = false;
+        setSettingsOpen(false);
+        setReportModalOpen(false);
+        return;
+      }
+      if (mobileInspectorOpenRef.current && pushedOverlayCountRef.current > 0) {
+        pushedOverlayCountRef.current = Math.max(0, pushedOverlayCountRef.current - 1);
+        prevMobileInspectorOpenRef.current = false;
+        setFocusedGraphTarget(null);
+        return;
+      }
       const parsed = parseDeepLinkParams(window.location.search, settings.customDohEndpoints);
       const nextMode: AnalysisMode = parsed.mode ?? 'dnssec';
       const nextDkimSels = parsed.dkimSelectors ?? [];
@@ -1314,6 +1394,7 @@ export function App() {
 
             <button
               type="button"
+              data-testid="open-settings-btn"
               onClick={() => setSettingsOpen(true)}
               className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:border-cyan-500 transition-colors cursor-pointer"
               title="Trust Anchors, Time-Travel Validation & DoH Endpoint"

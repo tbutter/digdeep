@@ -1,5 +1,5 @@
 import { Clock, KeyRound, Plus, RotateCcw, Server, Trash2, X } from 'lucide-react';
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FocusEvent, type FormEvent } from 'react';
 import {
   DEFAULT_DOH_ENDPOINT,
   DOH_SERVER_PRESETS,
@@ -38,7 +38,29 @@ export function SettingsModal({
   const [manualDoh, setManualDoh] = useState('');
   const [manualDohErr, setManualDohErr] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, onClose]);
+
   if (!open) return null;
+
+  const handleFieldFocusCapture = (e: FocusEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === 'INPUT' || target.tagName === 'SELECT' || target.tagName === 'TEXTAREA')
+    ) {
+      target.scrollIntoView?.({ block: 'nearest' });
+    }
+  };
 
   const handleAddDoh = (e: FormEvent) => {
     e.preventDefault();
@@ -89,22 +111,42 @@ export function SettingsModal({
   };
 
   return (
-    <div className="safe-area-x fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="safe-area-bottom w-full max-w-2xl rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl max-h-[88vh] flex flex-col overflow-hidden">
-        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
-          <h2 className="font-semibold text-base text-slate-900 dark:text-slate-100">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Validator Settings, Trust Anchors & Time-Travel"
+      data-testid="settings-modal"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="safe-area-x fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4"
+    >
+      <div
+        data-testid="settings-modal-sheet"
+        className="safe-area-bottom w-full max-w-2xl rounded-t-2xl sm:rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl max-h-[92dvh] sm:max-h-[88dvh] flex flex-col overflow-hidden"
+      >
+        <div className="sm:hidden flex justify-center pt-2.5 pb-0.5 shrink-0" aria-hidden="true">
+          <div className="w-10 h-1 rounded-full bg-slate-300 dark:bg-slate-700" />
+        </div>
+        <div className="px-4 sm:px-5 py-3.5 sm:py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
+          <h2 className="font-semibold text-sm sm:text-base text-slate-900 dark:text-slate-100">
             Validator Settings, Trust Anchors &amp; Time-Travel
           </h2>
           <button
             type="button"
+            aria-label="Close settings modal"
+            data-testid="settings-modal-close-btn"
             onClick={onClose}
-            className="p-1 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+            className="p-2 sm:p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer shrink-0"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="p-5 overflow-y-auto space-y-6 text-xs">
+        <div
+          onFocusCapture={handleFieldFocusCapture}
+          className="p-4 sm:p-5 overflow-y-auto overscroll-contain scroll-pb-24 space-y-6 text-xs"
+        >
           {/* 1. DoH Endpoint */}
           <section className="space-y-2.5">
             <div className="flex items-center gap-1.5 font-semibold uppercase tracking-wider text-slate-500">

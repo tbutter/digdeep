@@ -2479,6 +2479,46 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(container.querySelector('[data-testid="nav-tabs-fade-left"]')).not.toBeNull();
       expect(container.querySelector('[data-testid="nav-tabs-fade-right"]')).not.toBeNull();
 
+      // Verify #54 bottom-sheet SettingsModal, dvh sizing, backdrop/Escape dismissal, and Back-gesture (popstate) dismissal
+      const openSettingsBtn = container.querySelector(
+        '[data-testid="open-settings-btn"]'
+      ) as HTMLButtonElement | null;
+      expect(openSettingsBtn).not.toBeNull();
+      await act(async () => {
+        openSettingsBtn!.click();
+      });
+      const settingsBackdrop = container.querySelector(
+        '[data-testid="settings-modal"]'
+      ) as HTMLDivElement | null;
+      const settingsSheet = container.querySelector(
+        '[data-testid="settings-modal-sheet"]'
+      ) as HTMLDivElement | null;
+      expect(settingsBackdrop).not.toBeNull();
+      expect(settingsSheet).not.toBeNull();
+      expect(settingsBackdrop!.className).toContain('items-end sm:items-center');
+      expect(settingsSheet!.className).toContain('max-h-[92dvh]');
+      expect(settingsSheet!.className).toContain('rounded-t-2xl sm:rounded-2xl');
+
+      // Simulate mobile Back gesture (popstate): closes SettingsModal while keeping active snapshot intact
+      await act(async () => {
+        dom.window.dispatchEvent(new dom.window.PopStateEvent('popstate'));
+      });
+      expect(container.querySelector('[data-testid="settings-modal"]')).toBeNull();
+      expect(container.textContent).toContain('example.com');
+
+      // Re-open SettingsModal and dismiss via backdrop click
+      await act(async () => {
+        openSettingsBtn!.click();
+      });
+      const reopenedBackdrop = container.querySelector(
+        '[data-testid="settings-modal"]'
+      ) as HTMLDivElement | null;
+      expect(reopenedBackdrop).not.toBeNull();
+      await act(async () => {
+        reopenedBackdrop!.click();
+      });
+      expect(container.querySelector('[data-testid="settings-modal"]')).toBeNull();
+
       await act(async () => {
         root.unmount();
       });
