@@ -275,6 +275,10 @@ export function App() {
   const [externalCustomWire, setExternalCustomWire] = useState<ExternalCustomWireRequest | null>(
     null
   );
+  const [externalRawEmail, setExternalRawEmail] = useState<{
+    payload: string;
+    seq: number;
+  } | null>(null);
   const examplesContainerRef = useRef<HTMLDivElement | null>(null);
   const [focusedGraphTarget, setFocusedGraphTarget] = useState<string | null>(
     initialBootState.focusedTarget
@@ -839,6 +843,33 @@ export function App() {
       return;
     }
 
+    if (parsed.kind === 'email-headers') {
+      e.preventDefault();
+      setExamplesOpen(false);
+      setAutocompleteOpen(false);
+      setActiveSuggestionIdx(-1);
+      setError(null);
+      setDomainInput(parsed.target);
+      setAnalysisMode('mail');
+      if (parsed.dkimSelectors.length > 0) {
+        setCustomDkimSelectors(parsed.dkimSelectors);
+      }
+      setOmniboxNotice(parsed.summaryLabel);
+      setExternalRawEmail((prev) => ({
+        payload: parsed.rawHeaders,
+        seq: (prev?.seq ?? 0) + 1,
+      }));
+      if (!isOffline && !untrustedDohPending) {
+        void executeAnalysis(parsed.target, selectedTypes, {
+          modeOverride: 'mail',
+          dkimSelectorsOverride:
+            parsed.dkimSelectors.length > 0 ? parsed.dkimSelectors : customDkimSelectors,
+          pushHistory: true,
+        });
+      }
+      return;
+    }
+
     if (parsed.kind === 'cli-command') {
       e.preventDefault();
       setExamplesOpen(false);
@@ -960,6 +991,26 @@ export function App() {
 
     if (parsed.kind === 'wire-packet') {
       openParsedWirePacket(parsed);
+      return;
+    }
+
+    if (parsed.kind === 'email-headers') {
+      setDomainInput(parsed.target);
+      setAnalysisMode('mail');
+      if (parsed.dkimSelectors.length > 0) {
+        setCustomDkimSelectors(parsed.dkimSelectors);
+      }
+      setOmniboxNotice(parsed.summaryLabel);
+      setExternalRawEmail((prev) => ({
+        payload: parsed.rawHeaders,
+        seq: (prev?.seq ?? 0) + 1,
+      }));
+      void executeAnalysis(parsed.target, selectedTypes, {
+        modeOverride: 'mail',
+        dkimSelectorsOverride:
+          parsed.dkimSelectors.length > 0 ? parsed.dkimSelectors : customDkimSelectors,
+        pushHistory: true,
+      });
       return;
     }
 
@@ -2047,6 +2098,7 @@ export function App() {
                 key={activeSnapshot.id}
                 snapshot={activeSnapshot}
                 loading={loading}
+                externalRawEmail={externalRawEmail}
                 onJumpToGraphTarget={(targetId) => {
                   setFocusedGraphTarget(targetId);
                   setActiveTab('graph');
@@ -2062,6 +2114,16 @@ export function App() {
                   void executeAnalysis(activeSnapshot.displayDomain, activeSnapshot.queryTypes, {
                     modeOverride: 'mail',
                     dkimSelectorsOverride: parsedSels,
+                    pushHistory: true,
+                  });
+                }}
+                onSwitchMailDomain={(nextDomain, nextSelectors) => {
+                  setDomainInput(nextDomain);
+                  setAnalysisMode('mail');
+                  setCustomDkimSelectors(nextSelectors);
+                  void executeAnalysis(nextDomain, activeSnapshot.queryTypes, {
+                    modeOverride: 'mail',
+                    dkimSelectorsOverride: nextSelectors,
                     pushHistory: true,
                   });
                 }}

@@ -6,6 +6,7 @@ import { ChainGraphView, prepareExportSvgElement } from '../../components/ChainG
 import { ConsensusView } from '../../components/ConsensusView';
 import { CryptoBlob, formatMiddleEllipsis } from '../../components/CryptoBlob';
 import { EmailDaneCard } from '../../components/EmailDaneCard';
+import { EmailHeaderVerifierCard } from '../../components/EmailHeaderVerifierCard';
 import { GraphInspector } from '../../components/GraphInspector';
 import { HistoryPanel } from '../../components/HistoryPanel';
 import {
@@ -269,7 +270,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v34');
+    expect(swCode).toContain('digdeep-shell-v35');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -2371,6 +2372,20 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       );
       expect(ssrModalHtml).toContain('Incident Report &amp; CI Regression Check');
       expect(ssrModalHtml).toContain('RRSIG &gt;=');
+
+      // Verify EmailHeaderVerifierCard SSR rendering with externalRawEmail expanded state
+      const ssrVerifierHtml = renderToStaticMarkup(
+        <EmailHeaderVerifierCard
+          snapshot={realDnssecBogusSnap}
+          externalRawEmail={{
+            payload: 'From: test@example.com\nSubject: Hello',
+            seq: 1,
+          }}
+        />
+      );
+      expect(ssrVerifierHtml).toContain('100% Local WebCrypto · Zero Upload');
+      expect(ssrVerifierHtml).toContain('data-testid="email-verifier-textarea"');
+      expect(ssrVerifierHtml).toContain('Verify DKIM / ARC / DMARC');
 
       await act(async () => {
         root.unmount();

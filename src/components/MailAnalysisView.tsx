@@ -47,6 +47,7 @@ import {
 } from '../dns/wireQueryFilter';
 import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
 import { CryptoBlob } from './CryptoBlob';
+import { EmailHeaderVerifierCard } from './EmailHeaderVerifierCard';
 import { StatusBadge } from './StatusBadge';
 
 function getDaneBadgeMeta(status: DaneHostStatus): {
@@ -1042,6 +1043,8 @@ export function MailAnalysisView({
   onOpenChainGraph,
   onInspectWireQuery,
   onProbeDkimSelectors,
+  onSwitchMailDomain,
+  externalRawEmail,
   loading = false,
 }: {
   snapshot: AnalysisSnapshot;
@@ -1049,6 +1052,8 @@ export function MailAnalysisView({
   onOpenChainGraph: () => void;
   onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
   onProbeDkimSelectors?: (rawSelectorsInput: string) => void;
+  onSwitchMailDomain?: (domain: string, dkimSelectors: string[]) => void;
+  externalRawEmail?: { payload: string; seq: number } | null;
   loading?: boolean;
 }) {
   seedIpAsnCacheFromSnapshot(snapshot);
@@ -1455,6 +1460,21 @@ export function MailAnalysisView({
               <span>{sec.label}</span>
             </button>
           ))}
+          <button
+            type="button"
+            data-testid="mail-jump-chip-header-verifier"
+            onClick={() => {
+              if (typeof document !== 'undefined') {
+                const el = document.getElementById('mail-section-header-verifier');
+                if (el && typeof el.scrollIntoView === 'function') {
+                  el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+              }
+            }}
+            className="inline-flex items-center gap-1 shrink-0 whitespace-nowrap rounded-lg border border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 px-2.5 py-1 text-xs font-semibold text-cyan-700 dark:text-cyan-300 transition-colors cursor-pointer"
+          >
+            <span>Verify Headers / .eml</span>
+          </button>
         </div>
 
         <button
@@ -1476,6 +1496,16 @@ export function MailAnalysisView({
           )}
         </button>
       </div>
+
+      {/* Raw Email Header & .eml Local Cryptographic Replay Verifier (RFC 6376 / 8617 / 7489) */}
+      <EmailHeaderVerifierCard
+        snapshot={snapshot}
+        loading={loading}
+        externalRawEmail={externalRawEmail}
+        onSwitchMailDomain={onSwitchMailDomain}
+        onJumpToGraphTarget={onJumpToGraphTarget}
+        onInspectWireQuery={onInspectWireQuery}
+      />
 
       {/* Section 1: MX Exchangers & SMTP DANE (_25._tcp TLSA) */}
       <section id="mail-section-mx-dane" className="space-y-3 scroll-mt-16 md:scroll-mt-44">

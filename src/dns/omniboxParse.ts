@@ -6,6 +6,7 @@ import {
   RR_TYPES,
 } from './constants';
 import { parseEmailDaneInput } from './emailDane';
+import { extractEmailHeaderQuickSummary } from './emailHeaderVerifier';
 import { displayFqdn, normalizeFqdn } from './encoding';
 import { parseReverseIpInput, stripIpEndpointWrappers } from './ipUtils';
 import type { AnalysisMode, AnalysisSnapshot } from './types';
@@ -39,6 +40,16 @@ export type OmniboxParseResult =
       dohEndpoint: string | null;
       dohDisplay: string | null;
       isUntrustedCustomDoh: boolean;
+      summaryLabel: string;
+    }
+  | {
+      kind: 'email-headers';
+      rawHeaders: string;
+      target: string;
+      dkimSelectors: string[];
+      dkimSignatureCount: number;
+      arcSetCount: number;
+      fromAddress?: string;
       summaryLabel: string;
     }
   | {
@@ -589,6 +600,33 @@ export function parseOmniboxInput(
   const cliMatch = tryParseCliCommand(unquoted, savedCustomDohEndpoints);
   if (cliMatch) {
     return cliMatch;
+  }
+
+  // 2b. Check multi-line RFC 5322 raw email headers / `.eml` messages BEFORE whitespace collapse
+  const emailHeaderSummary = extractEmailHeaderQuickSummary(rawTrimmed);
+  if (emailHeaderSummary) {
+    const parts: string[] = [];
+    if (emailHeaderSummary.dkimSignatureCount > 0) {
+      parts.push(
+        `${emailHeaderSummary.dkimSignatureCount} DKIM sig${emailHeaderSummary.dkimSignatureCount === 1 ? '' : 's'}`
+      );
+    }
+    if (emailHeaderSummary.arcSetCount > 0) {
+      parts.push(
+        `${emailHeaderSummary.arcSetCount} ARC hop${emailHeaderSummary.arcSetCount === 1 ? '' : 's'}`
+      );
+    }
+    const detailSuffix = parts.length > 0 ? ` (${parts.join(' · ')})` : '';
+    return {
+      kind: 'email-headers',
+      rawHeaders: rawInput,
+      target: emailHeaderSummary.targetDomain,
+      dkimSelectors: emailHeaderSummary.dkimSelectors,
+      dkimSignatureCount: emailHeaderSummary.dkimSignatureCount,
+      arcSetCount: emailHeaderSummary.arcSetCount,
+      fromAddress: emailHeaderSummary.fromAddress,
+      summaryLabel: `Detected raw email headers → switched to Mail mode for ${emailHeaderSummary.targetDomain}${detailSuffix} & opened local DKIM/ARC/DMARC verifier`,
+    };
   }
 
   // Collapse accidental multi-line paste whitespace for single-target inputs

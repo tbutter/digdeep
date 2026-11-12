@@ -2700,7 +2700,7 @@ function parseDmarcUri(
   };
 }
 
-function evaluateDmarcFromLogs(params: {
+export function evaluateDmarcFromLogs(params: {
   effectiveMailDomain: string;
   isDomainNxdomain: boolean;
   queries: DohQueryLog[];
@@ -3166,7 +3166,7 @@ function evaluateDmarcFromLogs(params: {
   return baseResult;
 }
 
-function evaluateSingleDkimSelector(params: {
+export function evaluateSingleDkimSelector(params: {
   selector: string;
   source: 'custom' | 'auto';
   effectiveMailDomain: string;
@@ -6140,7 +6140,7 @@ export function evaluateMailFromSnapshotData(params: {
 /**
  * Recursively prefetches DNS records needed to evaluate an SPF policy tree via `session`.
  */
-async function prefetchSpfTree(
+export async function prefetchSpfTree(
   session: DohSession,
   startDomain: string
 ): Promise<void> {

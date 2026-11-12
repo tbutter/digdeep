@@ -7,6 +7,7 @@ export interface DohClientOptions {
   endpoint?: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
+  initialLogs?: readonly DohQueryLog[];
 }
 
 /**
@@ -26,6 +27,17 @@ export class DohSession {
     this.endpoint = options.endpoint ?? DEFAULT_DOH_ENDPOINT;
     this.timeoutMs = options.timeoutMs ?? 9000;
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
+    if (options.initialLogs) {
+      for (const log of options.initialLogs) {
+        this.logs.push(log);
+        const normName = normalizeFqdn(log.qname);
+        const key = `${normName}|${log.qtype}|cd=${log.cd ? 1 : 0}|do=${log.doBit ? 1 : 0}${log.ecsSubnet ? `|ecs=${log.ecsSubnet}` : ''}`;
+        if (!this.inflight.has(key)) {
+          this.inflight.set(key, Promise.resolve(log));
+        }
+      }
+      this.counter = this.logs.length;
+    }
   }
 
   public getLogs(): DohQueryLog[] {
