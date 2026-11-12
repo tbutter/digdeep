@@ -361,6 +361,44 @@ export function App() {
     };
   }, []);
 
+  const navTabsRef = useRef<HTMLDivElement | null>(null);
+  const [navTabsOverflow, setNavTabsOverflow] = useState({ left: false, right: false });
+
+  const updateNavTabsOverflow = useCallback(() => {
+    const el = navTabsRef.current;
+    if (!el) return;
+    const maxScroll = el.scrollWidth - el.clientWidth;
+    setNavTabsOverflow({
+      left: el.scrollLeft > 4,
+      right: maxScroll - el.scrollLeft > 4,
+    });
+  }, []);
+
+  useEffect(() => {
+    updateNavTabsOverflow();
+    if (typeof window === 'undefined') return;
+    window.addEventListener('resize', updateNavTabsOverflow);
+    return () => window.removeEventListener('resize', updateNavTabsOverflow);
+  }, [updateNavTabsOverflow, activeSnapshot?.id, activeSnapshot?.mode]);
+
+  useEffect(() => {
+    const container = navTabsRef.current;
+    if (!container) return;
+    const activeBtn = container.querySelector<HTMLElement>('[data-active-tab="true"]');
+    if (activeBtn && container.scrollWidth > container.clientWidth) {
+      const targetLeft = Math.max(
+        0,
+        activeBtn.offsetLeft - container.clientWidth / 2 + activeBtn.offsetWidth / 2
+      );
+      if (typeof container.scrollTo === 'function') {
+        container.scrollTo({ left: targetLeft, behavior: 'smooth' });
+      } else {
+        container.scrollLeft = targetLeft;
+      }
+    }
+    updateNavTabsOverflow();
+  }, [activeTab, activeSnapshot?.id, updateNavTabsOverflow]);
+
   // Press '/' anywhere outside inputs to focus domain search bar
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1220,7 +1258,7 @@ export function App() {
     <div className="min-h-screen bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col">
       {/* Top Header Bar — sticky on tablet/desktop; scrolls naturally on narrow mobile screens so the graph gets 100% viewport height */}
       <header className="safe-area-header border-b border-slate-200 dark:border-slate-800/90 bg-white/90 dark:bg-slate-950/90 backdrop-blur md:sticky md:top-0 z-30">
-        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-2 sm:py-3 flex flex-wrap items-center justify-between gap-2.5 sm:gap-3">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-400 to-emerald-500 flex items-center justify-center shadow-sm shadow-cyan-500/20">
               <Network className="w-5 h-5 text-slate-950 stroke-[2.3]" />
@@ -1296,7 +1334,7 @@ export function App() {
         </div>
 
         {/* Domain Query & RR Type Bar */}
-        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 pb-3.5 space-y-2.5">
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 pb-2.5 sm:pb-3.5 space-y-2 sm:space-y-2.5">
           <form onSubmit={handleSubmit} className="flex flex-col sm:flex-row gap-2">
             <div ref={examplesContainerRef} className="relative flex-1">
               <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none z-20" />
@@ -1547,31 +1585,36 @@ export function App() {
               )}
             </div>
 
-            <DohChooser
-              settings={settings}
-              onSaveSettings={(next) => void handleUpdateSettings(next)}
-            />
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-cyan-500 to-emerald-500 hover:from-cyan-400 hover:to-emerald-400 disabled:opacity-60 px-5 py-2.5 font-semibold text-sm text-slate-950 shadow-sm shadow-cyan-500/20 transition-all cursor-pointer shrink-0"
+            <div
+              data-testid="omnibox-action-row"
+              className="flex items-stretch gap-2 shrink-0"
             >
-              {loading ? (
-                <>
-                  <RefreshCw className="w-4 h-4 animate-spin" />
-                  <span>Tracing ({progress?.completedQueries ?? 0} queries)…</span>
-                </>
-              ) : (
-                <>
-                  <Play className="w-4 h-4 fill-current" />
-                  <span>
-                    {ANALYSIS_MODES.find((m) => m.id === analysisMode)?.actionLabel ??
-                      'Analyze DNSSEC'}
-                  </span>
-                </>
-              )}
-            </button>
+              <DohChooser
+                settings={settings}
+                onSaveSettings={(next) => void handleUpdateSettings(next)}
+              />
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-cyan-500 to-emerald-500 hover:from-cyan-400 hover:to-emerald-400 disabled:opacity-60 px-4 sm:px-5 py-2.5 font-semibold text-sm text-slate-950 shadow-sm shadow-cyan-500/20 transition-all cursor-pointer shrink-0"
+              >
+                {loading ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Tracing ({progress?.completedQueries ?? 0} queries)…</span>
+                  </>
+                ) : (
+                  <>
+                    <Play className="w-4 h-4 fill-current" />
+                    <span>
+                      {ANALYSIS_MODES.find((m) => m.id === analysisMode)?.actionLabel ??
+                        'Analyze DNSSEC'}
+                    </span>
+                  </>
+                )}
+              </button>
+            </div>
           </form>
 
           {omniboxNotice && (
@@ -1634,8 +1677,13 @@ export function App() {
             </div>
 
             {analysisMode === 'dnssec' ? (
-              <div className="flex flex-wrap items-center gap-1">
-                <span className="text-[11px] font-medium text-slate-500 mr-1">RR Types:</span>
+              <div
+                data-testid="rr-types-strip"
+                className="flex items-center gap-1 overflow-x-auto sm:flex-wrap sm:overflow-visible no-scrollbar py-0.5 max-w-full"
+              >
+                <span className="text-[11px] font-medium text-slate-500 mr-1 shrink-0">
+                  RR Types:
+                </span>
                 {PRIMARY_TYPES.map((t) => {
                   const active = selectedTypes.includes(t);
                   return (
@@ -1643,7 +1691,7 @@ export function App() {
                       key={t}
                       type="button"
                       onClick={() => toggleQueryType(t)}
-                      className={`px-2 py-0.5 rounded-md font-mono text-[11px] transition-colors cursor-pointer ${
+                      className={`shrink-0 px-2 py-0.5 rounded-md font-mono text-[11px] transition-colors cursor-pointer ${
                         active
                           ? 'bg-cyan-500 text-slate-950 font-bold'
                           : 'bg-slate-200/70 dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:bg-slate-300/70 dark:hover:bg-slate-800'
@@ -1661,7 +1709,7 @@ export function App() {
                         key={t}
                         type="button"
                         onClick={() => toggleQueryType(t)}
-                        className={`px-2 py-0.5 rounded-md font-mono text-[11px] transition-colors cursor-pointer ${
+                        className={`shrink-0 px-2 py-0.5 rounded-md font-mono text-[11px] transition-colors cursor-pointer ${
                           active
                             ? 'bg-cyan-500 text-slate-950 font-bold'
                             : 'bg-slate-200/70 dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:bg-slate-300/70 dark:hover:bg-slate-800'
@@ -1674,69 +1722,69 @@ export function App() {
                 <button
                   type="button"
                   onClick={() => setShowExtraTypes((v) => !v)}
-                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] text-slate-500 hover:text-cyan-500 cursor-pointer"
+                  className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] text-slate-500 hover:text-cyan-500 cursor-pointer"
                 >
                   <SlidersHorizontal className="w-3 h-3" />
                   {showExtraTypes ? 'Less' : 'More'}
                 </button>
               </div>
             ) : analysisMode === 'mail' ? (
-              <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
-                <span className="font-medium">Checks:</span>
-                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+              <div className="flex items-center gap-1.5 overflow-x-auto sm:flex-wrap sm:overflow-visible no-scrollbar whitespace-nowrap text-[11px] text-slate-500 dark:text-slate-400">
+                <span className="font-medium shrink-0">Checks:</span>
+                <span className="shrink-0 rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   MX + A/AAAA
                 </span>
-                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                <span className="shrink-0 rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   _25._tcp DANE TLSA
                 </span>
-                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                <span className="shrink-0 rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   SPF v=spf1
                 </span>
-                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                <span className="shrink-0 rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   DKIM _domainkey
                 </span>
-                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                <span className="shrink-0 rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   DMARC _dmarc
                 </span>
-                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                <span className="shrink-0 rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   WebCrypto DNSSEC
                 </span>
               </div>
             ) : analysisMode === 'web' ? (
-              <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
-                <span className="font-medium">Checks:</span>
-                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+              <div className="flex items-center gap-1.5 overflow-x-auto sm:flex-wrap sm:overflow-visible no-scrollbar whitespace-nowrap text-[11px] text-slate-500 dark:text-slate-400">
+                <span className="font-medium shrink-0">Checks:</span>
+                <span className="shrink-0 rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   HTTPS / SVCB (RFC 9460)
                 </span>
-                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                <span className="shrink-0 rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   TLS ECHConfigList
                 </span>
-                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                <span className="shrink-0 rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   ipv4hint / ipv6hint Drift
                 </span>
-                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                <span className="shrink-0 rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   Tree-Walking CAA (RFC 8659/8657)
                 </span>
-                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                <span className="shrink-0 rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   _443._tcp DANE &amp; SSHFP
                 </span>
               </div>
             ) : (
-              <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
-                <span className="font-medium">Probes:</span>
-                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+              <div className="flex items-center gap-1.5 overflow-x-auto sm:flex-wrap sm:overflow-visible no-scrollbar whitespace-nowrap text-[11px] text-slate-500 dark:text-slate-400">
+                <span className="font-medium shrink-0">Probes:</span>
+                <span className="shrink-0 rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   8 Public DoH Resolvers
                 </span>
-                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                <span className="shrink-0 rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   RFC 8914 EDE Codes
                 </span>
-                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                <span className="shrink-0 rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   Protective Threat / Family Block
                 </span>
-                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                <span className="shrink-0 rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   SOA Serial &amp; Key-Tag Skew
                 </span>
-                <span className="rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
+                <span className="shrink-0 rounded-md bg-slate-200/70 dark:bg-slate-900 px-2 py-0.5 font-mono">
                   RFC 7871 ECS GeoDNS &amp; SCOPE
                 </span>
               </div>
@@ -2023,120 +2071,144 @@ export function App() {
             )}
 
             {/* Navigation Tabs */}
-            <div className="flex items-center gap-1 sm:gap-1.5 overflow-x-auto border-b border-slate-200 dark:border-slate-800 pb-2">
-              {(
-                [
-                  ...(activeSnapshot.mode === 'mail'
-                    ? [
-                        {
-                          id: 'mail' as const,
-                          label: 'Mail, DANE, SPF, DKIM & DMARC',
-                          shortLabel: 'Mail',
-                          icon: Mail,
-                        },
-                      ]
-                    : []),
-                  ...(activeSnapshot.mode === 'web'
-                    ? [
-                        {
-                          id: 'web' as const,
-                          label: 'Web, HTTPS/SVCB, ECH, CAA & DANE',
-                          shortLabel: 'Web',
-                          icon: Globe,
-                        },
-                      ]
-                    : []),
-                  ...(activeSnapshot.mode === 'consensus'
-                    ? [
-                        {
-                          id: 'consensus' as const,
-                          label: 'Multi-Resolver DoH Consensus & EDE',
-                          shortLabel: 'Consensus',
-                          icon: Radio,
-                        },
-                      ]
-                    : []),
-                  {
-                    id: 'graph' as const,
-                    label: 'DNSSEC Chain Graph',
-                    shortLabel: 'Graph',
-                    icon: Network,
-                  },
-                  {
-                    id: 'audit' as const,
-                    label: 'Audit & RFC Checks',
-                    shortLabel: 'Audit',
-                    icon: issueCount > 0 ? AlertTriangle : ShieldCheck,
-                    badge: issueCount,
-                  },
-                  {
-                    id: 'responses' as const,
-                    label: 'DoH Wire Responses',
-                    shortLabel: 'Wire',
-                    icon: Terminal,
-                    badge: activeSnapshot.queries.length,
-                  },
-                  {
-                    id: 'zones' as const,
-                    label: 'Zones & Nameservers',
-                    shortLabel: 'Zones',
-                    icon: Globe,
-                    badge: activeSnapshot.zones.length,
-                  },
-                  {
-                    id: 'history' as const,
-                    label: 'Local History & Diff',
-                    shortLabel: 'History',
-                    icon: Clock,
-                    badge: snapshots.length,
-                  },
-                ]
-              ).map((tab) => {
-                const Icon = tab.icon;
-                const active = activeTab === tab.id;
-                return (
-                  <button
-                    key={tab.id}
-                    type="button"
-                    data-testid={`nav-tab-${tab.id}`}
-                    title={tab.label}
-                    onClick={() => {
-                      if (tab.id === 'responses') {
-                        setFocusedWireQuery(null);
-                        if (activeSnapshot.queries.length > 0) {
-                          setExternalCustomWire(null);
+            <div
+              data-testid="nav-tabs-scroll-wrapper"
+              className="relative border-b border-slate-200 dark:border-slate-800"
+            >
+              {navTabsOverflow.left && (
+                <div
+                  aria-hidden="true"
+                  data-testid="nav-tabs-fade-left"
+                  className="pointer-events-none absolute inset-y-0 left-0 w-7 bg-gradient-to-r from-slate-100 dark:from-slate-950 to-transparent z-10"
+                />
+              )}
+              {navTabsOverflow.right && (
+                <div
+                  aria-hidden="true"
+                  data-testid="nav-tabs-fade-right"
+                  className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-slate-100 dark:from-slate-950 to-transparent z-10"
+                />
+              )}
+              <div
+                ref={navTabsRef}
+                onScroll={updateNavTabsOverflow}
+                className="flex items-center gap-1 sm:gap-1.5 overflow-x-auto no-scrollbar pb-2"
+              >
+                {(
+                  [
+                    ...(activeSnapshot.mode === 'mail'
+                      ? [
+                          {
+                            id: 'mail' as const,
+                            label: 'Mail, DANE, SPF, DKIM & DMARC',
+                            shortLabel: 'Mail',
+                            icon: Mail,
+                          },
+                        ]
+                      : []),
+                    ...(activeSnapshot.mode === 'web'
+                      ? [
+                          {
+                            id: 'web' as const,
+                            label: 'Web, HTTPS/SVCB, ECH, CAA & DANE',
+                            shortLabel: 'Web',
+                            icon: Globe,
+                          },
+                        ]
+                      : []),
+                    ...(activeSnapshot.mode === 'consensus'
+                      ? [
+                          {
+                            id: 'consensus' as const,
+                            label: 'Multi-Resolver DoH Consensus & EDE',
+                            shortLabel: 'Consensus',
+                            icon: Radio,
+                          },
+                        ]
+                      : []),
+                    {
+                      id: 'graph' as const,
+                      label: 'DNSSEC Chain Graph',
+                      shortLabel: 'Graph',
+                      icon: Network,
+                    },
+                    {
+                      id: 'audit' as const,
+                      label: 'Audit & RFC Checks',
+                      shortLabel: 'Audit',
+                      icon: issueCount > 0 ? AlertTriangle : ShieldCheck,
+                      badge: issueCount,
+                    },
+                    {
+                      id: 'responses' as const,
+                      label: 'DoH Wire Responses',
+                      shortLabel: 'Wire',
+                      icon: Terminal,
+                      badge: activeSnapshot.queries.length,
+                    },
+                    {
+                      id: 'zones' as const,
+                      label: 'Zones & Nameservers',
+                      shortLabel: 'Zones',
+                      icon: Globe,
+                      badge: activeSnapshot.zones.length,
+                    },
+                    {
+                      id: 'history' as const,
+                      label: 'Local History & Diff',
+                      shortLabel: 'History',
+                      icon: Clock,
+                      badge: snapshots.length,
+                    },
+                  ]
+                ).map((tab) => {
+                  const Icon = tab.icon;
+                  const active = activeTab === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      data-testid={`nav-tab-${tab.id}`}
+                      data-active-tab={active ? 'true' : undefined}
+                      title={tab.label}
+                      onClick={() => {
+                        if (tab.id === 'responses') {
+                          setFocusedWireQuery(null);
+                          if (activeSnapshot.queries.length > 0) {
+                            setExternalCustomWire(null);
+                          }
+                          setWireListResetSeq((s) => s + 1);
                         }
-                        setWireListResetSeq((s) => s + 1);
-                      }
-                      setActiveTab(tab.id);
-                    }}
-                    className={`inline-flex items-center gap-1.5 sm:gap-2 shrink-0 whitespace-nowrap px-2.5 sm:px-3.5 py-2 rounded-xl text-xs font-medium transition-colors cursor-pointer ${
-                      active
-                        ? 'bg-cyan-500 text-slate-950 font-semibold shadow-sm'
-                        : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-900'
-                    }`}
-                  >
-                    <Icon className="w-3.5 h-3.5 shrink-0" />
-                    <span data-testid={`nav-tab-short-${tab.id}`} className="sm:hidden">
-                      {tab.shortLabel}
-                    </span>
-                    <span data-testid={`nav-tab-full-${tab.id}`} className="hidden sm:inline">
-                      {tab.label}
-                    </span>
-                    {'badge' in tab && tab.badge !== undefined && (
-                      <span
-                        className={`rounded-full px-1.5 py-0.2 font-mono text-[10px] ${
-                          active
-                            ? 'bg-slate-950/20 text-slate-950'
-                            : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
-                        }`}
-                      >
-                        {tab.badge}
+                        setActiveTab(tab.id);
+                      }}
+                      className={`inline-flex items-center gap-1.5 sm:gap-2 shrink-0 whitespace-nowrap px-2.5 sm:px-3.5 py-2 rounded-xl text-xs font-medium transition-colors cursor-pointer ${
+                        active
+                          ? 'bg-cyan-500 text-slate-950 font-semibold shadow-sm'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-900'
+                      }`}
+                    >
+                      <Icon className="w-3.5 h-3.5 shrink-0" />
+                      <span data-testid={`nav-tab-short-${tab.id}`} className="sm:hidden">
+                        {tab.shortLabel}
                       </span>
-                    )}
-                  </button>
-                );
-              })}
+                      <span data-testid={`nav-tab-full-${tab.id}`} className="hidden sm:inline">
+                        {tab.label}
+                      </span>
+                      {'badge' in tab && tab.badge !== undefined && (
+                        <span
+                          className={`rounded-full px-1.5 py-0.2 font-mono text-[10px] ${
+                            active
+                              ? 'bg-slate-950/20 text-slate-950'
+                              : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
+                          }`}
+                        >
+                          {tab.badge}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             {/* Active View Content */}

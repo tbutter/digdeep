@@ -1,5 +1,5 @@
 import { Check, ChevronDown, Plus, Server, Trash2 } from 'lucide-react';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   DOH_SERVER_PRESETS,
   formatDohShortLabel,
@@ -36,8 +36,7 @@ export function DohChooser({
     setInputError(null);
   };
 
-  const handleManualSubmit = (e: FormEvent) => {
-    e.preventDefault();
+  const handleManualSubmit = () => {
     const normalized = normalizeDohEndpoint(manualInput);
     if (!normalized) {
       setInputError('Enter a valid HTTPS DoH URL or hostname/IP (e.g. https://8.8.4.4/dns-query)');
@@ -92,7 +91,10 @@ export function DohChooser({
       </button>
 
       {open && (
-        <div className="absolute right-0 mt-2 w-80 sm:w-96 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl z-50 overflow-hidden text-xs">
+        <div
+          data-testid="doh-chooser-popover"
+          className="absolute left-0 sm:left-auto sm:right-0 mt-2 w-[calc(100vw-2rem)] max-w-sm sm:w-96 sm:max-w-none rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl z-50 overflow-hidden text-xs"
+        >
           <div className="px-3.5 py-2.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60">
             <div className="font-semibold text-slate-900 dark:text-slate-100">
               DNS-over-HTTPS (DoH) Resolver
@@ -174,8 +176,9 @@ export function DohChooser({
             })}
           </div>
 
-          <form
-            onSubmit={handleManualSubmit}
+          <div
+            role="group"
+            aria-label="Custom DoH server"
             className="p-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 space-y-1.5"
           >
             <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500">
@@ -194,11 +197,19 @@ export function DohChooser({
                   setManualInput(e.target.value);
                   if (inputError) setInputError(null);
                 }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    handleManualSubmit();
+                  }
+                }}
                 placeholder="https://8.8.4.4/dns-query"
                 className="flex-1 min-w-0 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 font-mono text-base sm:text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:border-cyan-500"
               />
               <button
-                type="submit"
+                type="button"
+                onClick={handleManualSubmit}
                 className="inline-flex items-center gap-1 rounded-lg bg-cyan-500 hover:bg-cyan-400 px-3 py-1.5 font-semibold text-slate-950 cursor-pointer shrink-0"
               >
                 <Plus className="w-3.5 h-3.5" />
@@ -206,7 +217,7 @@ export function DohChooser({
               </button>
             </div>
             {inputError && <div className="text-[11px] text-rose-500">{inputError}</div>}
-          </form>
+          </div>
         </div>
       )}
     </div>

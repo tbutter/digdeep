@@ -2451,6 +2451,34 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
         }
       }
 
+      // Verify #48 compact mobile action row, unclipped DohChooser popover, single-row RR Types, and tab scroll-fade hints
+      const actionRow = container.querySelector('[data-testid="omnibox-action-row"]');
+      expect(actionRow).not.toBeNull();
+      const dohTrigger = actionRow!.querySelector('button[title^="Active DoH server:"]') as HTMLButtonElement | null;
+      expect(dohTrigger).not.toBeNull();
+      await act(async () => {
+        dohTrigger!.click();
+      });
+      const dohPopover = container.querySelector('[data-testid="doh-chooser-popover"]');
+      expect(dohPopover).not.toBeNull();
+      expect(dohPopover!.className).toContain('left-0 sm:left-auto sm:right-0');
+      await act(async () => {
+        dohTrigger!.click();
+      });
+
+      const navScrollWrapper = container.querySelector('[data-testid="nav-tabs-scroll-wrapper"]');
+      expect(navScrollWrapper).not.toBeNull();
+      const navScrollInner = navScrollWrapper!.querySelector('.overflow-x-auto') as HTMLDivElement | null;
+      expect(navScrollInner).not.toBeNull();
+      Object.defineProperty(navScrollInner!, 'scrollWidth', { value: 780, configurable: true });
+      Object.defineProperty(navScrollInner!, 'clientWidth', { value: 340, configurable: true });
+      Object.defineProperty(navScrollInner!, 'scrollLeft', { value: 60, configurable: true });
+      await act(async () => {
+        navScrollInner!.dispatchEvent(new dom.window.Event('scroll', { bubbles: true }));
+      });
+      expect(container.querySelector('[data-testid="nav-tabs-fade-left"]')).not.toBeNull();
+      expect(container.querySelector('[data-testid="nav-tabs-fade-right"]')).not.toBeNull();
+
       await act(async () => {
         root.unmount();
       });
