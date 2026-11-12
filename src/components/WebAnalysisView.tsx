@@ -4,6 +4,8 @@ import {
   ArrowRight,
   ArrowUpRight,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   FileCheck2,
   Globe,
   KeyRound,
@@ -460,6 +462,8 @@ function SvcbRecordCard({
   );
 }
 
+type WebSectionId = 'https' | 'caa' | 'ct' | 'dane' | 'sshfp';
+
 export function WebAnalysisView({
   snapshot,
   onJumpToGraphTarget,
@@ -479,6 +483,9 @@ export function WebAnalysisView({
   const [scanningSubdomains, setScanningSubdomains] = useState(false);
   const [extraSubdomains, setExtraSubdomains] = useState<string[]>([]);
   const [subScanError, setSubScanError] = useState<string | null>(null);
+  const [collapsedSections, setCollapsedSections] = useState<
+    Partial<Record<WebSectionId, boolean>>
+  >({});
 
   if (!web) return null;
 
@@ -488,6 +495,46 @@ export function WebAnalysisView({
   const sshfpMeta = getSshfpBadgeMeta(web.sshfp.status);
   const ct = web.ctAnalysis;
   const ctMeta = ct ? getCtBadgeMeta(ct.status) : null;
+
+  const presentSections: Array<{ id: WebSectionId; label: string }> = [
+    { id: 'https', label: 'HTTPS / SVCB' },
+    { id: 'caa', label: 'CAA Policy' },
+    ...(ct ? [{ id: 'ct' as const, label: `CT Logs (${ct.activeCertCount})` }] : []),
+    { id: 'dane', label: 'Web DANE' },
+    { id: 'sshfp', label: 'SSHFP' },
+  ];
+  const anySectionCollapsed = presentSections.some((s) => Boolean(collapsedSections[s.id]));
+
+  const toggleSection = (id: WebSectionId) => {
+    setCollapsedSections((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const setAllSectionsCollapsed = (collapsed: boolean) => {
+    const next: Partial<Record<WebSectionId, boolean>> = {};
+    for (const s of presentSections) {
+      next[s.id] = collapsed;
+    }
+    setCollapsedSections(next);
+  };
+
+  const jumpToSection = (id: WebSectionId) => {
+    const domId = `web-section-${id}`;
+    const wasCollapsed = Boolean(collapsedSections[id]);
+    if (wasCollapsed) {
+      setCollapsedSections((prev) => ({ ...prev, [id]: false }));
+      setTimeout(() => {
+        const el = typeof document !== 'undefined' ? document.getElementById(domId) : null;
+        if (el && typeof el.scrollIntoView === 'function') {
+          el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }, 0);
+    } else if (typeof document !== 'undefined') {
+      const el = document.getElementById(domId);
+      if (el && typeof el.scrollIntoView === 'function') {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+  };
 
   const mergedSubdomains = Array.from(
     new Set([...(ct?.discoveredSubdomains ?? []), ...extraSubdomains])
@@ -531,12 +578,17 @@ export function WebAnalysisView({
 
   return (
     <div className="space-y-4">
-      {/* Top 4-Pillar Overview Cards */}
+      {/* Top 4-Pillar Overview Cards (Tap to Jump to Section) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
         {/* Card 1: HTTPS / SVCB & ECH */}
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-3.5 space-y-2">
+        <button
+          type="button"
+          data-testid="web-scorecard-jump-https"
+          onClick={() => jumpToSection('https')}
+          className="text-left w-full rounded-xl border border-slate-200 dark:border-slate-800 hover:border-cyan-500/60 bg-white dark:bg-slate-900/90 p-3.5 space-y-2 transition-colors cursor-pointer group"
+        >
           <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400">
+            <div className="flex items-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">
               <Globe className="w-4 h-4 text-cyan-500" />
               <span>HTTPS / SVCB &amp; ECH</span>
             </div>
@@ -547,25 +599,35 @@ export function WebAnalysisView({
           <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
             {web.httpsSummary}
           </p>
-          <div className="flex flex-wrap items-center gap-1.5 pt-1 text-[11px] font-mono">
-            <StatusBadge status={web.httpsDnssecStatus} size="sm" />
-            {web.supportsHttp3 && (
-              <span className="rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 px-1.5 py-0.5 font-semibold">
-                HTTP/3 (h3)
-              </span>
-            )}
-            {web.echEnabled && (
-              <span className="rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 px-1.5 py-0.5 font-semibold">
-                ECH
-              </span>
-            )}
+          <div className="flex flex-wrap items-center justify-between gap-1.5 pt-1 text-[11px] font-mono">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <StatusBadge status={web.httpsDnssecStatus} size="sm" />
+              {web.supportsHttp3 && (
+                <span className="rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 px-1.5 py-0.5 font-semibold">
+                  HTTP/3 (h3)
+                </span>
+              )}
+              {web.echEnabled && (
+                <span className="rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 px-1.5 py-0.5 font-semibold">
+                  ECH
+                </span>
+              )}
+            </div>
+            <span className="font-sans text-[10px] font-medium text-cyan-600 dark:text-cyan-400 opacity-80 group-hover:opacity-100">
+              Jump ↓
+            </span>
           </div>
-        </div>
+        </button>
 
         {/* Card 2: Tree-Walking CAA */}
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-3.5 space-y-2">
+        <button
+          type="button"
+          data-testid="web-scorecard-jump-caa"
+          onClick={() => jumpToSection('caa')}
+          className="text-left w-full rounded-xl border border-slate-200 dark:border-slate-800 hover:border-cyan-500/60 bg-white dark:bg-slate-900/90 p-3.5 space-y-2 transition-colors cursor-pointer group"
+        >
           <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400">
+            <div className="flex items-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">
               <Shield className="w-4 h-4 text-cyan-500" />
               <span>CAA Policy (RFC 8659)</span>
             </div>
@@ -576,25 +638,35 @@ export function WebAnalysisView({
           <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
             {web.caa.summary}
           </p>
-          <div className="flex flex-wrap items-center gap-1.5 pt-1 text-[11px] font-mono">
-            <StatusBadge status={web.caa.dnssecStatus} size="sm" />
-            {web.caa.hasAcmeAccountBinding && (
-              <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 px-1.5 py-0.5 font-semibold">
-                RFC 8657 ACME
-              </span>
-            )}
-            {ct && ctMeta && ct.status !== 'unavailable' && (
-              <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${ctMeta.cls}`}>
-                {ctMeta.label}
-              </span>
-            )}
+          <div className="flex flex-wrap items-center justify-between gap-1.5 pt-1 text-[11px] font-mono">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <StatusBadge status={web.caa.dnssecStatus} size="sm" />
+              {web.caa.hasAcmeAccountBinding && (
+                <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 px-1.5 py-0.5 font-semibold">
+                  RFC 8657 ACME
+                </span>
+              )}
+              {ct && ctMeta && ct.status !== 'unavailable' && (
+                <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${ctMeta.cls}`}>
+                  {ctMeta.label}
+                </span>
+              )}
+            </div>
+            <span className="font-sans text-[10px] font-medium text-cyan-600 dark:text-cyan-400 opacity-80 group-hover:opacity-100">
+              Jump ↓
+            </span>
           </div>
-        </div>
+        </button>
 
         {/* Card 3: _443._tcp Web DANE */}
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-3.5 space-y-2">
+        <button
+          type="button"
+          data-testid="web-scorecard-jump-dane"
+          onClick={() => jumpToSection('dane')}
+          className="text-left w-full rounded-xl border border-slate-200 dark:border-slate-800 hover:border-cyan-500/60 bg-white dark:bg-slate-900/90 p-3.5 space-y-2 transition-colors cursor-pointer group"
+        >
           <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400">
+            <div className="flex items-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">
               <Lock className="w-4 h-4 text-cyan-500" />
               <span>Web DANE (_443._tcp)</span>
             </div>
@@ -605,20 +677,30 @@ export function WebAnalysisView({
           <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
             {web.webDane.summary}
           </p>
-          <div className="flex flex-wrap items-center gap-1.5 pt-1 text-[11px] font-mono">
-            <StatusBadge status={web.webDane.dnssecStatus} size="sm" />
-            {web.webDane.rolloverReady && (
-              <span className="rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 px-1.5 py-0.5 font-semibold">
-                Rollover Ready ({web.webDane.records.length} TLSAs)
-              </span>
-            )}
+          <div className="flex flex-wrap items-center justify-between gap-1.5 pt-1 text-[11px] font-mono">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <StatusBadge status={web.webDane.dnssecStatus} size="sm" />
+              {web.webDane.rolloverReady && (
+                <span className="rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 px-1.5 py-0.5 font-semibold">
+                  Rollover Ready ({web.webDane.records.length} TLSAs)
+                </span>
+              )}
+            </div>
+            <span className="font-sans text-[10px] font-medium text-cyan-600 dark:text-cyan-400 opacity-80 group-hover:opacity-100">
+              Jump ↓
+            </span>
           </div>
-        </div>
+        </button>
 
         {/* Card 4: SSHFP Host Keys */}
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-3.5 space-y-2">
+        <button
+          type="button"
+          data-testid="web-scorecard-jump-sshfp"
+          onClick={() => jumpToSection('sshfp')}
+          className="text-left w-full rounded-xl border border-slate-200 dark:border-slate-800 hover:border-cyan-500/60 bg-white dark:bg-slate-900/90 p-3.5 space-y-2 transition-colors cursor-pointer group"
+        >
           <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400">
+            <div className="flex items-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">
               <Terminal className="w-4 h-4 text-cyan-500" />
               <span>SSHFP (RFC 4255)</span>
             </div>
@@ -629,26 +711,87 @@ export function WebAnalysisView({
           <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
             {web.sshfp.summary}
           </p>
-          <div className="flex flex-wrap items-center gap-1.5 pt-1 text-[11px] font-mono">
-            <StatusBadge status={web.sshfp.dnssecStatus} size="sm" />
-            {web.sshfp.records.length > 0 && (
-              <span className="text-slate-500">
-                {web.sshfp.records.length} fingerprint{web.sshfp.records.length === 1 ? '' : 's'}
-              </span>
-            )}
+          <div className="flex flex-wrap items-center justify-between gap-1.5 pt-1 text-[11px] font-mono">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <StatusBadge status={web.sshfp.dnssecStatus} size="sm" />
+              {web.sshfp.records.length > 0 && (
+                <span className="text-slate-500">
+                  {web.sshfp.records.length} fingerprint{web.sshfp.records.length === 1 ? '' : 's'}
+                </span>
+              )}
+            </div>
+            <span className="font-sans text-[10px] font-medium text-cyan-600 dark:text-cyan-400 opacity-80 group-hover:opacity-100">
+              Jump ↓
+            </span>
           </div>
+        </button>
+      </div>
+
+      {/* Sticky Compact Section Jump & Accordion Control Strip */}
+      <div
+        data-testid="web-section-jump-bar"
+        className="sticky top-2 md:static z-20 rounded-xl border border-slate-200/90 dark:border-slate-800/90 bg-white/95 dark:bg-slate-900/95 backdrop-blur-sm px-3 py-2 shadow-sm flex items-center justify-between gap-2"
+      >
+        <div className="flex items-center gap-1.5 overflow-x-auto min-w-0">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 shrink-0 mr-0.5 hidden sm:inline">
+            Jump:
+          </span>
+          {presentSections.map((sec) => (
+            <button
+              key={sec.id}
+              type="button"
+              data-testid={`web-jump-chip-${sec.id}`}
+              onClick={() => jumpToSection(sec.id)}
+              className="inline-flex items-center gap-1 shrink-0 whitespace-nowrap rounded-lg border border-slate-200 dark:border-slate-800 hover:border-cyan-500 bg-slate-50 dark:bg-slate-950 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 transition-colors cursor-pointer"
+            >
+              <span>{sec.label}</span>
+            </button>
+          ))}
         </div>
+
+        <button
+          type="button"
+          data-testid="web-toggle-all-sections"
+          onClick={() => setAllSectionsCollapsed(!anySectionCollapsed)}
+          className="inline-flex items-center gap-1 shrink-0 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-slate-600 dark:text-slate-300 cursor-pointer"
+        >
+          {anySectionCollapsed ? (
+            <>
+              <ChevronDown className="w-3.5 h-3.5 text-cyan-500" />
+              <span>Expand All</span>
+            </>
+          ) : (
+            <>
+              <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+              <span>Collapse All</span>
+            </>
+          )}
+        </button>
       </div>
 
       {/* Section 1: HTTPS (TYPE65) & SVCB (TYPE64) Service Binding Details */}
-      <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4 space-y-3">
+      <section
+        id="web-section-https"
+        className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4 space-y-3 scroll-mt-16 md:scroll-mt-44"
+      >
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <Server className="w-4 h-4 text-cyan-500" />
-            <h2 className="font-semibold text-sm">
+          <button
+            type="button"
+            data-testid="web-section-toggle-https"
+            aria-expanded={!collapsedSections.https}
+            onClick={() => toggleSection('https')}
+            className="flex items-center gap-2 text-left min-w-0 cursor-pointer group"
+          >
+            {collapsedSections.https ? (
+              <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+            ) : (
+              <ChevronDown className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+            )}
+            <Server className="w-4 h-4 text-cyan-500 shrink-0" />
+            <h2 className="font-semibold text-sm group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">
               HTTPS (TYPE65) &amp; SVCB (TYPE64) Service Bindings · A/AAAA Resolution
             </h2>
-          </div>
+          </button>
           <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
             {web.ipv4Addresses.length > 0 && (
               <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5">
@@ -683,50 +826,67 @@ export function WebAnalysisView({
           </div>
         </div>
 
-        {web.httpsRecords.length === 0 && web.svcbRecords.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-slate-300 dark:border-slate-800 p-4 text-xs text-slate-500 dark:text-slate-400">
-            No <code className="font-mono">HTTPS</code> (<code className="font-mono">TYPE65</code>)
-            or <code className="font-mono">SVCB</code> (<code className="font-mono">TYPE64</code>)
-            records published at <code className="font-mono">{web.displayDomain}</code>.
-          </div>
-        ) : (
-          <div className="space-y-2.5">
-            {[...web.httpsRecords, ...web.svcbRecords].map((rec, idx) => (
-              <SvcbRecordCard
-                key={`${rec.ownerName}-${rec.rrtypeName}-${rec.priority}-${idx}`}
-                rec={rec}
-                onJumpToGraphTarget={onJumpToGraphTarget}
-                onInspectWireQuery={onInspectWireQuery}
-                rrsetId={web.httpsRrsetId}
-                wireQueryId={
-                  onInspectWireQuery
-                    ? findWireQueryByOwnerAndType(
-                        snapshot.queries,
-                        rec.ownerName,
-                        rec.rrtypeName
-                      )?.id
-                    : undefined
-                }
-              />
-            ))}
-          </div>
-        )}
+        {!collapsedSections.https &&
+          (web.httpsRecords.length === 0 && web.svcbRecords.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-slate-300 dark:border-slate-800 p-4 text-xs text-slate-500 dark:text-slate-400">
+              No <code className="font-mono">HTTPS</code> (<code className="font-mono">TYPE65</code>)
+              or <code className="font-mono">SVCB</code> (<code className="font-mono">TYPE64</code>)
+              records published at <code className="font-mono">{web.displayDomain}</code>.
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {[...web.httpsRecords, ...web.svcbRecords].map((rec, idx) => (
+                <SvcbRecordCard
+                  key={`${rec.ownerName}-${rec.rrtypeName}-${rec.priority}-${idx}`}
+                  rec={rec}
+                  onJumpToGraphTarget={onJumpToGraphTarget}
+                  onInspectWireQuery={onInspectWireQuery}
+                  rrsetId={web.httpsRrsetId}
+                  wireQueryId={
+                    onInspectWireQuery
+                      ? findWireQueryByOwnerAndType(
+                          snapshot.queries,
+                          rec.ownerName,
+                          rec.rrtypeName
+                        )?.id
+                      : undefined
+                  }
+                />
+              ))}
+            </div>
+          ))}
       </section>
 
       {/* Section 2: RFC 8659 Tree-Walking CAA Hierarchy & RFC 8657 ACME Bindings */}
-      <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4 space-y-3">
+      <section
+        id="web-section-caa"
+        className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4 space-y-3 scroll-mt-16 md:scroll-mt-44"
+      >
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="w-4 h-4 text-cyan-500" />
-            <h2 className="font-semibold text-sm">
+          <button
+            type="button"
+            data-testid="web-section-toggle-caa"
+            aria-expanded={!collapsedSections.caa}
+            onClick={() => toggleSection('caa')}
+            className="flex items-center gap-2 text-left min-w-0 cursor-pointer group"
+          >
+            {collapsedSections.caa ? (
+              <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+            ) : (
+              <ChevronDown className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+            )}
+            <ShieldCheck className="w-4 h-4 text-cyan-500 shrink-0" />
+            <h2 className="font-semibold text-sm group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">
               Tree-Walking Certificate Authority Authorization (CAA · RFC 8659 &amp; RFC 8657)
             </h2>
-          </div>
+          </button>
           <span className={`rounded-md px-2 py-0.5 font-mono text-[10px] font-bold ${caaMeta.cls}`}>
             {caaMeta.label}
           </span>
         </div>
 
+        {!collapsedSections.caa && (
+          <>
         {/* Visual Tree-Walk Path */}
         <div className="flex flex-wrap items-center gap-1.5 text-xs">
           <span className="text-slate-500 font-medium mr-1">RFC 8659 §3 Climb Order:</span>
@@ -849,18 +1009,34 @@ export function WebAnalysisView({
             <code className="font-mono">{web.displayDomain}</code> or any parent zone.
           </div>
         )}
+          </>
+        )}
       </section>
 
       {/* Section 2.5: Certificate Transparency (CT) ↔ CAA Cross-Check & Subdomain Discovery */}
       {ct && (
-        <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4 space-y-3">
+        <section
+          id="web-section-ct"
+          className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4 space-y-3 scroll-mt-16 md:scroll-mt-44"
+        >
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <FileCheck2 className="w-4 h-4 text-cyan-500" />
-              <h2 className="font-semibold text-sm">
+            <button
+              type="button"
+              data-testid="web-section-toggle-ct"
+              aria-expanded={!collapsedSections.ct}
+              onClick={() => toggleSection('ct')}
+              className="flex items-center gap-2 text-left min-w-0 cursor-pointer group"
+            >
+              {collapsedSections.ct ? (
+                <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+              )}
+              <FileCheck2 className="w-4 h-4 text-cyan-500 shrink-0" />
+              <h2 className="font-semibold text-sm group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">
                 Certificate Transparency (CT) ↔ CAA Policy Cross-Check &amp; Subdomain Discovery
               </h2>
-            </div>
+            </button>
             <div className="flex flex-wrap items-center gap-2">
               {ct.source !== 'unavailable' && (
                 <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5 font-mono text-[10px] text-slate-600 dark:text-slate-300">
@@ -875,6 +1051,8 @@ export function WebAnalysisView({
             </div>
           </div>
 
+          {!collapsedSections.ct && (
+            <>
           <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">{ct.summary}</p>
 
           {/* Metrics & Subdomain Scan Action Bar */}
@@ -1158,95 +1336,135 @@ export function WebAnalysisView({
               </div>
             </div>
           )}
+            </>
+          )}
         </section>
       )}
 
       {/* Section 3: Web DANE (_443._tcp TLSA) & SSHFP */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
         {/* _443._tcp DANE TLSA */}
-        <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4 space-y-3">
+        <section
+          id="web-section-dane"
+          className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4 space-y-3 scroll-mt-16 md:scroll-mt-44"
+        >
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <KeyRound className="w-4 h-4 text-cyan-500" />
-              <h2 className="font-semibold text-sm">
+            <button
+              type="button"
+              data-testid="web-section-toggle-dane"
+              aria-expanded={!collapsedSections.dane}
+              onClick={() => toggleSection('dane')}
+              className="flex items-center gap-2 text-left min-w-0 cursor-pointer group"
+            >
+              {collapsedSections.dane ? (
+                <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+              )}
+              <KeyRound className="w-4 h-4 text-cyan-500 shrink-0" />
+              <h2 className="font-semibold text-sm group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">
                 Web DANE (<code className="font-mono text-xs">{displayFqdn(web.webDane.qname)}</code>{' '}
                 TLSA)
               </h2>
-            </div>
+            </button>
             <span className={`rounded-md px-2 py-0.5 font-mono text-[10px] font-bold ${daneMeta.cls}`}>
               {daneMeta.label}
             </span>
           </div>
 
-          <p className="text-xs text-slate-600 dark:text-slate-400">{web.webDane.summary}</p>
+          {!collapsedSections.dane && (
+            <>
+              <p className="text-xs text-slate-600 dark:text-slate-400">{web.webDane.summary}</p>
 
-          {web.webDane.records.length > 0 && (
-            <div className="space-y-2">
-              {web.webDane.records.map((rec, idx) => (
-                <div
-                  key={idx}
-                  className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 p-2.5 text-xs font-mono space-y-1"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-bold text-cyan-700 dark:text-cyan-300">
-                      {rec.usage} ({rec.usageMnemonic}) · {rec.selector} ({rec.selectorMnemonic}) ·{' '}
-                      {rec.matchingType} ({rec.matchingTypeMnemonic})
-                    </span>
-                    <span className="text-[11px] text-slate-400">TTL {rec.ttl}s</span>
-                  </div>
-                  <div className="text-[11px] text-slate-600 dark:text-slate-300 break-all">
-                    {rec.certAssociationHex}
-                  </div>
+              {web.webDane.records.length > 0 && (
+                <div className="space-y-2">
+                  {web.webDane.records.map((rec, idx) => (
+                    <div
+                      key={idx}
+                      className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 p-2.5 text-xs font-mono space-y-1"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-bold text-cyan-700 dark:text-cyan-300">
+                          {rec.usage} ({rec.usageMnemonic}) · {rec.selector} ({rec.selectorMnemonic}) ·{' '}
+                          {rec.matchingType} ({rec.matchingTypeMnemonic})
+                        </span>
+                        <span className="text-[11px] text-slate-400">TTL {rec.ttl}s</span>
+                      </div>
+                      <div className="text-[11px] text-slate-600 dark:text-slate-300 break-all">
+                        {rec.certAssociationHex}
+                      </div>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
+              )}
+            </>
           )}
         </section>
 
         {/* SSHFP Host Key Fingerprints */}
-        <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4 space-y-3">
+        <section
+          id="web-section-sshfp"
+          className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4 space-y-3 scroll-mt-16 md:scroll-mt-44"
+        >
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              {web.sshfp.status === 'secure' ? (
-                <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-              ) : web.sshfp.status === 'not-deployed' ? (
-                <Terminal className="w-4 h-4 text-slate-400" />
+            <button
+              type="button"
+              data-testid="web-section-toggle-sshfp"
+              aria-expanded={!collapsedSections.sshfp}
+              onClick={() => toggleSection('sshfp')}
+              className="flex items-center gap-2 text-left min-w-0 cursor-pointer group"
+            >
+              {collapsedSections.sshfp ? (
+                <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
               ) : (
-                <ShieldAlert className="w-4 h-4 text-amber-500" />
+                <ChevronDown className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
               )}
-              <h2 className="font-semibold text-sm">SSHFP Host Key Fingerprints (TYPE44)</h2>
-            </div>
+              {web.sshfp.status === 'secure' ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+              ) : web.sshfp.status === 'not-deployed' ? (
+                <Terminal className="w-4 h-4 text-slate-400 shrink-0" />
+              ) : (
+                <ShieldAlert className="w-4 h-4 text-amber-500 shrink-0" />
+              )}
+              <h2 className="font-semibold text-sm group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">
+                SSHFP Host Key Fingerprints (TYPE44)
+              </h2>
+            </button>
             <span className={`rounded-md px-2 py-0.5 font-mono text-[10px] font-bold ${sshfpMeta.cls}`}>
               {sshfpMeta.label}
             </span>
           </div>
 
-          <p className="text-xs text-slate-600 dark:text-slate-400">{web.sshfp.summary}</p>
+          {!collapsedSections.sshfp && (
+            <>
+              <p className="text-xs text-slate-600 dark:text-slate-400">{web.sshfp.summary}</p>
 
-          {web.sshfp.records.length > 0 && (
-            <div className="space-y-2">
-              {web.sshfp.records.map((rec, idx) => (
-                <div
-                  key={idx}
-                  className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 p-2.5 text-xs font-mono space-y-1"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-bold text-cyan-700 dark:text-cyan-300">
-                      Algo {rec.algorithm} ({rec.algorithmName}) · Hash {rec.fpType} (
-                      {rec.fpTypeName})
-                    </span>
-                    {rec.deprecated && (
-                      <span className="rounded bg-amber-500/15 text-amber-700 dark:text-amber-300 px-1.5 py-0.5 text-[10px]">
-                        Deprecated
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-[11px] text-slate-600 dark:text-slate-300 break-all">
-                    {rec.fingerprintHex}
-                  </div>
+              {web.sshfp.records.length > 0 && (
+                <div className="space-y-2">
+                  {web.sshfp.records.map((rec, idx) => (
+                    <div
+                      key={idx}
+                      className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 p-2.5 text-xs font-mono space-y-1"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-bold text-cyan-700 dark:text-cyan-300">
+                          Algo {rec.algorithm} ({rec.algorithmName}) · Hash {rec.fpType} (
+                          {rec.fpTypeName})
+                        </span>
+                        {rec.deprecated && (
+                          <span className="rounded bg-amber-500/15 text-amber-700 dark:text-amber-300 px-1.5 py-0.5 text-[10px]">
+                            Deprecated
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-slate-600 dark:text-slate-300 break-all">
+                        {rec.fingerprintHex}
+                      </div>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
+              )}
+            </>
           )}
         </section>
       </div>

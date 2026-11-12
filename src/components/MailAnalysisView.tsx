@@ -1019,6 +1019,8 @@ function DkimSelectorCard({
   );
 }
 
+type MailSectionId = 'mx-dane' | 'spf' | 'dmarc' | 'dkim' | 'mta-sts' | 'srv';
+
 export function MailAnalysisView({
   snapshot,
   onJumpToGraphTarget,
@@ -1041,6 +1043,9 @@ export function MailAnalysisView({
   );
   const [spfTestIp, setSpfTestIp] = useState('');
   const [spfTestSender, setSpfTestSender] = useState('');
+  const [collapsedSections, setCollapsedSections] = useState<Partial<Record<MailSectionId, boolean>>>(
+    {}
+  );
 
   if (!mail) {
     return (
@@ -1072,6 +1077,55 @@ export function MailAnalysisView({
         ? 'bg-amber-500'
         : 'bg-emerald-500';
 
+  const hasMtaStsSection = Boolean(mail.mtaSts && mail.tlsRpt && mail.bimi);
+  const hasSrvSection = Boolean(mail.srvDiscovery);
+  const presentSections: Array<{ id: MailSectionId; label: string }> = [
+    { id: 'mx-dane', label: 'MX & DANE' },
+    { id: 'spf', label: 'SPF' },
+    { id: 'dmarc', label: 'DMARC' },
+    { id: 'dkim', label: 'DKIM' },
+    ...(hasMtaStsSection ? [{ id: 'mta-sts' as const, label: 'MTA-STS / BIMI' }] : []),
+    ...(hasSrvSection ? [{ id: 'srv' as const, label: 'SRV' }] : []),
+  ];
+  const anySectionCollapsed = presentSections.some((s) => Boolean(collapsedSections[s.id]));
+  const daneCardTargetSection: MailSectionId =
+    (mail.daneStatus === 'not-deployed' || mail.daneStatus === 'not-applicable') &&
+    hasMtaStsSection &&
+    (mail.mtaSts.present || mail.tlsRpt.present)
+      ? 'mta-sts'
+      : 'mx-dane';
+
+  const toggleSection = (id: MailSectionId) => {
+    setCollapsedSections((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const setAllSectionsCollapsed = (collapsed: boolean) => {
+    const next: Partial<Record<MailSectionId, boolean>> = {};
+    for (const s of presentSections) {
+      next[s.id] = collapsed;
+    }
+    setCollapsedSections(next);
+  };
+
+  const jumpToSection = (id: MailSectionId) => {
+    const domId = `mail-section-${id}`;
+    const wasCollapsed = Boolean(collapsedSections[id]);
+    if (wasCollapsed) {
+      setCollapsedSections((prev) => ({ ...prev, [id]: false }));
+      setTimeout(() => {
+        const el = typeof document !== 'undefined' ? document.getElementById(domId) : null;
+        if (el && typeof el.scrollIntoView === 'function') {
+          el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }, 0);
+    } else if (typeof document !== 'undefined') {
+      const el = document.getElementById(domId);
+      if (el && typeof el.scrollIntoView === 'function') {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+  };
+
   const handleDkimSubmit = (e: FormEvent) => {
     e.preventDefault();
     if (onProbeDkimSelectors) {
@@ -1098,10 +1152,15 @@ export function MailAnalysisView({
 
   return (
     <div className="space-y-5">
-      {/* Top 6-Pillar Mail Security Scorecard */}
+      {/* Top 6-Pillar Mail Security Scorecard (Cards 1-5 Tap to Jump to Section) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
         {/* 1. MX Routing Card */}
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-2">
+        <button
+          type="button"
+          data-testid="mail-scorecard-jump-mx-dane"
+          onClick={() => jumpToSection('mx-dane')}
+          className="text-left w-full rounded-xl border border-slate-200 dark:border-slate-800 hover:border-cyan-500/60 bg-white dark:bg-slate-900/70 p-4 space-y-2 transition-colors cursor-pointer group"
+        >
           <div className="flex items-center justify-between gap-2">
             <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-cyan-600 dark:text-cyan-400">
               <Server className="w-3.5 h-3.5" />
@@ -1129,24 +1188,36 @@ export function MailAnalysisView({
                   ? 'No MX RRset; MTAs fall back to apex A/AAAA per RFC 5321 §5.1.'
                   : 'Domain cannot receive inbound SMTP mail.'}
           </p>
-          {mail.fcrdnsSummary.checkedIpCount > 0 && mail.fcrdnsSummary.status !== 'unchecked' && (
-            <div className="pt-1 border-t border-slate-100 dark:border-slate-800/80 flex items-center justify-between text-[11px]">
-              <span className="text-slate-500 dark:text-slate-400 font-medium">MX FCrDNS (PTR):</span>
-              <span
-                className={`font-mono font-semibold ${
-                  mail.fcrdnsSummary.status === 'all-valid'
-                    ? 'text-emerald-600 dark:text-emerald-400'
-                    : 'text-amber-600 dark:text-amber-400'
-                }`}
-              >
-                {mail.fcrdnsSummary.validCount}/{mail.fcrdnsSummary.checkedIpCount} Verified
-              </span>
-            </div>
-          )}
-        </div>
+          <div className="pt-1 border-t border-slate-100 dark:border-slate-800/80 flex items-center justify-between gap-2 text-[11px]">
+            {mail.fcrdnsSummary.checkedIpCount > 0 && mail.fcrdnsSummary.status !== 'unchecked' ? (
+              <div className="flex items-center gap-1.5">
+                <span className="text-slate-500 dark:text-slate-400 font-medium">MX FCrDNS (PTR):</span>
+                <span
+                  className={`font-mono font-semibold ${
+                    mail.fcrdnsSummary.status === 'all-valid'
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : 'text-amber-600 dark:text-amber-400'
+                  }`}
+                >
+                  {mail.fcrdnsSummary.validCount}/{mail.fcrdnsSummary.checkedIpCount} Verified
+                </span>
+              </div>
+            ) : (
+              <span />
+            )}
+            <span className="font-sans text-[10px] font-medium text-cyan-600 dark:text-cyan-400 opacity-80 group-hover:opacity-100">
+              Jump ↓
+            </span>
+          </div>
+        </button>
 
         {/* 2. SMTP DANE & MTA-STS Card */}
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-2">
+        <button
+          type="button"
+          data-testid="mail-scorecard-jump-dane"
+          onClick={() => jumpToSection(daneCardTargetSection)}
+          className="text-left w-full rounded-xl border border-slate-200 dark:border-slate-800 hover:border-cyan-500/60 bg-white dark:bg-slate-900/70 p-4 space-y-2 transition-colors cursor-pointer group"
+        >
           <div className="flex items-center justify-between gap-2">
             <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-cyan-600 dark:text-cyan-400">
               <Lock className="w-3.5 h-3.5" />
@@ -1182,8 +1253,8 @@ export function MailAnalysisView({
           <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
             {mail.daneSummary}
           </p>
-          {(mail.mtaSts.present || mail.tlsRpt.present) && (
-            <div className="pt-1 border-t border-slate-100 dark:border-slate-800/80 flex flex-wrap items-center gap-2 text-[11px]">
+          <div className="pt-1 border-t border-slate-100 dark:border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+            <div className="flex flex-wrap items-center gap-2">
               {mail.mtaSts.present && (
                 <span className="rounded bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 px-1.5 py-0.5 font-mono font-semibold">
                   MTA-STS: {mail.mtaSts.policy?.mode ?? 'STSv1'}
@@ -1195,11 +1266,19 @@ export function MailAnalysisView({
                 </span>
               )}
             </div>
-          )}
-        </div>
+            <span className="font-sans text-[10px] font-medium text-cyan-600 dark:text-cyan-400 opacity-80 group-hover:opacity-100">
+              Jump ↓
+            </span>
+          </div>
+        </button>
 
         {/* 3. SPF Policy & Lookup Budget Card */}
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-2">
+        <button
+          type="button"
+          data-testid="mail-scorecard-jump-spf"
+          onClick={() => jumpToSection('spf')}
+          className="text-left w-full rounded-xl border border-slate-200 dark:border-slate-800 hover:border-cyan-500/60 bg-white dark:bg-slate-900/70 p-4 space-y-2 transition-colors cursor-pointer group"
+        >
           <div className="flex items-center justify-between gap-2">
             <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-cyan-600 dark:text-cyan-400">
               <FileText className="w-3.5 h-3.5" />
@@ -1230,10 +1309,20 @@ export function MailAnalysisView({
           <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
             {mail.spf.summary}
           </p>
-        </div>
+          <div className="flex justify-end">
+            <span className="font-sans text-[10px] font-medium text-cyan-600 dark:text-cyan-400 opacity-80 group-hover:opacity-100">
+              Jump ↓
+            </span>
+          </div>
+        </button>
 
         {/* 4. DKIM Keys Card */}
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-2">
+        <button
+          type="button"
+          data-testid="mail-scorecard-jump-dkim"
+          onClick={() => jumpToSection('dkim')}
+          className="text-left w-full rounded-xl border border-slate-200 dark:border-slate-800 hover:border-cyan-500/60 bg-white dark:bg-slate-900/70 p-4 space-y-2 transition-colors cursor-pointer group"
+        >
           <div className="flex items-center justify-between gap-2">
             <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-cyan-600 dark:text-cyan-400">
               <KeyRound className="w-3.5 h-3.5" />
@@ -1259,10 +1348,20 @@ export function MailAnalysisView({
           <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
             {mail.dkim.summary}
           </p>
-        </div>
+          <div className="flex justify-end">
+            <span className="font-sans text-[10px] font-medium text-cyan-600 dark:text-cyan-400 opacity-80 group-hover:opacity-100">
+              Jump ↓
+            </span>
+          </div>
+        </button>
 
         {/* 5. DMARC Policy Card */}
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-2">
+        <button
+          type="button"
+          data-testid="mail-scorecard-jump-dmarc"
+          onClick={() => jumpToSection('dmarc')}
+          className="text-left w-full rounded-xl border border-slate-200 dark:border-slate-800 hover:border-cyan-500/60 bg-white dark:bg-slate-900/70 p-4 space-y-2 transition-colors cursor-pointer group"
+        >
           <div className="flex items-center justify-between gap-2">
             <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-cyan-600 dark:text-cyan-400">
               <Shield className="w-3.5 h-3.5" />
@@ -1283,7 +1382,12 @@ export function MailAnalysisView({
           <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
             {mail.dmarc.summary}
           </p>
-        </div>
+          <div className="flex justify-end">
+            <span className="font-sans text-[10px] font-medium text-cyan-600 dark:text-cyan-400 opacity-80 group-hover:opacity-100">
+              Jump ↓
+            </span>
+          </div>
+        </button>
 
         {/* 6. Multi-Zone DNSSEC Chain Card */}
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 flex flex-col justify-between gap-2">
@@ -1316,19 +1420,72 @@ export function MailAnalysisView({
         </div>
       </div>
 
+      {/* Sticky Compact Section Jump & Accordion Control Strip */}
+      <div
+        data-testid="mail-section-jump-bar"
+        className="sticky top-2 md:static z-20 rounded-xl border border-slate-200/90 dark:border-slate-800/90 bg-white/95 dark:bg-slate-900/95 backdrop-blur-sm px-3 py-2 shadow-sm flex items-center justify-between gap-2"
+      >
+        <div className="flex items-center gap-1.5 overflow-x-auto min-w-0">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 shrink-0 mr-0.5 hidden sm:inline">
+            Jump:
+          </span>
+          {presentSections.map((sec) => (
+            <button
+              key={sec.id}
+              type="button"
+              data-testid={`mail-jump-chip-${sec.id}`}
+              onClick={() => jumpToSection(sec.id)}
+              className="inline-flex items-center gap-1 shrink-0 whitespace-nowrap rounded-lg border border-slate-200 dark:border-slate-800 hover:border-cyan-500 bg-slate-50 dark:bg-slate-950 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 transition-colors cursor-pointer"
+            >
+              <span>{sec.label}</span>
+            </button>
+          ))}
+        </div>
+
+        <button
+          type="button"
+          data-testid="mail-toggle-all-sections"
+          onClick={() => setAllSectionsCollapsed(!anySectionCollapsed)}
+          className="inline-flex items-center gap-1 shrink-0 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-slate-600 dark:text-slate-300 cursor-pointer"
+        >
+          {anySectionCollapsed ? (
+            <>
+              <ChevronDown className="w-3.5 h-3.5 text-cyan-500" />
+              <span>Expand All</span>
+            </>
+          ) : (
+            <>
+              <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+              <span>Collapse All</span>
+            </>
+          )}
+        </button>
+      </div>
+
       {/* Section 1: MX Exchangers & SMTP DANE (_25._tcp TLSA) */}
-      <section className="space-y-3">
+      <section id="mail-section-mx-dane" className="space-y-3 scroll-mt-16 md:scroll-mt-44">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-              <Mail className="w-4 h-4 text-cyan-500" />
+          <button
+            type="button"
+            data-testid="mail-section-toggle-mx-dane"
+            aria-expanded={!collapsedSections['mx-dane']}
+            onClick={() => toggleSection('mx-dane')}
+            className="text-left min-w-0 cursor-pointer group"
+          >
+            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors flex items-center gap-2">
+              {collapsedSections['mx-dane'] ? (
+                <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+              )}
+              <Mail className="w-4 h-4 text-cyan-500 shrink-0" />
               <span>Mail Exchangers (MX) &amp; SMTP DANE (_25._tcp TLSA)</span>
             </h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
+            <p className="text-xs text-slate-500 dark:text-slate-400 pl-6">
               Ordered by SMTP preference (lowest number tried first). DANE requires DNSSEC
               validation of TLSA records per RFC 7672.
             </p>
-          </div>
+          </button>
           {mail.mxRrsetId && (
             <div className="flex flex-wrap items-center gap-1.5">
               <button
@@ -1356,58 +1513,70 @@ export function MailAnalysisView({
           )}
         </div>
 
-        {mail.mxHosts.length > 0 ? (
-          <div className="space-y-3">
-            {mail.mxHosts.map((host) => (
-              <MxHostCard
-                key={`${host.preference}-${host.exchange}`}
-                host={host}
-                onJumpToGraphTarget={onJumpToGraphTarget}
-              />
-            ))}
-          </div>
-        ) : mail.mxStatus === 'implicit-a' && mail.implicitFallbackAddresses ? (
-          <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-4 space-y-2">
-            <div className="font-semibold text-sm text-amber-800 dark:text-amber-200">
-              Implicit Address MX Fallback (RFC 5321 §5.1)
-            </div>
-            <p className="text-xs text-slate-600 dark:text-slate-300">
-              No explicit MX records exist at{' '}
-              <span className="font-mono font-semibold">{snapshot.displayDomain}</span>. Senders may
-              attempt SMTP delivery directly to the apex address record(s):
-            </p>
-            <div className="flex flex-wrap gap-1.5">
-              {mail.implicitFallbackAddresses.map((addr) => (
-                <span
-                  key={addr.ip}
-                  className="rounded-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 px-2 py-0.5 font-mono text-xs"
-                >
-                  IPv{addr.family}: <IpHoverBadge ip={addr.ip} />
-                </span>
+        {!collapsedSections['mx-dane'] &&
+          (mail.mxHosts.length > 0 ? (
+            <div className="space-y-3">
+              {mail.mxHosts.map((host) => (
+                <MxHostCard
+                  key={`${host.preference}-${host.exchange}`}
+                  host={host}
+                  onJumpToGraphTarget={onJumpToGraphTarget}
+                />
               ))}
             </div>
-          </div>
-        ) : (
-          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 p-6 text-center text-xs text-slate-500">
-            No MX or fallback A/AAAA records found for {snapshot.displayDomain}.
-          </div>
-        )}
+          ) : mail.mxStatus === 'implicit-a' && mail.implicitFallbackAddresses ? (
+            <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-4 space-y-2">
+              <div className="font-semibold text-sm text-amber-800 dark:text-amber-200">
+                Implicit Address MX Fallback (RFC 5321 §5.1)
+              </div>
+              <p className="text-xs text-slate-600 dark:text-slate-300">
+                No explicit MX records exist at{' '}
+                <span className="font-mono font-semibold">{snapshot.displayDomain}</span>. Senders
+                may attempt SMTP delivery directly to the apex address record(s):
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {mail.implicitFallbackAddresses.map((addr) => (
+                  <span
+                    key={addr.ip}
+                    className="rounded-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 px-2 py-0.5 font-mono text-xs"
+                  >
+                    IPv{addr.family}: <IpHoverBadge ip={addr.ip} />
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 p-6 text-center text-xs text-slate-500">
+              No MX or fallback A/AAAA records found for {snapshot.displayDomain}.
+            </div>
+          ))}
       </section>
 
       {/* Section 2: SPF Policy & Recursive Lookup Tree */}
-      <section className="space-y-3">
+      <section id="mail-section-spf" className="space-y-3 scroll-mt-16 md:scroll-mt-44">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-              <FileText className="w-4 h-4 text-cyan-500" />
+          <button
+            type="button"
+            data-testid="mail-section-toggle-spf"
+            aria-expanded={!collapsedSections.spf}
+            onClick={() => toggleSection('spf')}
+            className="text-left min-w-0 cursor-pointer group"
+          >
+            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors flex items-center gap-2">
+              {collapsedSections.spf ? (
+                <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+              )}
+              <FileText className="w-4 h-4 text-cyan-500 shrink-0" />
               <span>Sender Policy Framework (SPF · RFC 7208)</span>
             </h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
+            <p className="text-xs text-slate-500 dark:text-slate-400 pl-6">
               Evaluates TXT <code className="font-mono">v=spf1</code> syntax, recursive{' '}
               <code className="font-mono">include:</code> / <code className="font-mono">redirect=</code>{' '}
               chains, and the mandatory 10-DNS-lookup limit.
             </p>
-          </div>
+          </button>
           {mail.spf.txtRrsetId && (
             <div className="flex flex-wrap items-center gap-1.5">
               <button
@@ -1436,7 +1605,8 @@ export function MailAnalysisView({
           )}
         </div>
 
-        {!mail.spf.present ? (
+        {!collapsedSections.spf &&
+          (!mail.spf.present ? (
           <div className="rounded-xl border border-amber-500/35 bg-amber-500/5 p-5 space-y-1.5">
             <div className="font-semibold text-sm text-amber-800 dark:text-amber-200">
               No SPF (v=spf1) TXT Record Published
@@ -1657,23 +1827,34 @@ export function MailAnalysisView({
               ipInput={spfTestIp}
             />
           </div>
-        )}
+          ))}
       </section>
 
       {/* Section 3: DMARC Policy, Identifier Alignment & External Report Verification */}
-      <section className="space-y-3">
+      <section id="mail-section-dmarc" className="space-y-3 scroll-mt-16 md:scroll-mt-44">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-              <Shield className="w-4 h-4 text-cyan-500" />
+          <button
+            type="button"
+            data-testid="mail-section-toggle-dmarc"
+            aria-expanded={!collapsedSections.dmarc}
+            onClick={() => toggleSection('dmarc')}
+            className="text-left min-w-0 cursor-pointer group"
+          >
+            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors flex items-center gap-2">
+              {collapsedSections.dmarc ? (
+                <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+              )}
+              <Shield className="w-4 h-4 text-cyan-500 shrink-0" />
               <span>DMARC Policy &amp; Alignment (_dmarc · RFC 7489 / RFC 9091)</span>
             </h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
+            <p className="text-xs text-slate-500 dark:text-slate-400 pl-6">
               Inspects <code className="font-mono">_dmarc</code> disposition policy, SPF/DKIM From:
               alignment, organizational fallback, and RFC 7489 §7.1 external{' '}
               <code className="font-mono">_report._dmarc</code> authorization.
             </p>
-          </div>
+          </button>
           {(mail.dmarc.txtRrsetId || mail.dmarc.negativeNodeId) && (
             <div className="flex flex-wrap items-center gap-1.5">
               <button
@@ -1714,7 +1895,8 @@ export function MailAnalysisView({
           )}
         </div>
 
-        {!mail.dmarc.present ? (
+        {!collapsedSections.dmarc &&
+          (!mail.dmarc.present ? (
           <div className="rounded-xl border border-amber-500/35 bg-amber-500/5 p-5 space-y-1.5">
             <div className="font-semibold text-sm text-amber-800 dark:text-amber-200">
               No DMARC (v=DMARC1) Record Published at {displayFqdn(mail.dmarc.queriedOwner)}
@@ -1906,24 +2088,36 @@ export function MailAnalysisView({
               </div>
             )}
           </div>
-        )}
+          ))}
       </section>
 
       {/* Section 4: DKIM Public Keys & Custom Selector / Header Inspector */}
-      <section className="space-y-3">
-        <div>
-          <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-            <KeyRound className="w-4 h-4 text-cyan-500" />
+      <section id="mail-section-dkim" className="space-y-3 scroll-mt-16 md:scroll-mt-44">
+        <button
+          type="button"
+          data-testid="mail-section-toggle-dkim"
+          aria-expanded={!collapsedSections.dkim}
+          onClick={() => toggleSection('dkim')}
+          className="text-left min-w-0 cursor-pointer group"
+        >
+          <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors flex items-center gap-2">
+            {collapsedSections.dkim ? (
+              <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+            ) : (
+              <ChevronDown className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+            )}
+            <KeyRound className="w-4 h-4 text-cyan-500 shrink-0" />
             <span>DKIM Public Keys (_domainkey · RFC 6376 / RFC 8301 / RFC 8463)</span>
           </h2>
-          <p className="text-xs text-slate-500 dark:text-slate-400">
+          <p className="text-xs text-slate-500 dark:text-slate-400 pl-6">
             Automatically probes common &amp; provider-hinted selectors, decodes RSA/Ed25519 key
             sizes, and lets you inspect custom selectors or a pasted{' '}
             <code className="font-mono">DKIM-Signature:</code> email header.
           </p>
-        </div>
+        </button>
 
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-3.5">
+        {!collapsedSections.dkim && (
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-3.5">
           {onProbeDkimSelectors && (
             <form onSubmit={handleDkimSubmit} className="flex flex-col sm:flex-row gap-2">
               <div className="relative flex-1">
@@ -1987,28 +2181,41 @@ export function MailAnalysisView({
               above to inspect its public key.
             </div>
           )}
-        </div>
+          </div>
+        )}
       </section>
 
       {/* Section 5: MTA-STS (RFC 8461), SMTP TLS Reporting (RFC 8460) & BIMI */}
       {mail.mtaSts && mail.tlsRpt && mail.bimi && (
-        <section className="space-y-3">
-          <div>
-            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-              <Lock className="w-4 h-4 text-cyan-500" />
+        <section id="mail-section-mta-sts" className="space-y-3 scroll-mt-16 md:scroll-mt-44">
+          <button
+            type="button"
+            data-testid="mail-section-toggle-mta-sts"
+            aria-expanded={!collapsedSections['mta-sts']}
+            onClick={() => toggleSection('mta-sts')}
+            className="text-left min-w-0 cursor-pointer group"
+          >
+            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors flex items-center gap-2">
+              {collapsedSections['mta-sts'] ? (
+                <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+              )}
+              <Lock className="w-4 h-4 text-cyan-500 shrink-0" />
               <span>
                 SMTP Transport Policy, TLS Reporting &amp; Brand Identity (MTA-STS · TLS-RPT · BIMI)
               </span>
             </h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
+            <p className="text-xs text-slate-500 dark:text-slate-400 pl-6">
               Validates RFC 8461 <code className="font-mono">_mta-sts</code> policies, RFC 8460{' '}
               <code className="font-mono">_smtp._tls</code> failure reporting, and{' '}
               <code className="font-mono">default._bimi</code> brand indicators with DMARC
               enforcement prerequisites.
             </p>
-          </div>
+          </button>
 
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3.5">
+          {!collapsedSections['mta-sts'] && (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-3.5">
             {/* 1. MTA-STS Card */}
             <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2284,27 +2491,39 @@ export function MailAnalysisView({
                 </div>
               )}
             </div>
-          </div>
+            </div>
+          )}
         </section>
       )}
 
       {/* Section 6: Service Discovery (SRV — RFC 6186 / RFC 8314 / RFC 6764 / Matrix / XMPP) */}
       {mail.srvDiscovery && (
-        <section className="space-y-3">
+        <section id="mail-section-srv" className="space-y-3 scroll-mt-16 md:scroll-mt-44">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                <Server className="w-4 h-4 text-cyan-500" />
+            <button
+              type="button"
+              data-testid="mail-section-toggle-srv"
+              aria-expanded={!collapsedSections.srv}
+              onClick={() => toggleSection('srv')}
+              className="text-left min-w-0 cursor-pointer group"
+            >
+              <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors flex items-center gap-2">
+                {collapsedSections.srv ? (
+                  <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+                ) : (
+                  <ChevronDown className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
+                )}
+                <Server className="w-4 h-4 text-cyan-500 shrink-0" />
                 <span>
                   Service Discovery (SRV — Autodiscover, Submission/IMAPS/POP3S, CalDAV/CardDAV,
                   Matrix &amp; XMPP)
                 </span>
               </h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
+              <p className="text-xs text-slate-500 dark:text-slate-400 pl-6">
                 Probes RFC 6186 / RFC 8314 MUA auto-configuration, RFC 6764 CalDAV/CardDAV, Matrix
                 federation, and RFC 6120 XMPP <code className="font-mono">SRV</code> endpoints.
               </p>
-            </div>
+            </button>
             <span
               className={`rounded-full px-2.5 py-0.5 font-mono text-[10px] font-semibold border ${
                 mail.srvDiscovery.activeCount > 0
@@ -2317,72 +2536,74 @@ export function MailAnalysisView({
             </span>
           </div>
 
-          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-3">
-            <p className="text-xs text-slate-600 dark:text-slate-300">
-              {mail.srvDiscovery.summary}
-            </p>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
-              {mail.srvDiscovery.services.map((svc) => (
-                <div
-                  key={svc.qname}
-                  className={`rounded-lg border p-3 space-y-1.5 text-xs ${
-                    svc.status === 'active'
-                      ? 'border-emerald-500/35 bg-emerald-500/5'
-                      : svc.status === 'disabled-explicitly'
-                        ? 'border-cyan-500/30 bg-cyan-500/5'
-                        : 'border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-950/50 opacity-80'
-                  }`}
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-1.5">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <span className="font-mono font-bold text-slate-900 dark:text-slate-100 truncate">
-                        {svc.prefix}
-                      </span>
-                      {svc.present && <StatusBadge status={svc.dnssecStatus} size="xs" />}
-                    </div>
-                    <span
-                      className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold shrink-0 ${
-                        svc.status === 'active'
-                          ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
-                          : svc.status === 'disabled-explicitly'
-                            ? 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300'
-                            : 'bg-slate-200 dark:bg-slate-800 text-slate-500 dark:text-slate-400'
-                      }`}
-                    >
-                      {svc.status === 'active'
-                        ? 'ACTIVE'
+          {!collapsedSections.srv && (
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-3">
+              <p className="text-xs text-slate-600 dark:text-slate-300">
+                {mail.srvDiscovery.summary}
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                {mail.srvDiscovery.services.map((svc) => (
+                  <div
+                    key={svc.qname}
+                    className={`rounded-lg border p-3 space-y-1.5 text-xs ${
+                      svc.status === 'active'
+                        ? 'border-emerald-500/35 bg-emerald-500/5'
                         : svc.status === 'disabled-explicitly'
-                          ? 'DISABLED (0 .)'
-                          : 'NONE'}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
-                    <span>{svc.label}</span>
-                    <span className="font-mono text-[10px] shrink-0">{svc.rfc}</span>
-                  </div>
-                  {svc.records.length > 0 && (
-                    <div className="space-y-1 pt-1 border-t border-slate-200/60 dark:border-slate-800/80 font-mono text-[11px]">
-                      {svc.records.map((rec, idx) => (
-                        <div
-                          key={`${svc.qname}-rec-${idx}`}
-                          className="flex items-center justify-between gap-1.5 text-slate-800 dark:text-slate-200"
-                        >
-                          <span className="truncate">
-                            {rec.isNullService
-                              ? '. (Service Not Available)'
-                              : `${displayFqdn(rec.target)}:${rec.port}`}
-                          </span>
-                          <span className="text-[10px] text-slate-500 shrink-0">
-                            prio={rec.priority} w={rec.weight}
-                          </span>
-                        </div>
-                      ))}
+                          ? 'border-cyan-500/30 bg-cyan-500/5'
+                          : 'border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-950/50 opacity-80'
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-1.5">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="font-mono font-bold text-slate-900 dark:text-slate-100 truncate">
+                          {svc.prefix}
+                        </span>
+                        {svc.present && <StatusBadge status={svc.dnssecStatus} size="xs" />}
+                      </div>
+                      <span
+                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold shrink-0 ${
+                          svc.status === 'active'
+                            ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                            : svc.status === 'disabled-explicitly'
+                              ? 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300'
+                              : 'bg-slate-200 dark:bg-slate-800 text-slate-500 dark:text-slate-400'
+                        }`}
+                      >
+                        {svc.status === 'active'
+                          ? 'ACTIVE'
+                          : svc.status === 'disabled-explicitly'
+                            ? 'DISABLED (0 .)'
+                            : 'NONE'}
+                      </span>
                     </div>
-                  )}
-                </div>
-              ))}
+                    <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                      <span>{svc.label}</span>
+                      <span className="font-mono text-[10px] shrink-0">{svc.rfc}</span>
+                    </div>
+                    {svc.records.length > 0 && (
+                      <div className="space-y-1 pt-1 border-t border-slate-200/60 dark:border-slate-800/80 font-mono text-[11px]">
+                        {svc.records.map((rec, idx) => (
+                          <div
+                            key={`${svc.qname}-rec-${idx}`}
+                            className="flex items-center justify-between gap-1.5 text-slate-800 dark:text-slate-200"
+                          >
+                            <span className="truncate">
+                              {rec.isNullService
+                                ? '. (Service Not Available)'
+                                : `${displayFqdn(rec.target)}:${rec.port}`}
+                            </span>
+                            <span className="text-[10px] text-slate-500 shrink-0">
+                              prio={rec.priority} w={rec.weight}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
         </section>
       )}
     </div>

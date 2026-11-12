@@ -24,7 +24,7 @@ import {
   resetWireGridWidthPreference,
   WirePacketDissectorView,
 } from '../../components/WireDissectorView';
-import { ZonesPanel } from '../../components/ZonesPanel';
+import { isHealthyIntermediateParentZone, ZonesPanel } from '../../components/ZonesPanel';
 import { buildChainGraph } from '../../graph/layout';
 import { DEFAULT_USER_SETTINGS, saveSnapshot } from '../../storage/historyStore';
 import {
@@ -36,6 +36,7 @@ import { runDnsvizAnalysis } from '../analyzer';
 import { runConsensusAnalysis } from '../consensusAnalyzer';
 import { base64ToBytes, hexToBytes } from '../encoding';
 import { runMailAnalysis } from '../mailAnalyzer';
+import type { AnalysisSnapshot, ZoneAnalysis } from '../types';
 import { runWebAnalysis } from '../webAnalyzer';
 import { dissectDnsWirePacket } from '../wireDissector';
 import {
@@ -164,6 +165,10 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(zonesHtml).toContain('AS13335');
       expect(zonesHtml).toContain('RFC 1035 Master Zonefile Export');
       expect(zonesHtml).toContain('Export Zonefile (.zone)');
+      expect(zonesHtml).toContain('data-testid="zones-jump-bar"');
+      expect(zonesHtml).toContain('data-testid="zone-jump-chip-root"');
+      expect(zonesHtml).toContain('data-testid="zones-toggle-all"');
+      expect(zonesHtml).toContain('data-testid="zone-toggle-root"');
 
       const inspectorHtml = renderToStaticMarkup(
         <GraphInspector
@@ -260,7 +265,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexHtml).toContain('name="theme-color"');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v29');
+    expect(swCode).toContain('digdeep-shell-v30');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -611,6 +616,19 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(mailHtml).toContain('Test Sender IPv4 / IPv6 Address');
       expect(mailHtml).toContain('_dmarc.ietf.org');
       expect(mailHtml).toContain('mail._domainkey.ietf.org');
+      expect(mailHtml).toContain('data-testid="mail-scorecard-jump-mx-dane"');
+      expect(mailHtml).toContain('data-testid="mail-scorecard-jump-dane"');
+      expect(mailHtml).toContain('data-testid="mail-scorecard-jump-spf"');
+      expect(mailHtml).toContain('data-testid="mail-scorecard-jump-dkim"');
+      expect(mailHtml).toContain('data-testid="mail-scorecard-jump-dmarc"');
+      expect(mailHtml).toContain('data-testid="mail-section-jump-bar"');
+      expect(mailHtml).toContain('data-testid="mail-toggle-all-sections"');
+      expect(mailHtml).toContain('data-testid="mail-section-toggle-mx-dane"');
+      expect(mailHtml).toContain('data-testid="mail-section-toggle-spf"');
+      expect(mailHtml).toContain('data-testid="mail-section-toggle-dmarc"');
+      expect(mailHtml).toContain('data-testid="mail-section-toggle-dkim"');
+      expect(mailHtml).toContain('data-testid="mail-section-toggle-mta-sts"');
+      expect(mailHtml).toContain('data-testid="mail-section-toggle-srv"');
 
       const graphHtml = renderToStaticMarkup(
         <ChainGraphView
@@ -677,6 +695,17 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(webHtml).toContain('SSHFP (RFC 4255)');
       expect(webHtml).toContain('HTTPS Priority 1');
       expect(webHtml).toContain('h3');
+      expect(webHtml).toContain('data-testid="web-scorecard-jump-https"');
+      expect(webHtml).toContain('data-testid="web-scorecard-jump-caa"');
+      expect(webHtml).toContain('data-testid="web-scorecard-jump-dane"');
+      expect(webHtml).toContain('data-testid="web-scorecard-jump-sshfp"');
+      expect(webHtml).toContain('data-testid="web-section-jump-bar"');
+      expect(webHtml).toContain('data-testid="web-toggle-all-sections"');
+      expect(webHtml).toContain('data-testid="web-section-toggle-https"');
+      expect(webHtml).toContain('data-testid="web-section-toggle-caa"');
+      expect(webHtml).toContain('data-testid="web-section-toggle-ct"');
+      expect(webHtml).toContain('data-testid="web-section-toggle-dane"');
+      expect(webHtml).toContain('data-testid="web-section-toggle-sshfp"');
       if (webSnap.ctLogFetch?.ok) {
         expect(webHtml).toContain('CT ↔ CAA COMPLIANT');
         expect(webHtml).toContain('CAA AUTHORIZED ✓');
@@ -958,6 +987,662 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       });
     } finally {
       resetWireGridWidthPreference();
+      if (prevWindow) {
+        Object.defineProperty(globalThis, 'window', prevWindow);
+      } else {
+        Reflect.deleteProperty(globalThis, 'window');
+      }
+      Reflect.deleteProperty(globalThis, 'document');
+    }
+  });
+
+  it('supports mobile auto-collapse of healthy parent zones in ZonesPanel and tap-to-jump / accordion toggles in Mail, Web, and Zones views', async () => {
+    const makeZone = (
+      zoneName: string,
+      parentZone: string | null,
+      depth: number,
+      overrides: Partial<ZoneAnalysis> = {}
+    ): ZoneAnalysis => ({
+      zoneName,
+      parentZone,
+      depth,
+      status: 'secure',
+      statusReason: 'Validated DNSSEC chain',
+      nsecMode: 'NSEC',
+      dnskeys: [],
+      dsVerifications: [],
+      trustAnchorMatches: [],
+      rrsets: [],
+      negativeNodes: [],
+      nameservers: [
+        {
+          hostname: `a.ns.${zoneName === '.' ? 'iana.org.' : zoneName}`,
+          ipv4: ['192.0.2.53'],
+          ipv6: [],
+          status: 'ok',
+        },
+      ],
+      ...overrides,
+    });
+
+    const zonesFixture: AnalysisSnapshot = {
+      id: 'snap-mobile-51',
+      version: 1,
+      mode: 'dnssec',
+      targetName: 'www.example.org.',
+      displayDomain: 'www.example.org',
+      queryTypes: ['A'],
+      dohEndpoint: 'https://1.1.1.1/dns-query',
+      capturedAt: 1700000000000,
+      validatedAt: 1700000000000,
+      durationMs: 120,
+      overallStatus: 'secure',
+      overallSummary: 'Secure delegation chain',
+      zones: [
+        makeZone('.', null, 0),
+        makeZone('org.', '.', 1),
+        makeZone('example.org.', 'org.', 2),
+        // CNAME branch where intermediate net. has a SOA timer warning -> must NOT auto-collapse!
+        makeZone('net.', '.', 1, {
+          soaAudit: {
+            valid: false,
+            issues: [
+              {
+                parameter: 'expire',
+                value: 3600,
+                severity: 'warning',
+                message: 'SOA expire below RFC 1912 minimum',
+                rfc: 'RFC 1912',
+              },
+            ],
+            summary: 'SOA timer warning',
+          },
+        }),
+        makeZone('cloudflare.net.', 'net.', 2),
+      ],
+      cnameEdges: [],
+      findings: [],
+      queries: [],
+      trustAnchorsUsed: [],
+      mailAnalysis: {
+        mxStatus: 'valid',
+        mxDnssecStatus: 'secure',
+        mxHosts: [
+          {
+            preference: 10,
+            exchange: 'mail.example.org.',
+            displayExchange: 'mail.example.org',
+            isNullMx: false,
+            isIpLiteral: false,
+            cnameChain: [],
+            addresses: [{ ip: '192.0.2.25', family: 4, isPublic: false }],
+            ipv4Status: 'secure',
+            ipv6Status: 'insecure',
+            addressRrsetIds: [],
+            dane: {
+              qname: '_25._tcp.mail.example.org.',
+              resolvedOwner: '_25._tcp.mail.example.org.',
+              cnameChain: [],
+              status: 'no-tlsa-secure',
+              dnssecStatus: 'secure',
+              records: [],
+              rolloverReady: false,
+              summary: 'No _25._tcp TLSA published',
+            },
+          },
+        ],
+        daneStatus: 'not-deployed',
+        daneSummary: 'No DANE TLSA; MTA-STS enforce active.',
+        spf: {
+          present: true,
+          verdict: 'strict-fail',
+          dnsLookupCount: 1,
+          dnsLookupLimit: 10,
+          voidLookupCount: 0,
+          voidLookupLimit: 2,
+          dnssecStatus: 'secure',
+          rawRecord: 'v=spf1 mx -all',
+          allSpfRecords: ['v=spf1 mx -all'],
+          legacySpfRecords: [],
+          effectiveAllQualifier: '-',
+          rootNode: {
+            domain: 'example.org.',
+            displayDomain: 'example.org',
+            via: 'root',
+            depth: 0,
+            spfRecords: ['v=spf1 mx -all'],
+            dnssecStatus: 'secure',
+            terms: [
+              { raw: 'v=spf1', kind: 'version', countsTowardLookupLimit: false, syntaxValid: true },
+              {
+                raw: 'mx',
+                kind: 'mechanism',
+                qualifier: '+',
+                mechanism: 'mx',
+                countsTowardLookupLimit: true,
+                syntaxValid: true,
+              },
+              {
+                raw: '-all',
+                kind: 'mechanism',
+                qualifier: '-',
+                mechanism: 'all',
+                countsTowardLookupLimit: false,
+                syntaxValid: true,
+              },
+            ],
+          },
+          summary: 'Strict -all SPF policy (1/10 lookups).',
+        },
+        dmarc: {
+          present: true,
+          verdict: 'reject',
+          queriedOwner: '_dmarc.example.org.',
+          effectiveOwner: '_dmarc.example.org.',
+          cnameChain: [],
+          usedOrgFallback: false,
+          dnssecStatus: 'secure',
+          rawRecord: 'v=DMARC1; p=reject;',
+          allDmarcRecords: ['v=DMARC1; p=reject;'],
+          policy: 'reject',
+          adkim: 'r',
+          aspf: 'r',
+          pct: 100,
+          rua: [],
+          ruf: [],
+          fo: '0',
+          ri: 86400,
+          tags: [
+            { tag: 'v', value: 'DMARC1', known: true, valid: true },
+            { tag: 'p', value: 'reject', known: true, valid: true },
+          ],
+          issues: [],
+          summary: 'Strict p=reject DMARC policy.',
+        },
+        dkim: {
+          status: 'verified',
+          probedSelectors: ['selector1'],
+          customSelectors: [],
+          selectors: [
+            {
+              selector: 'selector1',
+              source: 'auto',
+              qname: 'selector1._domainkey.example.org.',
+              resolvedOwner: 'selector1._domainkey.example.org.',
+              cnameChain: [],
+              present: true,
+              status: 'valid',
+              dnssecStatus: 'secure',
+              rawRecord: 'v=DKIM1; k=ed25519; p=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=',
+              allRecords: ['v=DKIM1; k=ed25519; p=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo='],
+              version: 'DKIM1',
+              keyType: 'ed25519',
+              keyBits: 256,
+              flags: [],
+              isTestingMode: false,
+              isStrictSubdomain: false,
+              issues: [],
+              summary: 'Valid Ed25519 DKIM key',
+            },
+          ],
+          summary: '1 active DKIM selector verified.',
+        },
+        mtaSts: {
+          present: true,
+          status: 'enforce',
+          qname: '_mta-sts.example.org.',
+          resolvedOwner: '_mta-sts.example.org.',
+          cnameChain: [],
+          dnssecStatus: 'secure',
+          rawRecord: 'v=STSv1; id=20261112;',
+          allStsRecords: ['v=STSv1; id=20261112;'],
+          version: 'STSv1',
+          policyId: '20261112',
+          extensions: [],
+          policyUrl: 'https://mta-sts.example.org/.well-known/mta-sts.txt',
+          policy: {
+            version: 'STSv1',
+            mode: 'enforce',
+            maxAge: 604800,
+            mxPatterns: ['mail.example.org'],
+            matchedMxHosts: ['mail.example.org'],
+            unmatchedMxHosts: [],
+            valid: true,
+            issues: [],
+          },
+          issues: [],
+          summary: 'MTA-STS enforce mode active.',
+        },
+        tlsRpt: {
+          present: true,
+          status: 'valid',
+          qname: '_smtp._tls.example.org.',
+          resolvedOwner: '_smtp._tls.example.org.',
+          cnameChain: [],
+          dnssecStatus: 'secure',
+          rawRecord: 'v=TLSRPTv1; rua=mailto:tlsrpt@example.org',
+          allTlsRptRecords: ['v=TLSRPTv1; rua=mailto:tlsrpt@example.org'],
+          version: 'TLSRPTv1',
+          rua: [
+            {
+              raw: 'mailto:tlsrpt@example.org',
+              uri: 'mailto:tlsrpt@example.org',
+              scheme: 'mailto',
+              syntaxValid: true,
+            },
+          ],
+          extensions: [],
+          issues: [],
+          summary: 'TLS-RPT configured.',
+        },
+        bimi: {
+          present: false,
+          status: 'not-deployed',
+          selector: 'default',
+          qname: 'default._bimi.example.org.',
+          resolvedOwner: 'default._bimi.example.org.',
+          cnameChain: [],
+          dnssecStatus: 'secure',
+          allBimiRecords: [],
+          dmarcEligible: true,
+          dmarcEligibilityReason: 'DMARC p=reject (100%)',
+          issues: [],
+          summary: 'No BIMI record published.',
+        },
+        fcrdnsSummary: {
+          checkedIpCount: 1,
+          validCount: 1,
+          noPtrCount: 0,
+          mismatchCount: 0,
+          status: 'all-valid',
+          summary: '1/1 FCrDNS verified',
+        },
+        srvDiscovery: {
+          probedCount: 1,
+          activeCount: 1,
+          disabledCount: 0,
+          services: [
+            {
+              prefix: '_submissions._tcp',
+              qname: '_submissions._tcp.example.org.',
+              label: 'SMTPS Submission',
+              category: 'mail-submission',
+              rfc: 'RFC 8314',
+              present: true,
+              status: 'active',
+              dnssecStatus: 'secure',
+              records: [{ priority: 0, weight: 1, port: 465, target: 'mail.example.org.', isNullService: false }],
+            },
+          ],
+          summary: '1 active SRV endpoint discovered.',
+        },
+      },
+      webAnalysis: {
+        targetDomain: 'www.example.org.',
+        displayDomain: 'www.example.org',
+        cnameChain: ['www.example.org.cdn.cloudflare.net.'],
+        ipv4Addresses: ['192.0.2.80'],
+        ipv6Addresses: [],
+        addressDnssecStatus: 'secure',
+        httpsStatus: 'ech-enabled',
+        httpsDnssecStatus: 'secure',
+        httpsRecords: [
+          {
+            ownerName: 'www.example.org.',
+            rrtypeName: 'HTTPS',
+            ttl: 300,
+            priority: 1,
+            isAliasMode: false,
+            target: '.',
+            params: [],
+            alpns: ['h3', 'h2'],
+            hasH3: true,
+            hasH2: true,
+            noDefaultAlpn: false,
+            ipv4Hints: ['192.0.2.80'],
+            ipv6Hints: [],
+            ipv4HintsMatched: ['192.0.2.80'],
+            ipv4HintsDrifted: [],
+            ipv6HintsMatched: [],
+            ipv6HintsDrifted: [],
+            echConfigs: [],
+            issues: [],
+          },
+        ],
+        svcbRecords: [],
+        supportsHttp3: true,
+        supportsHttp2: true,
+        echEnabled: true,
+        echPublicNames: ['cloudflare-ech.com'],
+        ipHintStatus: 'matched',
+        httpsSummary: 'HTTPS Priority 1 with HTTP/3 and ECH.',
+        caa: {
+          status: 'enforced',
+          effectiveOwner: 'example.org.',
+          dnssecStatus: 'secure',
+          hops: [
+            {
+              name: 'www.example.org.',
+              displayName: 'www.example.org',
+              depth: 0,
+              dnssecStatus: 'secure',
+              records: [],
+              isEffectivePolicySource: false,
+            },
+            {
+              name: 'example.org.',
+              displayName: 'example.org',
+              depth: 1,
+              dnssecStatus: 'secure',
+              records: [
+                {
+                  ownerName: 'example.org.',
+                  flags: 0,
+                  critical: false,
+                  tag: 'issue',
+                  rawValue: 'letsencrypt.org',
+                  caDomain: 'letsencrypt.org',
+                  parameters: [],
+                  recognizedTag: true,
+                  valid: true,
+                  issues: [],
+                },
+              ],
+              isEffectivePolicySource: true,
+            },
+          ],
+          issueCas: ['letsencrypt.org'],
+          issuewildCas: [],
+          iodefUris: [],
+          hasAcmeAccountBinding: false,
+          hasCriticalUnknownTag: false,
+          issues: [],
+          summary: 'CAA policy inherited from example.org restricts issuance to letsencrypt.org.',
+        },
+        webDane: {
+          qname: '_443._tcp.www.example.org.',
+          resolvedOwner: '_443._tcp.www.example.org.',
+          cnameChain: [],
+          status: 'dane-valid',
+          dnssecStatus: 'secure',
+          records: [
+            {
+              ownerName: '_443._tcp.www.example.org.',
+              ttl: 3600,
+              usage: 3,
+              usageMnemonic: 'DANE-EE',
+              usageDescription: 'Domain-issued certificate',
+              selector: 1,
+              selectorMnemonic: 'SPKI',
+              matchingType: 1,
+              matchingTypeMnemonic: 'SHA2-256',
+              certAssociationHex: 'a'.repeat(64),
+              smtpRecommended: true,
+              rdataValid: true,
+              issues: [],
+            },
+          ],
+          rolloverReady: false,
+          summary: 'DANE-EE (3 1 1) TLSA active.',
+        },
+        sshfp: {
+          present: true,
+          status: 'secure',
+          dnssecStatus: 'secure',
+          records: [
+            {
+              ownerName: 'www.example.org.',
+              ttl: 3600,
+              algorithm: 4,
+              algorithmName: 'Ed25519',
+              fpType: 2,
+              fpTypeName: 'SHA-256',
+              fingerprintHex: 'b'.repeat(64),
+              deprecated: false,
+              valid: true,
+              issues: [],
+            },
+          ],
+          summary: '1 DNSSEC-validated SSHFP record.',
+        },
+        ctAnalysis: {
+          status: 'caa-compliant',
+          source: 'certspotter',
+          queriedDomain: 'www.example.org',
+          totalEntries: 1,
+          activeCertCount: 1,
+          expiredCertCount: 0,
+          mismatchedActiveCertCount: 0,
+          issuers: [
+            {
+              friendlyName: "Let's Encrypt",
+              mappedCaaDomains: ['letsencrypt.org'],
+              activeCertCount: 1,
+              wildcardCertCount: 0,
+              latestNotBefore: '2026-10-01T00:00:00Z',
+              caaAuthorized: true,
+              authorizedForIssue: true,
+              authorizedForWildcard: false,
+            },
+          ],
+          certificates: [],
+          discoveredSubdomains: ['api.www.example.org'],
+          tlsaMatchedCertCount: 1,
+          summary: "1 active certificate issued by Let's Encrypt matches CAA policy.",
+        },
+      },
+    };
+
+    // Pure predicate verification:
+    expect(isHealthyIntermediateParentZone(zonesFixture.zones[0], zonesFixture)).toBe(true); // .
+    expect(isHealthyIntermediateParentZone(zonesFixture.zones[1], zonesFixture)).toBe(true); // org.
+    expect(isHealthyIntermediateParentZone(zonesFixture.zones[2], zonesFixture)).toBe(false); // example.org. (leaf)
+    expect(isHealthyIntermediateParentZone(zonesFixture.zones[3], zonesFixture)).toBe(false); // net. (SOA warning!)
+    expect(isHealthyIntermediateParentZone(zonesFixture.zones[4], zonesFixture)).toBe(false); // cloudflare.net. (leaf)
+
+    const prevWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    try {
+      const { JSDOM } = (await import('jsdom' as string)) as {
+        JSDOM: new (markup?: string) => { window: Window & typeof globalThis };
+      };
+      const liveDom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>');
+      Object.defineProperty(globalThis, 'window', {
+        value: liveDom.window,
+        configurable: true,
+      });
+      Object.defineProperty(globalThis, 'document', {
+        value: liveDom.window.document,
+        configurable: true,
+      });
+      // Simulate narrow mobile (< 640px) viewport
+      (liveDom.window as unknown as { matchMedia: (q: string) => { matches: boolean } }).matchMedia =
+        (q: string) => ({ matches: q.includes('639px') });
+      (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
+        true;
+
+      const scrolledIds: string[] = [];
+      liveDom.window.HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) {
+        scrolledIds.push(this.id);
+      };
+
+      const { act } = await import('react');
+      const { createRoot } = await import('react-dom/client');
+      const container = liveDom.window.document.getElementById('root')!;
+      const root = createRoot(container);
+
+      // 1. ZonesPanel on narrow viewport: `.` and `org.` auto-collapsed; `example.org.`, `net.` (SOA warning), `cloudflare.net.` stay expanded!
+      await act(async () => {
+        root.render(<ZonesPanel snapshot={zonesFixture} />);
+      });
+      expect(
+        container.querySelector('[data-testid="zone-card-root"]')?.getAttribute('data-collapsed')
+      ).toBe('true');
+      expect(
+        container.querySelector('[data-testid="zone-card-org"]')?.getAttribute('data-collapsed')
+      ).toBe('true');
+      expect(
+        container
+          .querySelector('[data-testid="zone-card-example.org"]')
+          ?.getAttribute('data-collapsed')
+      ).toBe('false');
+      expect(
+        container.querySelector('[data-testid="zone-card-net"]')?.getAttribute('data-collapsed')
+      ).toBe('false');
+      expect(
+        container
+          .querySelector('[data-testid="zone-card-cloudflare.net"]')
+          ?.getAttribute('data-collapsed')
+      ).toBe('false');
+
+      // Ensure no nested <button> inside <button> anywhere in ZonesPanel
+      expect(container.querySelectorAll('button button').length).toBe(0);
+
+      // Tap zone jump chip for Root -> auto-expands Root and scrolls #zone-card-root into view
+      const rootChip = container.querySelector(
+        '[data-testid="zone-jump-chip-root"]'
+      ) as HTMLButtonElement;
+      await act(async () => {
+        rootChip.click();
+        await new Promise((r) => setTimeout(r, 15));
+      });
+      expect(
+        container.querySelector('[data-testid="zone-card-root"]')?.getAttribute('data-collapsed')
+      ).toBe('false');
+      expect(scrolledIds).toContain('zone-card-root');
+
+      // Tap Expand All (since org. is still collapsed) -> expands every zone
+      const zonesToggleAll = container.querySelector(
+        '[data-testid="zones-toggle-all"]'
+      ) as HTMLButtonElement;
+      expect(zonesToggleAll.textContent).toContain('Expand All');
+      await act(async () => {
+        zonesToggleAll.click();
+      });
+      expect(
+        container.querySelector('[data-testid="zone-card-org"]')?.getAttribute('data-collapsed')
+      ).toBe('false');
+      expect(zonesToggleAll.textContent).toContain('Collapse All');
+
+      // 2. MailAnalysisView: Collapse All, then tap Scorecard SPF & Scorecard DANE (which routes to MTA-STS when DANE is not-deployed + MTA-STS present)
+      scrolledIds.length = 0;
+      await act(async () => {
+        root.render(
+          <MailAnalysisView
+            snapshot={zonesFixture}
+            onJumpToGraphTarget={() => {}}
+            onOpenChainGraph={() => {}}
+          />
+        );
+      });
+      expect(container.querySelectorAll('button button').length).toBe(0);
+
+      const mailToggleAll = container.querySelector(
+        '[data-testid="mail-toggle-all-sections"]'
+      ) as HTMLButtonElement;
+      expect(mailToggleAll.textContent).toContain('Collapse All');
+      await act(async () => {
+        mailToggleAll.click();
+      });
+      expect(mailToggleAll.textContent).toContain('Expand All');
+      expect(
+        container
+          .querySelector('[data-testid="mail-section-toggle-spf"]')
+          ?.getAttribute('aria-expanded')
+      ).toBe('false');
+      expect(container.textContent).not.toContain('Interactive SPF Sender IP Evaluator');
+
+      // Tap SPF scorecard card -> auto-expands SPF section and scrolls #mail-section-spf
+      const spfScorecardBtn = container.querySelector(
+        '[data-testid="mail-scorecard-jump-spf"]'
+      ) as HTMLButtonElement;
+      await act(async () => {
+        spfScorecardBtn.click();
+        await new Promise((r) => setTimeout(r, 15));
+      });
+      expect(
+        container
+          .querySelector('[data-testid="mail-section-toggle-spf"]')
+          ?.getAttribute('aria-expanded')
+      ).toBe('true');
+      expect(container.textContent).toContain('Interactive SPF Sender IP Evaluator');
+      expect(scrolledIds).toContain('mail-section-spf');
+
+      // Tap DANE & MTA-STS scorecard card -> auto-expands #mail-section-mta-sts (since DANE is not-deployed and MTA-STS is active)
+      const daneScorecardBtn = container.querySelector(
+        '[data-testid="mail-scorecard-jump-dane"]'
+      ) as HTMLButtonElement;
+      await act(async () => {
+        daneScorecardBtn.click();
+        await new Promise((r) => setTimeout(r, 15));
+      });
+      expect(
+        container
+          .querySelector('[data-testid="mail-section-toggle-mta-sts"]')
+          ?.getAttribute('aria-expanded')
+      ).toBe('true');
+      expect(scrolledIds).toContain('mail-section-mta-sts');
+
+      // 3. WebAnalysisView: Collapse All, then tap CAA scorecard card & CT jump chip -> auto-expands & scrolls
+      scrolledIds.length = 0;
+      await act(async () => {
+        root.render(
+          <WebAnalysisView
+            snapshot={zonesFixture}
+            onJumpToGraphTarget={() => {}}
+            onOpenChainGraph={() => {}}
+          />
+        );
+      });
+      expect(container.querySelectorAll('button button').length).toBe(0);
+
+      const webToggleAll = container.querySelector(
+        '[data-testid="web-toggle-all-sections"]'
+      ) as HTMLButtonElement;
+      expect(webToggleAll.textContent).toContain('Collapse All');
+      await act(async () => {
+        webToggleAll.click();
+      });
+      expect(webToggleAll.textContent).toContain('Expand All');
+      expect(
+        container
+          .querySelector('[data-testid="web-section-toggle-caa"]')
+          ?.getAttribute('aria-expanded')
+      ).toBe('false');
+      expect(container.textContent).not.toContain('RFC 8659 §3 Climb Order:');
+
+      const caaScorecardBtn = container.querySelector(
+        '[data-testid="web-scorecard-jump-caa"]'
+      ) as HTMLButtonElement;
+      await act(async () => {
+        caaScorecardBtn.click();
+        await new Promise((r) => setTimeout(r, 15));
+      });
+      expect(
+        container
+          .querySelector('[data-testid="web-section-toggle-caa"]')
+          ?.getAttribute('aria-expanded')
+      ).toBe('true');
+      expect(container.textContent).toContain('RFC 8659 §3 Climb Order:');
+      expect(scrolledIds).toContain('web-section-caa');
+
+      const ctJumpChip = container.querySelector(
+        '[data-testid="web-jump-chip-ct"]'
+      ) as HTMLButtonElement;
+      await act(async () => {
+        ctJumpChip.click();
+        await new Promise((r) => setTimeout(r, 15));
+      });
+      expect(
+        container
+          .querySelector('[data-testid="web-section-toggle-ct"]')
+          ?.getAttribute('aria-expanded')
+      ).toBe('true');
+      expect(scrolledIds).toContain('web-section-ct');
+
+      await act(async () => {
+        root.unmount();
+      });
+    } finally {
       if (prevWindow) {
         Object.defineProperty(globalThis, 'window', prevWindow);
       } else {

@@ -1,8 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Copy,
   Download,
   FileCode2,
@@ -20,16 +22,132 @@ import {
   formatSnapshotAsZonefile,
   formatZoneAsZonefile,
 } from '../dns/digFormat';
-import { displayFqdn } from '../dns/encoding';
-import type { AnalysisSnapshot } from '../dns/types';
+import { displayFqdn, normalizeFqdn } from '../dns/encoding';
+import type { AnalysisSnapshot, ZoneAnalysis } from '../dns/types';
 import { IpHoverBadge, RpkiStatusBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
 import { StatusBadge } from './StatusBadge';
 
-export function ZonesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
+const NARROW_ZONES_MEDIA_QUERY = '(max-width: 639px)';
+
+function detectNarrowZonesViewport(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return false;
+  }
+  return Boolean(window.matchMedia(NARROW_ZONES_MEDIA_QUERY)?.matches);
+}
+
+export function isHealthyIntermediateParentZone(
+  zone: ZoneAnalysis,
+  snapshot: AnalysisSnapshot
+): boolean {
+  const queriedFqdn = normalizeFqdn(snapshot.targetName);
+  if (zone.zoneName === queriedFqdn) return false;
+  const hasDelegatedChild = snapshot.zones.some((other) => other.parentZone === zone.zoneName);
+  if (!hasDelegatedChild) return false;
+  if (zone.status !== 'secure') return false;
+  if (zone.soaAudit && !zone.soaAudit.valid) return false;
+  if (zone.nameservers.some((ns) => ns.status === 'dangling')) return false;
+  if (zone.cdsRollover?.present && zone.cdsRollover.status !== 'in-sync') return false;
+  if (zone.zonemd?.present && zone.zonemd.status !== 'valid-sync') return false;
+  if (zone.wildcardAudit && zone.wildcardAudit.status !== 'no-wildcard') return false;
+  if (zone.txtHygiene && zone.txtHygiene.status === 'warning') return false;
+  return true;
+}
+
+function zoneDomSlug(zoneName: string): string {
+  return zoneName === '.' ? 'root' : displayFqdn(zoneName).replace(/[^a-z0-9.-]/gi, '_');
+}
+
+export function ZonesPanel({
+  snapshot,
+  defaultMobileCollapse,
+}: {
+  snapshot: AnalysisSnapshot;
+  defaultMobileCollapse?: boolean;
+}) {
   seedIpAsnCacheFromSnapshot(snapshot);
   const [showZonefilePreview, setShowZonefilePreview] = useState(false);
   const [includeDnssecInZonefile, setIncludeDnssecInZonefile] = useState(true);
   const [copiedZoneKey, setCopiedZoneKey] = useState<string | null>(null);
+  const [isNarrowViewport, setIsNarrowViewport] = useState<boolean>(detectNarrowZonesViewport);
+  const [zoneOverrides, setZoneOverrides] = useState<{
+    snapshotId: string;
+    byZone: Record<string, boolean>;
+  }>({ snapshotId: snapshot.id, byZone: {} });
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return;
+    }
+    const mql = window.matchMedia(NARROW_ZONES_MEDIA_QUERY);
+    if (!mql) return;
+    setIsNarrowViewport(Boolean(mql.matches));
+    const onChange = (ev: MediaQueryListEvent) => setIsNarrowViewport(ev.matches);
+    if (typeof mql.addEventListener === 'function') {
+      mql.addEventListener('change', onChange);
+      return () => mql.removeEventListener('change', onChange);
+    }
+    if (typeof mql.addListener === 'function') {
+      mql.addListener(onChange);
+      return () => mql.removeListener(onChange);
+    }
+  }, []);
+
+  const effectiveMobileCollapse = defaultMobileCollapse ?? isNarrowViewport;
+  const activeOverrides = zoneOverrides.snapshotId === snapshot.id ? zoneOverrides.byZone : {};
+
+  const isZoneCollapsed = (zone: ZoneAnalysis): boolean => {
+    if (zone.zoneName in activeOverrides) {
+      return Boolean(activeOverrides[zone.zoneName]);
+    }
+    return effectiveMobileCollapse && isHealthyIntermediateParentZone(zone, snapshot);
+  };
+
+  const anyZoneCollapsed = snapshot.zones.some((z) => isZoneCollapsed(z));
+
+  const toggleZone = (zone: ZoneAnalysis) => {
+    const nextCollapsed = !isZoneCollapsed(zone);
+    setZoneOverrides((prev) => ({
+      snapshotId: snapshot.id,
+      byZone: {
+        ...(prev.snapshotId === snapshot.id ? prev.byZone : {}),
+        [zone.zoneName]: nextCollapsed,
+      },
+    }));
+  };
+
+  const setAllZonesCollapsed = (collapsed: boolean) => {
+    const nextMap: Record<string, boolean> = {};
+    for (const z of snapshot.zones) {
+      nextMap[z.zoneName] = collapsed;
+    }
+    setZoneOverrides({ snapshotId: snapshot.id, byZone: nextMap });
+  };
+
+  const jumpToZone = (zone: ZoneAnalysis) => {
+    const domId = `zone-card-${zoneDomSlug(zone.zoneName)}`;
+    const wasCollapsed = isZoneCollapsed(zone);
+    if (wasCollapsed) {
+      setZoneOverrides((prev) => ({
+        snapshotId: snapshot.id,
+        byZone: {
+          ...(prev.snapshotId === snapshot.id ? prev.byZone : {}),
+          [zone.zoneName]: false,
+        },
+      }));
+      setTimeout(() => {
+        const el = typeof document !== 'undefined' ? document.getElementById(domId) : null;
+        if (el && typeof el.scrollIntoView === 'function') {
+          el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }, 0);
+    } else if (typeof document !== 'undefined') {
+      const el = document.getElementById(domId);
+      if (el && typeof el.scrollIntoView === 'function') {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+  };
 
   const fullZonefileText = useMemo(
     () =>
@@ -125,28 +243,105 @@ export function ZonesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
         )}
       </div>
 
+      {snapshot.zones.length > 1 && (
+        <div
+          data-testid="zones-jump-bar"
+          className="sticky top-2 md:static z-20 rounded-xl border border-slate-200/90 dark:border-slate-800/90 bg-white/95 dark:bg-slate-900/95 backdrop-blur-sm px-3 py-2 shadow-sm flex items-center justify-between gap-2"
+        >
+          <div className="flex items-center gap-1.5 overflow-x-auto min-w-0">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 shrink-0 mr-0.5 hidden sm:inline">
+              Jump:
+            </span>
+            {snapshot.zones.map((z) => {
+              const slug = zoneDomSlug(z.zoneName);
+              const dotCls =
+                z.status === 'secure'
+                  ? 'bg-emerald-500'
+                  : z.status === 'bogus'
+                    ? 'bg-rose-500'
+                    : z.status === 'warning'
+                      ? 'bg-amber-500'
+                      : 'bg-slate-400';
+              return (
+                <button
+                  key={z.zoneName}
+                  type="button"
+                  data-testid={`zone-jump-chip-${slug}`}
+                  onClick={() => jumpToZone(z)}
+                  className="inline-flex items-center gap-1.5 shrink-0 whitespace-nowrap rounded-lg border border-slate-200 dark:border-slate-800 hover:border-cyan-500 bg-slate-50 dark:bg-slate-950 px-2.5 py-1 font-mono text-xs text-slate-700 dark:text-slate-200 transition-colors cursor-pointer"
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotCls}`} />
+                  <span>{z.zoneName === '.' ? 'Root (.)' : z.zoneName}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <button
+            type="button"
+            data-testid="zones-toggle-all"
+            onClick={() => setAllZonesCollapsed(!anyZoneCollapsed)}
+            className="inline-flex items-center gap-1 shrink-0 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-slate-600 dark:text-slate-300 cursor-pointer"
+          >
+            {anyZoneCollapsed ? (
+              <>
+                <ChevronDown className="w-3.5 h-3.5 text-cyan-500" />
+                <span>Expand All</span>
+              </>
+            ) : (
+              <>
+                <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+                <span>Collapse All</span>
+              </>
+            )}
+          </button>
+        </div>
+      )}
+
       {snapshot.zones.map((zone) => {
-        const singleZoneFilename = `${
-          zone.zoneName === '.'
-            ? 'root'
-            : displayFqdn(zone.zoneName).replace(/[^a-z0-9.-]/gi, '_')
-        }.zone`;
+        const slug = zoneDomSlug(zone.zoneName);
+        const singleZoneFilename = `${slug}.zone`;
+        const collapsed = isZoneCollapsed(zone);
         return (
         <div
           key={zone.zoneName}
-          className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 overflow-hidden"
+          id={`zone-card-${slug}`}
+          data-testid={`zone-card-${slug}`}
+          data-collapsed={collapsed ? 'true' : 'false'}
+          className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 overflow-hidden scroll-mt-16 md:scroll-mt-44"
         >
           {/* Zone Header */}
-          <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900 flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <Globe className="w-4 h-4 text-cyan-500" />
-              <span className="font-mono font-bold text-base text-slate-900 dark:text-slate-100">
+          <div
+            className={`px-4 sm:px-5 py-3.5 ${
+              collapsed ? '' : 'border-b border-slate-200 dark:border-slate-800'
+            } bg-slate-50/70 dark:bg-slate-900 flex flex-wrap items-center justify-between gap-3`}
+          >
+            <button
+              type="button"
+              data-testid={`zone-toggle-${slug}`}
+              aria-expanded={!collapsed}
+              onClick={() => toggleZone(zone)}
+              className="flex flex-wrap items-center gap-2.5 text-left min-w-0 flex-1 cursor-pointer group"
+            >
+              {collapsed ? (
+                <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0 transition-colors" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0 transition-colors" />
+              )}
+              <Globe className="w-4 h-4 text-cyan-500 shrink-0" />
+              <span className="font-mono font-bold text-sm sm:text-base text-slate-900 dark:text-slate-100 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">
                 {zone.zoneName === '.' ? '. (Root Zone)' : zone.zoneName}
               </span>
               <span className="rounded bg-slate-200 dark:bg-slate-800 px-2 py-0.5 font-mono text-[11px] text-slate-600 dark:text-slate-300">
                 {zone.nsecMode}
               </span>
-            </div>
+              {collapsed && (
+                <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                  {zone.nameservers.length} NS · {zone.dnskeys.length} DNSKEY
+                  {zone.dsVerifications.length > 0 ? ` · ${zone.dsVerifications.length} DS` : ''}
+                </span>
+              )}
+            </button>
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
@@ -193,7 +388,8 @@ export function ZonesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
             </div>
           </div>
 
-          <div className="p-5 space-y-5">
+          {!collapsed && (
+          <div className="p-4 sm:p-5 space-y-5">
             <p className="text-xs text-slate-600 dark:text-slate-300">{zone.statusReason}</p>
 
             {/* SOA + Authoritative Nameservers Grid */}
@@ -801,6 +997,7 @@ export function ZonesPanel({ snapshot }: { snapshot: AnalysisSnapshot }) {
               </div>
             )}
           </div>
+          )}
         </div>
         );
       })}
