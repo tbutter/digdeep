@@ -275,7 +275,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexCss).toContain('env(safe-area-inset-bottom');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v35');
+    expect(swCode).toContain('digdeep-shell-v36');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -2470,9 +2470,21 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(navScrollWrapper).not.toBeNull();
       const navScrollInner = navScrollWrapper!.querySelector('.overflow-x-auto') as HTMLDivElement | null;
       expect(navScrollInner).not.toBeNull();
-      Object.defineProperty(navScrollInner!, 'scrollWidth', { value: 780, configurable: true });
-      Object.defineProperty(navScrollInner!, 'clientWidth', { value: 340, configurable: true });
-      Object.defineProperty(navScrollInner!, 'scrollLeft', { value: 60, configurable: true });
+      Object.defineProperty(navScrollInner!, 'scrollWidth', {
+        value: 780,
+        writable: true,
+        configurable: true,
+      });
+      Object.defineProperty(navScrollInner!, 'clientWidth', {
+        value: 340,
+        writable: true,
+        configurable: true,
+      });
+      Object.defineProperty(navScrollInner!, 'scrollLeft', {
+        value: 60,
+        writable: true,
+        configurable: true,
+      });
       await act(async () => {
         navScrollInner!.dispatchEvent(new dom.window.Event('scroll', { bubbles: true }));
       });
@@ -2518,6 +2530,60 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
         reopenedBackdrop!.click();
       });
       expect(container.querySelector('[data-testid="settings-modal"]')).toBeNull();
+
+      // Verify #55 floating mobile quick-return / tab pill on deep scrolls (> 420px)
+      expect(container.querySelector('[data-testid="mobile-floating-nav-pill"]')).toBeNull();
+      let scrolledToTop = false;
+      Object.defineProperty(dom.window, 'scrollY', { value: 600, configurable: true });
+      Object.defineProperty(dom.window, 'scrollTo', {
+        value: (opts?: ScrollToOptions | number) => {
+          if (typeof opts === 'object' && opts?.top === 0) scrolledToTop = true;
+        },
+        configurable: true,
+      });
+      await act(async () => {
+        dom.window.dispatchEvent(new dom.window.Event('scroll'));
+      });
+      const floatingPill = container.querySelector('[data-testid="mobile-floating-nav-pill"]');
+      expect(floatingPill).not.toBeNull();
+      const floatingTopBtn = floatingPill!.querySelector(
+        '[data-testid="floating-scroll-top-btn"]'
+      ) as HTMLButtonElement | null;
+      expect(floatingTopBtn).not.toBeNull();
+      await act(async () => {
+        floatingTopBtn!.click();
+      });
+      expect(scrolledToTop).toBe(true);
+
+      // Switch to History tab via floating pill and verify #55 full-card tap target + stopPropagation on action buttons
+      const floatingHistoryBtn = floatingPill!.querySelector(
+        '[data-testid="floating-tab-history"]'
+      ) as HTMLButtonElement | null;
+      expect(floatingHistoryBtn).not.toBeNull();
+      await act(async () => {
+        floatingHistoryBtn!.click();
+      });
+      const historyCard = container.querySelector(
+        '[data-testid="history-snapshot-card"]'
+      ) as HTMLDivElement | null;
+      expect(historyCard).not.toBeNull();
+      const pinBtn = historyCard!.querySelector(
+        '[data-testid="history-pin-btn"]'
+      ) as HTMLButtonElement | null;
+      expect(pinBtn).not.toBeNull();
+      expect(pinBtn!.className).toContain('min-w-[40px] min-h-[40px]');
+
+      // Clicking Pin must NOT select/leave the History tab (stopPropagation)
+      await act(async () => {
+        pinBtn!.click();
+      });
+      expect(container.querySelector('[data-testid="history-snapshot-card"]')).not.toBeNull();
+
+      // Clicking the snapshot card body itself selects the snapshot and navigates out of History tab
+      await act(async () => {
+        historyCard!.click();
+      });
+      expect(container.querySelector('[data-testid="history-snapshot-card"]')).toBeNull();
 
       await act(async () => {
         root.unmount();

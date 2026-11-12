@@ -23,6 +23,22 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+function formatDiffOptionLabel(s: AnalysisSnapshot): string {
+  const target = s.queriedEmail ?? s.queriedIp ?? s.displayDomain;
+  const tag =
+    s.mode === 'mail'
+      ? 'MAIL'
+      : s.mode === 'web'
+        ? 'WEB'
+        : s.mode === 'consensus'
+          ? 'CONSENSUS'
+          : s.queryTypes.slice(0, 3).join(',');
+  const d = new Date(s.capturedAt);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const shortStamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${target} [${tag}] · ${shortStamp} (${STATUS_META[s.overallStatus].label})`;
+}
+
 export function HistoryPanel({
   snapshots,
   activeSnapshotId,
@@ -195,36 +211,34 @@ export function HistoryPanel({
       {showDiff && snapshots.length >= 2 && (
         <div className="rounded-xl border border-cyan-500/40 bg-white dark:bg-slate-900/90 p-4 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-            <div className="flex-1">
+            <div className="flex-1 min-w-0">
               <label className="block text-[10px] font-semibold uppercase text-slate-500 mb-1">
                 Snapshot A
               </label>
               <select
                 value={diffAId}
                 onChange={(e) => setDiffAId(e.target.value)}
-                className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-1.5 text-base sm:text-xs font-mono"
+                className="w-full min-w-0 truncate rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-1.5 text-base sm:text-xs font-mono"
               >
                 {snapshots.map((s) => (
                   <option key={s.id} value={s.id}>
-                    {s.displayDomain} [{s.queryTypes.join(',')}] —{' '}
-                    {new Date(s.capturedAt).toLocaleString()} ({STATUS_META[s.overallStatus].label})
+                    {formatDiffOptionLabel(s)}
                   </option>
                 ))}
               </select>
             </div>
-            <div className="flex-1">
+            <div className="flex-1 min-w-0">
               <label className="block text-[10px] font-semibold uppercase text-slate-500 mb-1">
                 Snapshot B
               </label>
               <select
                 value={diffBId}
                 onChange={(e) => setDiffBId(e.target.value)}
-                className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-1.5 text-base sm:text-xs font-mono"
+                className="w-full min-w-0 truncate rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-1.5 text-base sm:text-xs font-mono"
               >
                 {snapshots.map((s) => (
                   <option key={s.id} value={s.id}>
-                    {s.displayDomain} [{s.queryTypes.join(',')}] —{' '}
-                    {new Date(s.capturedAt).toLocaleString()} ({STATUS_META[s.overallStatus].label})
+                    {formatDiffOptionLabel(s)}
                   </option>
                 ))}
               </select>
@@ -399,18 +413,23 @@ export function HistoryPanel({
             return (
               <div
                 key={snap.id}
-                className={`rounded-xl border p-4 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                data-testid="history-snapshot-card"
+                onClick={() => onSelectSnapshot(snap)}
+                className={`group rounded-xl border p-4 transition-colors cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
                   isCurrent
                     ? 'border-cyan-500 bg-cyan-500/5'
-                    : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-slate-300 dark:hover:border-slate-700'
+                    : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-cyan-500/50 dark:hover:border-cyan-500/50'
                 }`}
               >
                 <div className="space-y-1 min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => onSelectSnapshot(snap)}
-                      className="font-mono font-bold text-sm text-slate-900 dark:text-slate-100 hover:text-cyan-500 cursor-pointer"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onSelectSnapshot(snap);
+                      }}
+                      className="font-mono font-bold text-sm text-left text-slate-900 dark:text-slate-100 group-hover:text-cyan-500 hover:text-cyan-500 cursor-pointer break-all"
                     >
                       {snap.queriedEmail ?? snap.queriedIp ?? snap.displayDomain}
                     </button>
@@ -457,29 +476,41 @@ export function HistoryPanel({
                 <div className="flex items-center gap-1.5 shrink-0">
                   <button
                     type="button"
-                    onClick={() => onSelectSnapshot(snap)}
-                    className="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 hover:bg-cyan-500/25 cursor-pointer"
+                    data-testid="history-open-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSelectSnapshot(snap);
+                    }}
+                    className="min-h-[40px] sm:min-h-0 px-3 sm:px-2.5 py-2 sm:py-1.5 inline-flex items-center justify-center rounded-lg text-xs font-medium bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 hover:bg-cyan-500/25 cursor-pointer"
                   >
                     Open
                   </button>
                   <button
                     type="button"
-                    onClick={() =>
+                    data-testid="history-reprobe-btn"
+                    aria-label="Re-probe live via DoH"
+                    onClick={(e) => {
+                      e.stopPropagation();
                       onReprobe(
                         snap.queriedEmail ?? snap.queriedIp ?? snap.displayDomain,
                         snap.queryTypes,
                         snap.mode
-                      )
-                    }
-                    className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 cursor-pointer"
+                      );
+                    }}
+                    className="min-w-[40px] min-h-[40px] sm:min-w-0 sm:min-h-0 p-2.5 sm:p-1.5 inline-flex items-center justify-center rounded-lg border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 cursor-pointer"
                     title="Re-probe live via DoH"
                   >
                     <RefreshCw className="w-3.5 h-3.5" />
                   </button>
                   <button
                     type="button"
-                    onClick={() => onTogglePin(snap.id, !snap.pinned)}
-                    className={`p-1.5 rounded-lg border cursor-pointer ${
+                    data-testid="history-pin-btn"
+                    aria-label={snap.pinned ? 'Unpin snapshot' : 'Pin snapshot to prevent eviction'}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onTogglePin(snap.id, !snap.pinned);
+                    }}
+                    className={`min-w-[40px] min-h-[40px] sm:min-w-0 sm:min-h-0 p-2.5 sm:p-1.5 inline-flex items-center justify-center rounded-lg border cursor-pointer ${
                       snap.pinned
                         ? 'border-amber-500/40 bg-amber-500/15 text-amber-500'
                         : 'border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400'
@@ -490,21 +521,29 @@ export function HistoryPanel({
                   </button>
                   <button
                     type="button"
-                    onClick={() =>
+                    data-testid="history-export-btn"
+                    aria-label="Export snapshot JSON"
+                    onClick={(e) => {
+                      e.stopPropagation();
                       exportJson(
                         snap,
                         `digdeep-${snap.displayDomain.replace(/[^a-z0-9.-]/gi, '_')}-${snap.capturedAt}.json`
-                      )
-                    }
-                    className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 cursor-pointer"
+                      );
+                    }}
+                    className="min-w-[40px] min-h-[40px] sm:min-w-0 sm:min-h-0 p-2.5 sm:p-1.5 inline-flex items-center justify-center rounded-lg border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 cursor-pointer"
                     title="Export snapshot JSON"
                   >
                     <Download className="w-3.5 h-3.5" />
                   </button>
                   <button
                     type="button"
-                    onClick={() => onDelete(snap.id)}
-                    className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-800 hover:bg-rose-500/10 hover:text-rose-500 text-slate-400 cursor-pointer"
+                    data-testid="history-delete-btn"
+                    aria-label="Delete from localStorage"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDelete(snap.id);
+                    }}
+                    className="min-w-[40px] min-h-[40px] sm:min-w-0 sm:min-h-0 p-2.5 sm:p-1.5 inline-flex items-center justify-center rounded-lg border border-slate-200 dark:border-slate-800 hover:bg-rose-500/10 hover:text-rose-500 text-slate-400 cursor-pointer"
                     title="Delete from localStorage"
                   >
                     <Trash2 className="w-3.5 h-3.5" />

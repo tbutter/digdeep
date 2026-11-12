@@ -1,4 +1,4 @@
-const CACHE_NAME = 'digdeep-shell-v35';
+const CACHE_NAME = 'digdeep-shell-v36';
 const CORE_SHELL = [
   './',
   './index.html',
