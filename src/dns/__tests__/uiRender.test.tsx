@@ -290,7 +290,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexCss).toContain('env(safe-area-inset-bottom');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v41');
+    expect(swCode).toContain('digdeep-shell-v42');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -4031,10 +4031,134 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
         });
       } finally {
         if (prevOnline) Object.defineProperty(globalThis.navigator, 'onLine', prevOnline);
-        if (prevWindow) Object.defineProperty(globalThis, 'window', prevWindow);
+        if (prevWindow) Object.defineProperty(globalThis.window ? globalThis : globalThis, 'window', prevWindow);
         if (prevDocument) Object.defineProperty(globalThis, 'document', prevDocument);
       }
     },
     30_000
   );
+
+  it('renders #58 End-to-End IPv6-Only Readiness Matrix in ZonesPanel and actionable remediation callouts in AuditPanel', () => {
+    const ipv6Fixture: AnalysisSnapshot = {
+      id: 'snap-ipv6-58',
+      version: 18,
+      targetName: 'legacy.example.com.',
+      displayDomain: 'legacy.example.com',
+      queryTypes: ['A', 'AAAA'],
+      dohEndpoint: 'https://1.1.1.1/dns-query',
+      capturedAt: 1700000000000,
+      validatedAt: 1700000000000,
+      durationMs: 95,
+      overallStatus: 'secure',
+      overallSummary: 'Chain of trust verified.',
+      zones: [
+        {
+          zoneName: '.',
+          parentZone: null,
+          depth: 0,
+          status: 'secure',
+          statusReason: 'Anchored at root',
+          nsecMode: 'NSEC',
+          dnskeys: [],
+          dsVerifications: [],
+          trustAnchorMatches: [],
+          rrsets: [],
+          negativeNodes: [],
+          nameservers: [
+            {
+              hostname: 'a.root-servers.net.',
+              ipv4: ['198.41.0.4'],
+              ipv6: ['2001:503:ba3e::2:30'],
+              status: 'ok',
+              addressStack: 'dual-stack',
+            },
+            {
+              hostname: 'b.root-servers.net.',
+              ipv4: ['170.247.170.2'],
+              ipv6: ['2801:1b8:10::b'],
+              status: 'ok',
+              addressStack: 'dual-stack',
+            },
+          ],
+        },
+        {
+          zoneName: 'com.',
+          parentZone: '.',
+          depth: 1,
+          status: 'secure',
+          statusReason: 'Signed TLD',
+          nsecMode: 'NSEC3-OPTOUT',
+          dnskeys: [],
+          dsVerifications: [],
+          trustAnchorMatches: [],
+          rrsets: [],
+          negativeNodes: [],
+          nameservers: [
+            {
+              hostname: 'a.gtld-servers.net.',
+              ipv4: ['192.5.6.30'],
+              ipv6: [],
+              status: 'ok',
+              addressStack: 'ipv4-only',
+            },
+          ],
+        },
+        {
+          zoneName: 'example.com.',
+          parentZone: 'com.',
+          depth: 2,
+          status: 'secure',
+          statusReason: 'Signed leaf',
+          nsecMode: 'NSEC',
+          dnskeys: [],
+          dsVerifications: [],
+          trustAnchorMatches: [],
+          rrsets: [],
+          negativeNodes: [],
+          nameservers: [
+            {
+              hostname: 'ns1.example.com.',
+              ipv4: ['93.184.215.10'],
+              ipv6: ['64:ff9b::5db8:d70a'],
+              status: 'ok',
+              addressStack: 'ipv4-only',
+            },
+          ],
+        },
+      ],
+      cnameEdges: [],
+      findings: [
+        {
+          id: 'warn-ipv6-delegation-gap-in-chain-example.com.',
+          severity: 'warning',
+          code: 'IPV6_NS_DELEGATION_GAP',
+          title: 'IPv6 delegation bottleneck at example.com: 0 of 1 authoritative nameservers have AAAA',
+          detail: 'Pure IPv6-only iterative resolvers stall at this zone cut.',
+          remediation:
+            'Configure globally routable IPv6 (2000::/3) AAAA records on at least two authoritative nameservers for example.com and register AAAA glue at com.',
+          rfc: 'RFC 3901 / BCP 91',
+          zone: 'example.com.',
+        },
+      ],
+      queries: [],
+      trustAnchorsUsed: [],
+    };
+
+    const zonesHtml = renderToStaticMarkup(<ZonesPanel snapshot={ipv6Fixture} />);
+    expect(zonesHtml).toContain('data-testid="ipv6-readiness-matrix"');
+    expect(zonesHtml).toContain('data-testid="ipv6-readiness-verdict-badge"');
+    expect(zonesHtml).toContain('IPv4-Only Bottleneck');
+    expect(zonesHtml).toContain('Dual-Stack (2v4 / 2v6)');
+    expect(zonesHtml).toContain('IPv4-Only Bottleneck (1v4 / 0v6)');
+    expect(zonesHtml).toContain('data-testid="ipv6-dns64-badge"');
+    expect(zonesHtml).toContain('DNS64 64:ff9b::/96: 64:ff9b::5db8:d70a → 93.184.215.10');
+
+    const auditHtml = renderToStaticMarkup(
+      <AuditPanel snapshot={ipv6Fixture} onJumpToGraphTarget={() => {}} />
+    );
+    expect(auditHtml).toContain('IPV6_NS_DELEGATION_GAP');
+    expect(auditHtml).toContain('data-testid="audit-remediation-ipv6_ns_delegation_gap"');
+    expect(auditHtml).toContain('Remediation:');
+    expect(auditHtml).toContain('register AAAA glue at com');
+  });
 });

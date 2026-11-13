@@ -23,7 +23,8 @@ import {
   formatZoneAsZonefile,
 } from '../dns/digFormat';
 import { displayFqdn, normalizeFqdn } from '../dns/encoding';
-import type { AnalysisSnapshot, ZoneAnalysis } from '../dns/types';
+import { evaluateIpv6ReadinessAudit } from '../dns/ipv6Readiness';
+import type { AnalysisSnapshot, Ipv6DelegationHopAudit, ZoneAnalysis } from '../dns/types';
 import { IpHoverBadge, RpkiStatusBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
 import { CryptoBlob } from './CryptoBlob';
 import { StatusBadge } from './StatusBadge';
@@ -58,6 +59,13 @@ export function isHealthyIntermediateParentZone(
     return false;
   }
   if (zone.nsDiversity?.dualStackReady === false) return false;
+  if (
+    snapshot.ipv6Readiness &&
+    (snapshot.ipv6Readiness.bottleneckZones.includes(zone.zoneName) ||
+      snapshot.ipv6Readiness.singleIpv6NsZones.includes(zone.zoneName))
+  ) {
+    return false;
+  }
   if (zone.nsConsistency && !zone.nsConsistency.consistent) return false;
   if (zone.cdsRollover?.present && zone.cdsRollover.status !== 'in-sync') return false;
   if (zone.zonemd?.present && zone.zonemd.status !== 'valid-sync') return false;
@@ -68,6 +76,22 @@ export function isHealthyIntermediateParentZone(
 
 function zoneDomSlug(zoneName: string): string {
   return zoneName === '.' ? 'root' : displayFqdn(zoneName).replace(/[^a-z0-9.-]/gi, '_');
+}
+
+function ipv6HopBadgeClasses(status: Ipv6DelegationHopAudit['status']): string {
+  if (status === 'dual-stack') {
+    return 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30';
+  }
+  if (status === 'ipv4-only-bottleneck') {
+    return 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/35';
+  }
+  if (status === 'ipv6-single-ns') {
+    return 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/35';
+  }
+  if (status === 'ipv6-only' || status === 'dual-stack-partial-v4') {
+    return 'bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border-cyan-500/30';
+  }
+  return 'bg-slate-200/70 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-300 dark:border-slate-700';
 }
 
 export function ZonesPanel({
@@ -160,6 +184,30 @@ export function ZonesPanel({
       }
     }
   };
+
+  const ipv6Audit = useMemo(
+    () =>
+      snapshot.ipv6Readiness ??
+      evaluateIpv6ReadinessAudit({
+        targetName: snapshot.targetName,
+        queriedIp: snapshot.queriedIp,
+        queriedEmail: snapshot.queriedEmail,
+        zones: snapshot.zones,
+        cnameEdges: snapshot.cnameEdges,
+        queries: snapshot.queries,
+        mailAnalysis: snapshot.mailAnalysis,
+        webAnalysis: snapshot.webAnalysis,
+      }).audit,
+    [snapshot]
+  );
+
+  const ipv6HopByZone = useMemo(() => {
+    const map = new Map<string, Ipv6DelegationHopAudit>();
+    for (const h of ipv6Audit.hops) {
+      map.set(h.zoneName, h);
+    }
+    return map;
+  }, [ipv6Audit]);
 
   const fullZonefileText = useMemo(
     () =>
@@ -255,6 +303,166 @@ export function ZonesPanel({
         )}
       </div>
 
+      {/* #58 End-to-End IPv6-Only Iterative Resolution & Delegation Glue Readiness Matrix */}
+      {(ipv6Audit.probedHopCount > 0 || ipv6Audit.dns64Detections.length > 0) && (
+        <div
+          data-testid="ipv6-readiness-matrix"
+          className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/80 p-4 space-y-3"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Globe className="w-4 h-4 text-cyan-500 shrink-0" />
+              <span className="font-semibold text-xs sm:text-sm text-slate-900 dark:text-slate-100">
+                End-to-End IPv6-Only Authoritative Resolution &amp; Glue Readiness
+              </span>
+              <span className="hidden sm:inline rounded bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 px-1.5 py-0.5 font-mono text-[10px]">
+                RFC 3901 · RFC 2182 · RFC 6052
+              </span>
+            </div>
+            <span
+              data-testid="ipv6-readiness-verdict-badge"
+              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-mono text-[11px] font-semibold ${
+                ipv6Audit.overallStatus === 'ipv6-ready'
+                  ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+                  : ipv6Audit.overallStatus === 'broken-ipv6-path'
+                    ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/35'
+                    : 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/35'
+              }`}
+            >
+              {ipv6Audit.overallStatus === 'ipv6-ready' ? (
+                <>
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>IPv6-Only Iterative Ready</span>
+                </>
+              ) : ipv6Audit.overallStatus === 'broken-ipv6-path' ? (
+                <>
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  <span>IPv4-Only Bottleneck</span>
+                </>
+              ) : ipv6Audit.overallStatus === 'dns64-synthesized' ? (
+                <>
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  <span>DNS64 Synthesized (No Native v6)</span>
+                </>
+              ) : (
+                <>
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  <span>Single-v6 NS Redundancy Warning</span>
+                </>
+              )}
+            </span>
+          </div>
+
+          <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+            {ipv6Audit.summary}
+          </p>
+
+          {/* Delegation Hop Matrix */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+            {[...ipv6Audit.hops, ...ipv6Audit.oobNsZones].map((hop) => {
+              const hopSlug = zoneDomSlug(hop.zoneName);
+              const matchingZone = snapshot.zones.find((z) => z.zoneName === hop.zoneName);
+              return (
+                <div
+                  key={`${hop.role}-${hop.zoneName}`}
+                  data-testid={`ipv6-matrix-hop-${hop.role}-${hopSlug}`}
+                  onClick={matchingZone ? () => jumpToZone(matchingZone) : undefined}
+                  className={`rounded-lg border p-2.5 space-y-1.5 transition-colors ${
+                    hop.status === 'ipv4-only-bottleneck'
+                      ? 'border-rose-500/40 bg-rose-500/5'
+                      : hop.status === 'ipv6-single-ns'
+                        ? 'border-amber-500/40 bg-amber-500/5'
+                        : 'border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50'
+                  } ${matchingZone ? 'hover:border-cyan-500 cursor-pointer' : ''}`}
+                >
+                  <div className="flex items-center justify-between gap-1.5">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="font-mono font-semibold text-xs text-slate-900 dark:text-slate-100 truncate">
+                        {hop.zoneName === '.' ? '. (Root)' : hop.zoneName}
+                      </span>
+                      {hop.role === 'oob-ns-zone' && (
+                        <span
+                          className="shrink-0 rounded bg-purple-500/15 border border-purple-500/30 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-purple-700 dark:text-purple-300"
+                          title={`Out-of-bailiwick NS parent zone referenced by ${hop.referencedByZones?.map(displayFqdn).join(', ') ?? 'child zone'}`}
+                        >
+                          OOB NS Zone
+                        </span>
+                      )}
+                      {hop.role === 'cname-chain' && (
+                        <span className="shrink-0 rounded bg-cyan-500/10 px-1.5 py-0.5 font-mono text-[9px] text-cyan-700 dark:text-cyan-300">
+                          CNAME Hop
+                        </span>
+                      )}
+                    </div>
+                    <span
+                      className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold ${ipv6HopBadgeClasses(hop.status)}`}
+                    >
+                      {hop.badgeLabel}
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono text-slate-600 dark:text-slate-300">
+                    <span>
+                      {hop.probedNsCount > 0
+                        ? `${hop.ipv4NsCount}v4 / ${hop.ipv6NsCount}v6 (${hop.probedNsCount}/${hop.totalNsCount} NS probed)`
+                        : `${hop.totalNsCount} NS (unprobed)`}
+                    </span>
+                    {hop.inBailiwickNsCount > 0 && (
+                      <span
+                        className="rounded bg-slate-200/80 dark:bg-slate-800 px-1.5 py-0.5 text-[9px] text-slate-600 dark:text-slate-300"
+                        title={`${hop.inBailiwickNsCount} in-bailiwick NS under ${hop.zoneName} require parent glue`}
+                      >
+                        {hop.inBailiwickNsCount} in-bailiwick glue
+                      </span>
+                    )}
+                    {hop.ipv6Asns.length > 0 && (
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[9px] font-semibold ${
+                          hop.singleIpv6Asn && hop.overallAsns.length >= 2
+                            ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30'
+                            : 'bg-slate-200/80 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                        }`}
+                      >
+                        {hop.ipv6Asns.length === 1
+                          ? `v6 AS${hop.ipv6Asns[0].asn}`
+                          : `${hop.ipv6Asns.length} v6 ASNs`}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Leaf Web / HTTPS / Mail IPv6 Parity & DNS64 Alerts */}
+          {(ipv6Audit.leaf.evaluated || ipv6Audit.dns64Detections.length > 0) && (
+            <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-100 dark:border-slate-800/80 text-[11px] font-mono">
+              {ipv6Audit.leaf.evaluated && (
+                <span className="text-slate-600 dark:text-slate-300">
+                  <span className="font-semibold text-slate-800 dark:text-slate-100">
+                    Leaf Parity ({displayFqdn(ipv6Audit.leaf.effectiveOwner)}):{' '}
+                  </span>
+                  {ipv6Audit.leaf.summary}
+                </span>
+              )}
+              {ipv6Audit.dns64Detections.map((det) => (
+                <span
+                  key={`${det.recordContext}-${det.ownerName}-${det.canonicalIp}`}
+                  data-testid="ipv6-dns64-badge"
+                  className="inline-flex items-center gap-1 rounded border border-amber-500/35 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-300"
+                >
+                  <AlertTriangle className="w-3 h-3 shrink-0" />
+                  <span>
+                    DNS64 {det.prefixCidr}: {det.canonicalIp}
+                    {det.embeddedIpv4 ? ` → ${det.embeddedIpv4}` : ''} ({det.recordContext})
+                  </span>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {snapshot.zones.length > 1 && (
         <div
           data-testid="zones-jump-bar"
@@ -314,6 +522,7 @@ export function ZonesPanel({
         const slug = zoneDomSlug(zone.zoneName);
         const singleZoneFilename = `${slug}.zone`;
         const collapsed = isZoneCollapsed(zone);
+        const hopAudit = ipv6HopByZone.get(zone.zoneName);
         return (
         <div
           key={zone.zoneName}
@@ -347,6 +556,15 @@ export function ZonesPanel({
               <span className="rounded bg-slate-200 dark:bg-slate-800 px-2 py-0.5 font-mono text-[11px] text-slate-600 dark:text-slate-300">
                 {zone.nsecMode}
               </span>
+              {hopAudit && hopAudit.status !== 'unprobed' && (
+                <span
+                  data-testid={`zone-ipv6-hop-badge-${slug}`}
+                  title={hopAudit.summary}
+                  className={`rounded border px-2 py-0.5 font-mono text-[10px] font-semibold ${ipv6HopBadgeClasses(hopAudit.status)}`}
+                >
+                  {hopAudit.badgeLabel} ({hopAudit.ipv4NsCount}v4 / {hopAudit.ipv6NsCount}v6)
+                </span>
+              )}
               {collapsed && (
                 <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
                   {zone.nameservers.length} NS · {zone.dnskeys.length} DNSKEY

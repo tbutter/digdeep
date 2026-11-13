@@ -49,6 +49,7 @@ import {
   evaluateEmailDaneFromSnapshotData,
 } from './emailDane';
 import { evaluateMailFromSnapshotData } from './mailAnalyzer';
+import { evaluateIpv6ReadinessAudit } from './ipv6Readiness';
 import { evaluateWebFromSnapshotData } from './webAnalyzer';
 import type {
   AnalysisMode,
@@ -95,7 +96,7 @@ import type {
   ZonemdRecordDetail,
 } from './types';
 
-export const SNAPSHOT_ENGINE_VERSION = 17;
+export const SNAPSHOT_ENGINE_VERSION = 18;
 
 export interface AnalyzeOptions extends DohClientOptions {
   queryTypes?: string[];
@@ -116,8 +117,10 @@ export function findLog(
 }
 
 /**
- * Selects authoritative nameserver hostnames to probe for IPv4 (`A`) & IPv6 (`AAAA`) across all
- * non-TLD/non-root discovered zones (`depth >= 2`), plus `targetName` itself when querying `.` or a TLD directly.
+ * Selects authoritative nameserver hostnames to probe for IPv4 (`A`) & IPv6 (`AAAA`) across:
+ * 1. Custom/leaf discovered zones (`depth >= 2`, or `targetName` itself) — up to 13 NS hosts per zone.
+ * 2. Ancestor Root (`.`) and TLD (`depth === 1`) delegation hops — up to 4 representative NS hosts per zone
+ *    so end-to-end IPv6-only iterative resolution readiness is audited at every hop in `snapshot.zones`.
  */
 export function collectZoneNameserverHostsToProbe(
   zoneList: string[],
@@ -125,32 +128,248 @@ export function collectZoneNameserverHostsToProbe(
   targetName: string
 ): string[] {
   const normTarget = normalizeFqdn(targetName);
-  const candidateZones = [...zoneList]
+  const customZones = [...zoneList]
     .filter((z) => {
       const normZ = normalizeFqdn(z);
       return getDomainHierarchy(normZ).length >= 3 || normZ === normTarget;
     })
     .sort((a, b) => getDomainHierarchy(b).length - getDomainHierarchy(a).length);
 
+  const ancestorZones = [...zoneList]
+    .filter((z) => {
+      const normZ = normalizeFqdn(z);
+      return getDomainHierarchy(normZ).length < 3 && normZ !== normTarget;
+    })
+    .sort((a, b) => getDomainHierarchy(b).length - getDomainHierarchy(a).length);
+
   const nsHosts = new Set<string>();
-  for (const z of candidateZones) {
+  for (const z of customZones) {
     const nsLog = findLog(logs, z, RR_TYPES.NS, true);
     let perZoneCount = 0;
     for (const rec of nsLog?.packet.answers ?? []) {
       if (rec.type === RR_TYPES.NS && rec.parsed.kind === 'GENERIC' && rec.parsed.target) {
         nsHosts.add(normalizeFqdn(rec.parsed.target));
         perZoneCount++;
-        if (perZoneCount >= 13 || nsHosts.size >= 26) break;
+        if (perZoneCount >= 13 || nsHosts.size >= 28) break;
       }
     }
-    if (nsHosts.size >= 26) break;
+    if (nsHosts.size >= 28) break;
   }
+
+  for (const z of ancestorZones) {
+    const nsLog = findLog(logs, z, RR_TYPES.NS, true);
+    let perZoneCount = 0;
+    for (const rec of nsLog?.packet.answers ?? []) {
+      if (rec.type === RR_TYPES.NS && rec.parsed.kind === 'GENERIC' && rec.parsed.target) {
+        nsHosts.add(normalizeFqdn(rec.parsed.target));
+        perZoneCount++;
+        if (perZoneCount >= 4 || nsHosts.size >= 36) break;
+      }
+    }
+    if (nsHosts.size >= 36) break;
+  }
+
   return Array.from(nsHosts);
 }
 
 /**
- * Resolves IPv4 (`A`) and IPv6 (`AAAA`) addresses for leaf/custom zone authoritative nameservers
- * so RFC 2181 §10.3 CNAME, bogon IP, and RFC 3901 dual-stack readiness checks run across all modes.
+ * Discovers and probes authoritative `NS` (`A` + `AAAA`) for distinct out-of-bailiwick DNS provider zones
+ * (e.g. `cloudflare.com.` or `dnsvendor.net.` when `example.org.` delegates to `ns1.dnsvendor.net.`)
+ * so pure IPv6-only iterative resolution bottlenecks in external NS parent zones are detected.
+ */
+export async function probeOutOfBailiwickNsZones(
+  session: DohSession,
+  zoneList: string[],
+  targetName: string
+): Promise<void> {
+  const normTarget = normalizeFqdn(targetName);
+  const normZones = zoneList.map(normalizeFqdn);
+  const inChainCustomZones = normZones.filter(
+    (z) => getDomainHierarchy(z).length >= 3 || (z === normTarget && z !== '.')
+  );
+  if (inChainCustomZones.length === 0) return;
+
+  const logsBefore = session.getLogs();
+  const parentCandidates = new Set<string>();
+
+  for (const z of inChainCustomZones) {
+    const nsLog = findLog(logsBefore, z, RR_TYPES.NS, true);
+    for (const rec of nsLog?.packet.answers ?? []) {
+      if (rec.type !== RR_TYPES.NS || rec.parsed.kind !== 'GENERIC' || !rec.parsed.target) {
+        continue;
+      }
+      const host = normalizeFqdn(rec.parsed.target);
+      // Skip if host is already in-bailiwick of any custom/leaf zone in zoneList
+      if (inChainCustomZones.some((cz) => isSubdomainOrEqual(host, cz))) {
+        continue;
+      }
+      const hostHier = getDomainHierarchy(host);
+      if (hostHier.length < 4) continue; // e.g. '.', 'net.', 'example.net.', 'ns1.example.net.'
+      const parentCand = hostHier[hostHier.length - 2]; // strip leftmost hostname label
+      if (
+        parentCand.endsWith('root-servers.net.') ||
+        parentCand.endsWith('gtld-servers.net.') ||
+        normZones.includes(parentCand)
+      ) {
+        continue;
+      }
+      parentCandidates.add(parentCand);
+      if (parentCandidates.size >= 4) break;
+    }
+    if (parentCandidates.size >= 4) break;
+  }
+
+  if (parentCandidates.size === 0) return;
+
+  const soaLogs = await Promise.all(
+    Array.from(parentCandidates).map((cand) =>
+      session
+        .query(cand, RR_TYPES.SOA, {
+          cd: true,
+          doBit: false,
+          purpose: `OOB NS zone SOA (${cand})`,
+        })
+        .catch(() => undefined)
+    )
+  );
+
+  const oobZones = new Set<string>();
+  for (const sLog of soaLogs) {
+    if (!sLog) continue;
+    const soaRec = [...sLog.packet.answers, ...sLog.packet.authorities].find(
+      (r) => r.type === RR_TYPES.SOA
+    );
+    if (!soaRec) continue;
+    const apex = normalizeFqdn(soaRec.name);
+    if (
+      apex !== '.' &&
+      getDomainHierarchy(apex).length >= 3 &&
+      !normZones.includes(apex)
+    ) {
+      oobZones.add(apex);
+      if (oobZones.size >= 4) break;
+    }
+  }
+
+  if (oobZones.size === 0) return;
+
+  const oobNsLogs = await Promise.all(
+    Array.from(oobZones).map((oz) =>
+      session
+        .query(oz, RR_TYPES.NS, {
+          cd: true,
+          doBit: false,
+          purpose: `OOB NS zone NS (${oz})`,
+        })
+        .catch(() => undefined)
+    )
+  );
+
+  const alreadyProbedHosts = new Set(
+    session
+      .getLogs()
+      .filter((l) => l.purpose.startsWith('Nameserver IP'))
+      .map((l) => normalizeFqdn(l.qname))
+  );
+  const oobNsHostsToProbe = new Set<string>();
+  for (const nLog of oobNsLogs) {
+    if (!nLog) continue;
+    let perOobCount = 0;
+    for (const rec of [...nLog.packet.answers, ...nLog.packet.authorities]) {
+      if (rec.type === RR_TYPES.NS && rec.parsed.kind === 'GENERIC' && rec.parsed.target) {
+        const h = normalizeFqdn(rec.parsed.target);
+        if (!alreadyProbedHosts.has(h)) {
+          oobNsHostsToProbe.add(h);
+        }
+        perOobCount++;
+        if (perOobCount >= 4 || oobNsHostsToProbe.size >= 12) break;
+      }
+    }
+    if (oobNsHostsToProbe.size >= 12) break;
+  }
+
+  if (oobNsHostsToProbe.size > 0) {
+    await Promise.all(
+      Array.from(oobNsHostsToProbe).flatMap((host) => [
+        session
+          .query(host, RR_TYPES.A, {
+            cd: true,
+            doBit: false,
+            purpose: `Nameserver IP (${host} A)`,
+          })
+          .catch(() => undefined),
+        session
+          .query(host, RR_TYPES.AAAA, {
+            cd: true,
+            doBit: false,
+            purpose: `Nameserver IPv6 (${host} AAAA)`,
+          })
+          .catch(() => undefined),
+      ])
+    );
+  }
+}
+
+/**
+ * Collects Team Cymru BGP origin lookup QNAMEs (`*.origin.asn.cymru.com.` / `*.origin6.asn.cymru.com.`)
+ * prioritizing leaf/custom zone authoritative nameservers across both IPv4 (`A`) and IPv6 (`AAAA`) first.
+ */
+export function collectPrioritizedNsOriginQnames(
+  zoneList: string[],
+  logs: DohQueryLog[],
+  targetName: string,
+  maxCount = 18
+): string[] {
+  const normTarget = normalizeFqdn(targetName);
+  const priorityHosts = new Set<string>();
+  for (const z of zoneList) {
+    const normZ = normalizeFqdn(z);
+    if (getDomainHierarchy(normZ).length >= 3 || normZ === normTarget) {
+      const nsLog = findLog(logs, normZ, RR_TYPES.NS, true);
+      for (const rec of nsLog?.packet.answers ?? []) {
+        if (rec.type === RR_TYPES.NS && rec.parsed.kind === 'GENERIC' && rec.parsed.target) {
+          priorityHosts.add(normalizeFqdn(rec.parsed.target));
+        }
+      }
+    }
+  }
+
+  const nsLogs = logs.filter((l) => l.purpose.startsWith('Nameserver IP'));
+  const priorityV4Logs = nsLogs.filter(
+    (l) => l.qtype === RR_TYPES.A && priorityHosts.has(normalizeFqdn(l.qname))
+  );
+  const priorityV6Logs = nsLogs.filter(
+    (l) => l.qtype === RR_TYPES.AAAA && priorityHosts.has(normalizeFqdn(l.qname))
+  );
+  const otherNsLogs = nsLogs.filter((l) => !priorityHosts.has(normalizeFqdn(l.qname)));
+
+  const result = new Set<string>();
+  const addFromLogs = (subset: DohQueryLog[], cap: number) => {
+    for (const log of subset) {
+      for (const ans of log.packet.answers) {
+        if (ans.type === RR_TYPES.A || ans.type === RR_TYPES.AAAA) {
+          const originQ = ipToCymruOriginQname(ans.rdataText);
+          if (originQ) {
+            result.add(originQ);
+            if (result.size >= cap) return;
+          }
+        }
+      }
+    }
+  };
+
+  const halfCap = Math.max(6, Math.floor(maxCount / 2));
+  addFromLogs(priorityV4Logs, halfCap);
+  addFromLogs(priorityV6Logs, maxCount);
+  addFromLogs(priorityV4Logs, maxCount);
+  addFromLogs(otherNsLogs, maxCount);
+
+  return Array.from(result);
+}
+
+/**
+ * Resolves IPv4 (`A`) and IPv6 (`AAAA`) addresses for delegation-chain and out-of-bailiwick authoritative nameservers
+ * so RFC 2181 §10.3 CNAME, bogon IP, RFC 3901 dual-stack, and #58 end-to-end IPv6 readiness checks run across all modes.
  */
 export async function probeLeafNameserverAddresses(
   session: DohSession,
@@ -159,26 +378,27 @@ export async function probeLeafNameserverAddresses(
 ): Promise<void> {
   const currentLogs = session.getLogs();
   const nsHosts = collectZoneNameserverHostsToProbe(zoneList, currentLogs, targetName);
-  if (nsHosts.length === 0) return;
-
-  await Promise.all(
-    nsHosts.flatMap((host) => [
-      session
-        .query(host, RR_TYPES.A, {
-          cd: true,
-          doBit: false,
-          purpose: `Nameserver IP (${host} A)`,
-        })
-        .catch(() => undefined),
-      session
-        .query(host, RR_TYPES.AAAA, {
-          cd: true,
-          doBit: false,
-          purpose: `Nameserver IPv6 (${host} AAAA)`,
-        })
-        .catch(() => undefined),
-    ])
-  );
+  if (nsHosts.length > 0) {
+    await Promise.all(
+      nsHosts.flatMap((host) => [
+        session
+          .query(host, RR_TYPES.A, {
+            cd: true,
+            doBit: false,
+            purpose: `Nameserver IP (${host} A)`,
+          })
+          .catch(() => undefined),
+        session
+          .query(host, RR_TYPES.AAAA, {
+            cd: true,
+            doBit: false,
+            purpose: `Nameserver IPv6 (${host} AAAA)`,
+          })
+          .catch(() => undefined),
+      ])
+    );
+  }
+  await probeOutOfBailiwickNsZones(session, zoneList, targetName);
 }
 
 function evaluateZoneNsConsistency(params: {
@@ -215,6 +435,7 @@ function evaluateZoneNsConsistency(params: {
     if (q.httpStatus !== 200 || q.packet.flags.rcode !== 0 || q.packet.flags.tc) continue;
     if (q.packet.edns?.ede.some((e) => POLICY_BLOCK_EDES.has(e.infoCode))) continue;
     if (
+      q.purpose.startsWith('OOB NS zone') ||
       q.purpose.startsWith('BGP ASN lookup') ||
       q.purpose.startsWith('DNSBL reputation lookup') ||
       q.purpose.startsWith('PSL lookup') ||
@@ -802,21 +1023,12 @@ export async function runDnsvizAnalysis(
     ]),
   ]);
 
+  await probeOutOfBailiwickNsZones(session, zoneList, targetName);
+
   // Phase 4a: BGP ASN & Prefix Lookup for resolved authoritative nameserver IPs (via Team Cymru DNS)
-  const nsOriginQnames = new Set<string>();
-  for (const log of session.getLogs()) {
-    if (!log.purpose.startsWith('Nameserver IP')) continue;
-    for (const ans of log.packet.answers) {
-      if (ans.type === RR_TYPES.A || ans.type === RR_TYPES.AAAA) {
-        const originQ = ipToCymruOriginQname(ans.rdataText);
-        if (originQ) {
-          nsOriginQnames.add(originQ);
-          if (nsOriginQnames.size >= 12) break;
-        }
-      }
-    }
-    if (nsOriginQnames.size >= 12) break;
-  }
+  const nsOriginQnames = new Set<string>(
+    collectPrioritizedNsOriginQnames(zoneList, session.getLogs(), targetName, 18)
+  );
 
   if (nsOriginQnames.size > 0) {
     const originLogs = await Promise.all(
@@ -843,7 +1055,7 @@ export async function runDnsvizAnalysis(
       for (const parsed of parseCymruOriginTxt(txts)) {
         for (const asn of parsed.asns) {
           nsUniqueAsns.add(asn);
-          if (parsed.bgpPrefix && nsRpkiPairs.size < 12) {
+          if (parsed.bgpPrefix && nsRpkiPairs.size < 16) {
             nsRpkiPairs.set(`${asn}|${parsed.bgpPrefix}`, {
               asn,
               prefix: parsed.bgpPrefix,
@@ -855,7 +1067,7 @@ export async function runDnsvizAnalysis(
     if (nsUniqueAsns.size > 0 || nsRpkiPairs.size > 0) {
       await Promise.all([
         ...Array.from(nsUniqueAsns)
-          .slice(0, 8)
+          .slice(0, 12)
           .map((asn) => {
             const asnQname = `as${asn}.asn.cymru.com.`;
             return session
@@ -1177,6 +1389,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       !q.ecsSubnet &&
       !q.purpose.startsWith('ECS ') &&
       !q.purpose.startsWith('Nameserver IP') &&
+      !q.purpose.startsWith('OOB NS zone') &&
       !q.purpose.startsWith('SPF lookup') &&
       !q.purpose.startsWith('DMARC lookup') &&
       !q.purpose.startsWith('DKIM probe') &&
@@ -3215,6 +3428,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
   for (const log of queries) {
     if (
       log.purpose.startsWith('Nameserver IP') ||
+      log.purpose.startsWith('OOB NS zone') ||
       log.purpose.startsWith('Reverse FCrDNS lookup') ||
       log.purpose.startsWith('BGP ASN lookup') ||
       log.purpose.startsWith('DNSBL reputation lookup') ||
@@ -3260,6 +3474,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
       (q) =>
         !q.cd &&
         !q.purpose.startsWith('SPF lookup') &&
+        !q.purpose.startsWith('OOB NS zone') &&
         !q.purpose.startsWith('Reverse FCrDNS lookup') &&
         !q.purpose.startsWith('BGP ASN lookup') &&
         !q.purpose.startsWith('DNSBL reputation lookup') &&
@@ -3454,6 +3669,19 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     }
   }
 
+  const ipv6Eval = evaluateIpv6ReadinessAudit({
+    targetName,
+    queriedIp: reverseIpTarget?.ip ?? queriedIp,
+    queriedEmail,
+    zones,
+    cnameEdges,
+    queries,
+    mailAnalysis,
+    webAnalysis,
+  });
+  const ipv6Readiness = ipv6Eval.audit;
+  findings.push(...ipv6Eval.findings);
+
   // Deduplicate findings & sort errors -> warnings -> info
   const severityOrder: Record<AuditFinding['severity'], number> = {
     error: 0,
@@ -3492,6 +3720,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     findings: sortedFindings,
     queries,
     trustAnchorsUsed: trustAnchors,
+    ipv6Readiness,
     ...(mailAnalysis ? { mailAnalysis } : {}),
     ...(webAnalysis ? { webAnalysis } : {}),
     ...(consensusAnalysis ? { consensusAnalysis } : {}),

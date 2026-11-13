@@ -264,6 +264,17 @@ export function AuditPanel({
                     <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
                       {f.detail}
                     </p>
+                    {f.remediation && (
+                      <div
+                        data-testid={`audit-remediation-${f.code.toLowerCase()}`}
+                        className="mt-1.5 rounded-lg border border-cyan-500/25 bg-cyan-500/5 px-2.5 py-1.5 text-[11px] text-slate-700 dark:text-slate-200 leading-relaxed"
+                      >
+                        <span className="font-semibold text-cyan-700 dark:text-cyan-300">
+                          Remediation:{' '}
+                        </span>
+                        {f.remediation}
+                      </div>
+                    )}
                   </div>
                 </div>
 

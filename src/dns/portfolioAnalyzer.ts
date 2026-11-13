@@ -9,6 +9,7 @@ import {
   type TrustAnchor,
 } from './constants';
 import {
+  collectPrioritizedNsOriginQnames,
   discoverZoneCutsForName,
   evaluateSnapshotFromLogs,
   findLog,
@@ -23,7 +24,6 @@ import {
   normalizeFqdn,
 } from './encoding';
 import {
-  ipToCymruOriginQname,
   parseCymruOriginTxt,
   parseReverseIpInput,
 } from './ipUtils';
@@ -1182,20 +1182,9 @@ export async function runPortfolioDomainProbe(
   await probeLeafNameserverAddresses(session, zoneList, targetName);
 
   // Team Cymru BGP ASN lookup for resolved leaf/target zone nameserver IPs (deduplicated across portfolio!)
-  const nsOriginQnames = new Set<string>();
-  for (const log of session.getLogs()) {
-    if (!log.purpose.startsWith('Nameserver IP')) continue;
-    for (const ans of log.packet.answers) {
-      if (ans.type === RR_TYPES.A || ans.type === RR_TYPES.AAAA) {
-        const originQ = ipToCymruOriginQname(ans.rdataText);
-        if (originQ) {
-          nsOriginQnames.add(originQ);
-          if (nsOriginQnames.size >= 10) break;
-        }
-      }
-    }
-    if (nsOriginQnames.size >= 10) break;
-  }
+  const nsOriginQnames = new Set<string>(
+    collectPrioritizedNsOriginQnames(zoneList, session.getLogs(), targetName, 14)
+  );
 
   if (nsOriginQnames.size > 0) {
     const originLogs = await Promise.all(

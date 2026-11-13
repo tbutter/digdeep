@@ -47,6 +47,7 @@ const AUX_PURPOSE_PREFIXES = [
   'DNSBL ',
   'PSL ',
   'Nameserver IP',
+  'OOB NS zone',
   'Wildcard probe',
   'SPF lookup',
   'DMARC lookup',
@@ -539,6 +540,87 @@ export function findAuditFindingWireQuery(
           (!q.ecsSubnet && (q.packet.edns?.ede.length ?? 0) > 0)
       ) ?? queries.find((q) => !q.cd && !q.ecsSubnet)
     );
+  }
+
+  // 4b. #58 End-to-End IPv6 Readiness & NAT64/DNS64 findings
+  if (code === 'DNS64_SYNTHESIZED_AAAA') {
+    return (
+      queries.find(
+        (q) =>
+          !q.ecsSubnet &&
+          q.packet.answers.some(
+            (a) =>
+              (a.type === RR_TYPES.AAAA && a.rdataText.toLowerCase().startsWith('64:ff9b:')) ||
+              ((a.type === RR_TYPES.HTTPS || a.type === RR_TYPES.SVCB) &&
+                a.parsed.kind === 'SVCB' &&
+                a.parsed.params.some((p) =>
+                  p.ipv6Hints?.some((h) => h.toLowerCase().startsWith('64:ff9b:'))
+                ))
+          )
+      ) ?? findWireQueryByOwnerAndType(queries, snapshot.targetName, 'AAAA')
+    );
+  }
+  if (code === 'IPV6_LEAF_NO_AAAA') {
+    return findWireQueryByOwnerAndType(queries, snapshot.targetName, 'AAAA');
+  }
+  if (code === 'IPV6_HTTPS_MISSING_IPV6HINT') {
+    return (
+      findWireQueryByOwnerAndType(queries, snapshot.targetName, 'HTTPS') ??
+      findWireQueryByOwnerAndType(queries, snapshot.targetName, 'SVCB')
+    );
+  }
+  if (code === 'IPV6_MX_NO_AAAA') {
+    const mxHost = snapshot.ipv6Readiness?.leaf.mxIpv4OnlyExchanges[0];
+    if (mxHost) {
+      const mxAaaa = findWireQueryByOwnerAndType(queries, mxHost, 'AAAA');
+      if (mxAaaa) return mxAaaa;
+    }
+    return findWireQueryByOwnerAndType(queries, snapshot.targetName, 'MX');
+  }
+  if (
+    code === 'IPV6_NS_DELEGATION_GAP' ||
+    code === 'IPV6_SINGLE_NS_ONLY' ||
+    code === 'IPV6_SINGLE_ASN_CONCENTRATION'
+  ) {
+    if (finding.zone) {
+      const zoneNorm = normalizeFqdn(finding.zone);
+      const hop = snapshot.ipv6Readiness?.hops.find((h) => h.zoneName === zoneNorm);
+      const host =
+        hop?.ipv4OnlyHosts[0] ??
+        snapshot.zones.find((z) => z.zoneName === zoneNorm)?.nameservers[0]?.hostname;
+      if (host) {
+        const aaaaQuery =
+          queries.find(
+            (q) =>
+              q.purpose.startsWith('Nameserver IP') &&
+              normalizeFqdn(q.qname) === host &&
+              q.qtypeName === 'AAAA'
+          ) ?? findWireQueryByOwnerAndType(queries, host, 'AAAA');
+        if (aaaaQuery) return aaaaQuery;
+      }
+      return findWireQueryByOwnerAndType(queries, zoneNorm, 'NS', { preferCd: true });
+    }
+    // Out-of-bailiwick NS zone finding (zone is omitted so graph jump does not target non-graph OOB zone)
+    const oobHop = snapshot.ipv6Readiness?.oobNsZones.find((o) =>
+      finding.id.endsWith(`-${o.zoneName}`)
+    );
+    if (oobHop) {
+      const host = oobHop.ipv4OnlyHosts[0];
+      if (host) {
+        const aaaaQuery = queries.find(
+          (q) =>
+            q.purpose.startsWith('Nameserver IP') &&
+            normalizeFqdn(q.qname) === host &&
+            q.qtypeName === 'AAAA'
+        );
+        if (aaaaQuery) return aaaaQuery;
+      }
+      const oobNsQuery = queries.find(
+        (q) =>
+          q.purpose.startsWith('OOB NS zone NS') && normalizeFqdn(q.qname) === oobHop.zoneName
+      );
+      if (oobNsQuery) return oobNsQuery;
+    }
   }
 
   // 5. Zone-scoped DNSSEC / RFC hygiene findings

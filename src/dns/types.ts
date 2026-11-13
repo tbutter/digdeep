@@ -750,6 +750,7 @@ export interface AuditFinding {
   code: string;
   title: string;
   detail: string;
+  remediation?: string;
   rfc?: string;
   zone?: string;
   targetId?: string;
@@ -1717,6 +1718,98 @@ export interface EmailDaneAnalysis {
   summary: string;
 }
 
+export type Dns64PrefixKind = 'well-known-64:ff9b::/96' | 'local-use-64:ff9b:1::/48';
+
+export type Dns64RecordContext = 'target-aaaa' | 'https-ipv6hint' | 'mx-aaaa' | 'ns-aaaa';
+
+export interface Dns64Detection {
+  ip: string;
+  canonicalIp: string;
+  prefixKind: Dns64PrefixKind;
+  prefixCidr: '64:ff9b::/96' | '64:ff9b:1::/48';
+  embeddedIpv4?: string;
+  ownerName: string;
+  recordContext: Dns64RecordContext;
+}
+
+export type Ipv6HopStatus =
+  | 'dual-stack'
+  | 'ipv6-single-ns'
+  | 'ipv4-only-bottleneck'
+  | 'ipv6-only'
+  | 'dual-stack-partial-v4'
+  | 'unprobed';
+
+export interface Ipv6DelegationHopAudit {
+  zoneName: string;
+  parentZone: string | null;
+  depth: number;
+  role: 'in-chain' | 'cname-chain' | 'oob-ns-zone';
+  referencedByZones?: string[];
+  totalNsCount: number;
+  probedNsCount: number;
+  ipv4NsCount: number;
+  ipv6NsCount: number;
+  dualStackNsCount: number;
+  inBailiwickNsCount: number;
+  outOfBailiwickNsHosts: string[];
+  ipv4OnlyHosts: string[];
+  ipv6OnlyHosts: string[];
+  dns64Ips: string[];
+  ipv6Asns: BgpAsnOrganization[];
+  overallAsns: BgpAsnOrganization[];
+  singleIpv6Asn: boolean;
+  status: Ipv6HopStatus;
+  badgeLabel: string;
+  summary: string;
+}
+
+export interface Ipv6LeafParityAudit {
+  evaluated: boolean;
+  effectiveOwner: string;
+  aQueried: boolean;
+  aaaaQueried: boolean;
+  nativeIpv4Addresses: string[];
+  nativeIpv6Addresses: string[];
+  dns64TargetIps: Dns64Detection[];
+  httpsEvaluated: boolean;
+  httpsIpv4Hints: string[];
+  httpsNativeIpv6Hints: string[];
+  httpsDns64Hints: Dns64Detection[];
+  mxEvaluated: boolean;
+  mxTotalCount: number;
+  mxProbedCount: number;
+  mxIpv6ReadyCount: number;
+  mxIpv4OnlyExchanges: string[];
+  status:
+    | 'dual-stack'
+    | 'ipv6-only'
+    | 'ipv4-only'
+    | 'dns64-only'
+    | 'partial'
+    | 'no-address-records'
+    | 'not-applicable';
+  summary: string;
+}
+
+export interface Ipv6ReadinessAudit {
+  overallStatus:
+    | 'ipv6-ready'
+    | 'degraded-redundancy'
+    | 'broken-ipv6-path'
+    | 'dns64-synthesized'
+    | 'unprobed';
+  resolvableViaIpv6Only: boolean;
+  probedHopCount: number;
+  bottleneckZones: string[] ;
+  singleIpv6NsZones: string[];
+  hops: Ipv6DelegationHopAudit[];
+  oobNsZones: Ipv6DelegationHopAudit[];
+  leaf: Ipv6LeafParityAudit;
+  dns64Detections: Dns64Detection[];
+  summary: string;
+}
+
 export interface AnalysisSnapshot {
   id: string;
   version: number;
@@ -1741,6 +1834,7 @@ export interface AnalysisSnapshot {
   findings: AuditFinding[];
   queries: DohQueryLog[];
   trustAnchorsUsed: TrustAnchor[];
+  ipv6Readiness?: Ipv6ReadinessAudit;
   mailAnalysis?: MailAnalysisResult;
   webAnalysis?: WebAnalysisResult;
   consensusAnalysis?: ConsensusAnalysisResult;
