@@ -7,9 +7,11 @@ import {
   Download,
   FileCode2,
   FileText,
+  GitCompare,
   Globe,
   Layers,
   Link2,
+  Loader2,
   Mail,
   Moon,
   Network,
@@ -22,6 +24,7 @@ import {
   Share2,
   ShieldCheck,
   SlidersHorizontal,
+  Snowflake,
   Sparkles,
   Sun,
   Terminal,
@@ -65,6 +68,15 @@ import { runConsensusAnalysis } from './dns/consensusAnalyzer';
 import { ANALYSIS_MODES, formatDohShortLabel, QUERYABLE_RR_TYPES } from './dns/constants';
 import { parseEmailDaneInput } from './dns/emailDane';
 import { normalizeFqdn } from './dns/encoding';
+import {
+  buildFrozenPermalink,
+  buildFrozenSnapshotFilename,
+  decodeFrozenPermalinkHash,
+  decodeFrozenSnapshotBytes,
+  downloadBinaryFile,
+  encodeFrozenSnapshotBytes,
+  hasFrozenSnapshotHash,
+} from './dns/frozenPermalink';
 import { parseReverseIpInput } from './dns/ipUtils';
 import {
   parseDkimSelectorInput,
@@ -205,6 +217,8 @@ export function App() {
     const savedSettings = loadUserSettings();
     const savedSnapshots = loadSnapshots();
     const search = typeof window !== 'undefined' ? window.location.search : '';
+    const hash = typeof window !== 'undefined' ? window.location.hash : '';
+    const hasFrozenHash = hasFrozenSnapshotHash(hash);
     const deepLink = parseDeepLinkParams(search, savedSettings.customDohEndpoints);
 
     const effectiveSettings: UserSettings = {
@@ -257,7 +271,7 @@ export function App() {
     return {
       settings: effectiveSettings,
       snapshots: savedSnapshots,
-      activeSnapshot: matchesLatestSnap ? latestSnap : null,
+      activeSnapshot: !hasFrozenHash && matchesLatestSnap ? latestSnap : null,
       analysisMode: initialMode,
       domainInput: initialDomain,
       selectedTypes: initialTypes,
@@ -266,6 +280,7 @@ export function App() {
       activeTab: deepLink.tab ?? defaultTab,
       focusedTarget: deepLink.focus,
       deepLink,
+      hasFrozenHash,
     };
   });
 
@@ -317,12 +332,27 @@ export function App() {
     []
   );
   const [untrustedDohPending, setUntrustedDohPending] = useState<string | null>(
-    initialBootState.deepLink.isUntrustedCustomDoh ? initialBootState.deepLink.dohEndpoint : null
+    !initialBootState.hasFrozenHash && initialBootState.deepLink.isUntrustedCustomDoh
+      ? initialBootState.deepLink.dohEndpoint
+      : null
   );
+  const lastHydratedFrozenHashRef = useRef<string | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [copiedMarkdown, setCopiedMarkdown] = useState(false);
   const copyMdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [frozenIncidentMeta, setFrozenIncidentMeta] = useState<{
+    snapshotId: string;
+    source: 'permalink' | 'file';
+    compressedByteLength: number;
+    filename?: string;
+  } | null>(null);
+  const [frozenShareFeedback, setFrozenShareFeedback] = useState<
+    'copied-url' | 'downloaded-gz' | null
+  >(null);
+  const [frozenShareSizeKb, setFrozenShareSizeKb] = useState<string | null>(null);
+  const frozenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [comparingFrozenLive, setComparingFrozenLive] = useState(false);
   const [reportModalOpen, setReportModalOpen] = useState(false);
   const [reportModalInitialTab, setReportModalInitialTab] =
     useState<ReportExportTab>('markdown');
@@ -434,6 +464,7 @@ export function App() {
     setSnapshots(updated);
     setFocusedGraphTarget(null);
     setFocusedWireQuery(null);
+    setFrozenIncidentMeta(null);
     setActiveSnapshot(snap);
     setAnalysisMode(snap.mode ?? 'consensus');
     setDomainInput(snap.displayDomain);
@@ -499,6 +530,7 @@ export function App() {
       const snapMode: AnalysisMode = snap.mode ?? 'dnssec';
       setFocusedGraphTarget(null);
       setFocusedWireQuery(null);
+      setFrozenIncidentMeta((cur) => (cur?.snapshotId === snap.id ? cur : null));
       setActiveSnapshot(snap);
       setAnalysisMode(snapMode);
       setDomainInput(snap.queriedEmail ?? snap.displayDomain);
@@ -556,6 +588,7 @@ export function App() {
     return () => {
       if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
       if (copyMdTimerRef.current) clearTimeout(copyMdTimerRef.current);
+      if (frozenTimerRef.current) clearTimeout(frozenTimerRef.current);
     };
   }, []);
 
@@ -766,6 +799,8 @@ export function App() {
 
         const updatedList = saveSnapshot(snap);
         setSnapshots(updatedList);
+        setFrozenIncidentMeta(null);
+        lastHydratedFrozenHashRef.current = null;
         setActiveSnapshot(snap);
         setFocusedWireQuery(null);
         setExternalCustomWire(null);
@@ -918,6 +953,78 @@ export function App() {
     }
   }, [modalOverlayOpen, mobileInspectorOpen, settingsOpen]);
 
+  const hydrateFrozenHash = useCallback(
+    async (rawHash: string, rawSearch: string) => {
+      setUntrustedDohPending(null);
+      setLoading(true);
+      setError(null);
+      setProgress({
+        phase: 'zone-cuts',
+        message:
+          'Decompressing & cryptographically verifying frozen incident wire snapshot (#snap=) offline…',
+        completedQueries: 0,
+      });
+      try {
+        const { snapshot: decoded, compressedByteLength } =
+          await decodeFrozenPermalinkHash(rawHash);
+        lastHydratedFrozenHashRef.current = rawHash;
+        const updatedList = saveSnapshot(decoded);
+        setSnapshots(updatedList);
+        setFocusedWireQuery(null);
+        setExternalCustomWire(null);
+        setFrozenIncidentMeta({
+          snapshotId: decoded.id,
+          source: 'permalink',
+          compressedByteLength,
+        });
+        setActiveSnapshot(decoded);
+
+        const snapMode: AnalysisMode = decoded.mode ?? 'dnssec';
+        setAnalysisMode(snapMode);
+        setDomainInput(decoded.queriedEmail ?? decoded.queriedIp ?? decoded.displayDomain);
+        setCustomDkimSelectors(decoded.customDkimSelectors ?? []);
+        if (snapMode === 'dnssec' && decoded.queryTypes.length > 0) {
+          setSelectedTypes(decoded.queryTypes);
+          if (decoded.queryTypes.some((t) => (EXTRA_TYPES as readonly string[]).includes(t))) {
+            setShowExtraTypes(true);
+          }
+        }
+
+        const parsed = parseDeepLinkParams(rawSearch, settings.customDohEndpoints);
+        setFocusedGraphTarget(parsed.focus);
+        if (parsed.showSoaAndNs !== null || parsed.showStandbyKeys !== null) {
+          setSettings((prev) => ({
+            ...prev,
+            showSoaAndNs: parsed.showSoaAndNs ?? prev.showSoaAndNs,
+            showStandbyKeys: parsed.showStandbyKeys ?? prev.showStandbyKeys,
+          }));
+        }
+        setActiveTab(
+          parsed.tab ??
+            (snapMode === 'mail'
+              ? 'mail'
+              : snapMode === 'web'
+                ? 'web'
+                : snapMode === 'consensus'
+                  ? 'consensus'
+                  : 'graph')
+        );
+      } catch (err) {
+        lastHydratedFrozenHashRef.current = rawHash;
+        setFrozenIncidentMeta(null);
+        setError(
+          `Failed to decode frozen #snap= incident snapshot: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      } finally {
+        setLoading(false);
+        setProgress(null);
+      }
+    },
+    [settings.customDohEndpoints]
+  );
+
   // Keep browser URL query string in sync as user switches tabs, selects graph elements, or toggles filters
   useEffect(() => {
     if (!activeSnapshot || loading || activeSnapshot.id.startsWith('offline-wire-')) return;
@@ -935,18 +1042,40 @@ export function App() {
       showSoaAndNs: settings.showSoaAndNs,
       showStandbyKeys: settings.showStandbyKeys,
     });
-    if (url.search !== nextSearch) {
+    const shouldClearStaleFrozenHash =
+      hasFrozenSnapshotHash(url.hash) && frozenIncidentMeta?.snapshotId !== activeSnapshot.id;
+    if (url.search !== nextSearch || shouldClearStaleFrozenHash) {
       url.search = nextSearch;
+      if (shouldClearStaleFrozenHash) {
+        url.hash = '';
+        lastHydratedFrozenHashRef.current = null;
+      }
       window.history.replaceState(window.history.state ?? {}, '', url.toString());
     }
   }, [
     activeSnapshot,
     activeTab,
     focusedGraphTarget,
+    frozenIncidentMeta?.snapshotId,
     loading,
     settings.showSoaAndNs,
     settings.showStandbyKeys,
   ]);
+
+  // Hydrate #snap= if the user pastes or navigates to a frozen permalink hash in the same tab
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onHashChange = () => {
+      if (
+        hasFrozenSnapshotHash(window.location.hash) &&
+        lastHydratedFrozenHashRef.current !== window.location.hash
+      ) {
+        void hydrateFrozenHash(window.location.hash, window.location.search);
+      }
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, [hydrateFrozenHash]);
 
   // Support browser Back / Forward navigation across deep-linked traces
   useEffect(() => {
@@ -968,6 +1097,12 @@ export function App() {
         setFocusedGraphTarget(null);
         return;
       }
+      if (hasFrozenSnapshotHash(window.location.hash)) {
+        if (lastHydratedFrozenHashRef.current !== window.location.hash) {
+          void hydrateFrozenHash(window.location.hash, window.location.search);
+        }
+        return;
+      }
       const parsed = parseDeepLinkParams(window.location.search, settings.customDohEndpoints);
       const nextMode: AnalysisMode = parsed.mode ?? 'dnssec';
       const nextDkimSels = parsed.dkimSelectors ?? [];
@@ -979,7 +1114,7 @@ export function App() {
           nextMode === 'mail'
             ? 'mail'
             : nextMode === 'web'
-              ? 'web'
+               ? 'web'
               : nextMode === 'consensus'
                 ? 'consensus'
                 : 'graph'
@@ -1030,6 +1165,7 @@ export function App() {
           s.dohEndpoint === targetDoh
       );
       if (cached) {
+        setFrozenIncidentMeta((cur) => (cur?.snapshotId === cached.id ? cur : null));
         setActiveSnapshot(cached);
       } else if (!isOffline) {
         void executeAnalysis(parsed.name, targetTypes, {
@@ -1044,7 +1180,14 @@ export function App() {
 
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
-  }, [executeAnalysis, isOffline, settings.customDohEndpoints, settings.dohEndpoint, snapshots]);
+  }, [
+    executeAnalysis,
+    hydrateFrozenHash,
+    isOffline,
+    settings.customDohEndpoints,
+    settings.dohEndpoint,
+    snapshots,
+  ]);
 
   // Auto-upgrade any localStorage snapshots captured with an older validation engine version
   useEffect(() => {
@@ -1071,10 +1214,20 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto-run on initial visit if URL specifies deep-link params or if localStorage has no snapshots yet
+  // Auto-run on initial visit if URL specifies deep-link params, a #snap= permalink, or if localStorage has no snapshots yet
   useEffect(() => {
     if (didBootRef.current) return;
     didBootRef.current = true;
+    if (
+      initialBootState.hasFrozenHash ||
+      (typeof window !== 'undefined' && hasFrozenSnapshotHash(window.location.hash))
+    ) {
+      void hydrateFrozenHash(
+        typeof window !== 'undefined' ? window.location.hash : '',
+        typeof window !== 'undefined' ? window.location.search : ''
+      );
+      return;
+    }
     if (isOffline && snapshots.length > 0) return;
     if (untrustedDohPending) return;
     const { deepLink } = initialBootState;
@@ -1100,6 +1253,7 @@ export function App() {
   }, [
     domainInput,
     executeAnalysis,
+    hydrateFrozenHash,
     initialBootState,
     isOffline,
     selectedTypes,
@@ -1116,6 +1270,7 @@ export function App() {
     setFocusedGraphTarget(null);
     setFocusedWireQuery(null);
     setExternalCustomWire(null);
+    setFrozenIncidentMeta((cur) => (cur?.snapshotId === snap.id ? cur : null));
     setActiveSnapshot(snap);
     setAnalysisMode(snapMode);
     setDomainInput(snap.queriedEmail ?? snap.queriedIp ?? snap.displayDomain);
@@ -1538,6 +1693,206 @@ export function App() {
       copyMdTimerRef.current = setTimeout(() => setCopiedMarkdown(false), 2000);
     }
   };
+
+  const handleCopyFrozenLink = async () => {
+    if (!activeSnapshot || typeof window === 'undefined') return;
+    try {
+      const built = await buildFrozenPermalink(window.location.href, activeSnapshot, {
+        name: activeSnapshot.queriedEmail ?? activeSnapshot.displayDomain,
+        mode: activeSnapshot.mode,
+        types: activeSnapshot.queryTypes,
+        dkimSelectors: activeSnapshot.customDkimSelectors,
+        dohEndpoint: activeSnapshot.dohEndpoint,
+        tab: activeTab,
+        focus: focusedGraphTarget,
+        showSoaAndNs: settings.showSoaAndNs,
+        showStandbyKeys: settings.showStandbyKeys,
+      });
+      setFrozenShareSizeKb((built.compressedByteLength / 1024).toFixed(1));
+
+      if (built.fitsInUrl && built.url) {
+        await copyTextToClipboard(built.url);
+        setFrozenShareFeedback('copied-url');
+      } else {
+        downloadBinaryFile(built.gzipBytes, built.suggestedFilename);
+        setFrozenShareFeedback('downloaded-gz');
+      }
+
+      if (frozenTimerRef.current) clearTimeout(frozenTimerRef.current);
+      frozenTimerRef.current = setTimeout(() => setFrozenShareFeedback(null), 3000);
+    } catch (err) {
+      setError(
+        `Failed to encode frozen snapshot permalink: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+  };
+
+  const handleDownloadFrozenGzip = async () => {
+    if (!activeSnapshot) return;
+    try {
+      const gzipBytes = await encodeFrozenSnapshotBytes(activeSnapshot);
+      downloadBinaryFile(gzipBytes, buildFrozenSnapshotFilename(activeSnapshot));
+    } catch (err) {
+      setError(
+        `Failed to export .digdeep.gz snapshot: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+  };
+
+  const handleCompareFrozenAgainstLive = async () => {
+    if (!activeSnapshot || comparingFrozenLive || loading) return;
+    const frozenSnap = activeSnapshot;
+    const modeToRun: AnalysisMode = frozenSnap.mode ?? 'dnssec';
+    const targetToProbe =
+      frozenSnap.queriedEmail ?? frozenSnap.queriedIp ?? frozenSnap.displayDomain;
+    const typesToProbe = frozenSnap.queryTypes.length > 0 ? frozenSnap.queryTypes : ['A'];
+    const dkimSels = frozenSnap.customDkimSelectors ?? [];
+    const endpointToUse = settings.dohEndpoint;
+
+    setComparingFrozenLive(true);
+    setLoading(true);
+    setError(null);
+    setProgress({
+      phase:
+        modeToRun === 'mail'
+          ? 'mail-mx'
+          : modeToRun === 'web'
+            ? 'web-https'
+            : modeToRun === 'consensus'
+              ? 'consensus-probes'
+              : 'zone-cuts',
+      message: `Probing live ${formatDohShortLabel(endpointToUse)} DNS for ${targetToProbe} to diff against frozen incident snapshot…`,
+      completedQueries: 0,
+    });
+
+    try {
+      const liveSnap =
+        modeToRun === 'mail'
+          ? await runMailAnalysis(targetToProbe, {
+              endpoint: endpointToUse,
+              dkimSelectors: dkimSels,
+              trustAnchors: settings.trustAnchors,
+              onProgress: (p) => setProgress(p),
+            })
+          : modeToRun === 'web'
+            ? await runWebAnalysis(targetToProbe, {
+                endpoint: endpointToUse,
+                trustAnchors: settings.trustAnchors,
+                onProgress: (p) => setProgress(p),
+              })
+            : modeToRun === 'consensus'
+              ? await runConsensusAnalysis(targetToProbe, {
+                  endpoint: endpointToUse,
+                  trustAnchors: settings.trustAnchors,
+                  onProgress: (p) => setProgress(p),
+                })
+              : await runDnsvizAnalysis(targetToProbe, {
+                  endpoint: endpointToUse,
+                  queryTypes: typesToProbe,
+                  trustAnchors: settings.trustAnchors,
+                  onProgress: (p) => setProgress(p),
+                });
+
+      const safeFrozen =
+        frozenSnap.id === liveSnap.id
+          ? { ...frozenSnap, id: `${frozenSnap.id}-frozen` }
+          : frozenSnap;
+      saveSnapshot(safeFrozen);
+      const updatedList = saveSnapshot(liveSnap);
+      setSnapshots(updatedList);
+      setFrozenIncidentMeta(null);
+      lastHydratedFrozenHashRef.current = null;
+      setActiveSnapshot(liveSnap);
+      setHistoryDiffRequest((prev) => ({
+        aId: safeFrozen.id,
+        bId: liveSnap.id,
+        seq: (prev?.seq ?? 0) + 1,
+      }));
+      setActiveTab('history');
+
+      if (typeof window !== 'undefined' && window.history?.replaceState) {
+        const url = new URL(window.location.href);
+        url.hash = '';
+        url.search = buildDeepLinkSearch({
+          name: liveSnap.queriedEmail ?? liveSnap.displayDomain,
+          mode: liveSnap.mode,
+          types: liveSnap.queryTypes,
+          dkimSelectors: liveSnap.customDkimSelectors,
+          dohEndpoint: liveSnap.dohEndpoint,
+          tab: 'history',
+          focus: null,
+          showSoaAndNs: settings.showSoaAndNs,
+          showStandbyKeys: settings.showStandbyKeys,
+        });
+        window.history.replaceState(window.history.state ?? {}, '', url.toString());
+      }
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : `Failed to query live ${formatDohShortLabel(endpointToUse)} DoH for snapshot comparison.`
+      );
+    } finally {
+      setComparingFrozenLive(false);
+      setLoading(false);
+      setProgress(null);
+    }
+  };
+
+  const handleImportFrozenGzip = useCallback(async (bytes: Uint8Array, filename: string) => {
+    setError(null);
+    setLoading(true);
+    setProgress({
+      phase: 'zone-cuts',
+      message: `Decompressing & cryptographically verifying ${filename} offline…`,
+      completedQueries: 0,
+    });
+    try {
+      const decoded = await decodeFrozenSnapshotBytes(bytes);
+      const updatedList = saveSnapshot(decoded);
+      setSnapshots(updatedList);
+      setFocusedGraphTarget(null);
+      setFocusedWireQuery(null);
+      setExternalCustomWire(null);
+      setFrozenIncidentMeta({
+        snapshotId: decoded.id,
+        source: 'file',
+        compressedByteLength: bytes.byteLength,
+        filename,
+      });
+      setActiveSnapshot(decoded);
+      const snapMode: AnalysisMode = decoded.mode ?? 'dnssec';
+      setAnalysisMode(snapMode);
+      setDomainInput(decoded.queriedEmail ?? decoded.queriedIp ?? decoded.displayDomain);
+      setCustomDkimSelectors(decoded.customDkimSelectors ?? []);
+      if (snapMode === 'dnssec' && decoded.queryTypes.length > 0) {
+        setSelectedTypes(decoded.queryTypes);
+        if (decoded.queryTypes.some((t) => (EXTRA_TYPES as readonly string[]).includes(t))) {
+          setShowExtraTypes(true);
+        }
+      }
+      setActiveTab(
+        snapMode === 'mail'
+          ? 'mail'
+          : snapMode === 'web'
+            ? 'web'
+            : snapMode === 'consensus'
+              ? 'consensus'
+              : 'graph'
+      );
+    } catch (err) {
+      setError(
+        `Failed to import ${filename}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    } finally {
+      setLoading(false);
+      setProgress(null);
+    }
+  }, []);
 
   const toggleQueryType = (t: string) => {
     setSelectedTypes((prev) => {
@@ -2307,12 +2662,15 @@ export function App() {
         )}
 
         {error && (
-          <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-xs text-rose-700 dark:text-rose-300 flex items-center justify-between">
+          <div
+            data-testid="error-alert-banner"
+            className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-xs text-rose-700 dark:text-rose-300 flex items-center justify-between gap-3"
+          >
             <span>{error}</span>
             <button
               type="button"
               onClick={() => void executeAnalysis(domainInput, selectedTypes)}
-              className="underline font-semibold cursor-pointer"
+              className="underline font-semibold shrink-0 cursor-pointer"
             >
               Retry
             </button>
@@ -2426,6 +2784,39 @@ export function App() {
 
                   <button
                     type="button"
+                    data-testid="copy-frozen-link-btn"
+                    onClick={() => void handleCopyFrozenLink()}
+                    className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer ${
+                      frozenShareFeedback
+                        ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                        : 'border-slate-200 dark:border-slate-700 hover:border-cyan-500 text-slate-700 dark:text-slate-200'
+                    }`}
+                    title="Copy zero-server #snap= frozen wire-packet permalink (compressed via gzip; auto-downloads .digdeep.gz if > 32 KB)"
+                  >
+                    {frozenShareFeedback === 'copied-url' ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-500" />
+                        <span>
+                          Copied #snap={frozenShareSizeKb ? ` (${frozenShareSizeKb} KB)` : ''}!
+                        </span>
+                      </>
+                    ) : frozenShareFeedback === 'downloaded-gz' ? (
+                      <>
+                        <Download className="w-3.5 h-3.5 text-emerald-500" />
+                        <span>
+                          Saved .digdeep.gz{frozenShareSizeKb ? ` (${frozenShareSizeKb} KB)` : ''}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <Snowflake className="w-3.5 h-3.5 text-cyan-500" />
+                        <span>Freeze Link</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
                     data-testid="copy-markdown-report-btn"
                     onClick={() => void handleCopyMarkdownReport()}
                     className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer ${
@@ -2495,6 +2886,70 @@ export function App() {
                 </div>
               </div>
             </div>
+
+            {frozenIncidentMeta?.snapshotId === activeSnapshot.id && (
+              <div
+                data-testid="frozen-snapshot-banner"
+                className="rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-4 py-3 flex flex-col lg:flex-row lg:items-center justify-between gap-3 text-xs"
+              >
+                <div className="flex items-start sm:items-center gap-2.5 min-w-0">
+                  <Snowflake className="w-4 h-4 text-cyan-600 dark:text-cyan-400 shrink-0 mt-0.5 sm:mt-0" />
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold text-slate-900 dark:text-slate-100">
+                        Viewing Frozen Incident Snapshot
+                      </span>
+                      <span className="rounded bg-cyan-500/20 text-cyan-800 dark:text-cyan-200 px-1.5 py-0.5 font-mono text-[10px] font-semibold">
+                        {frozenIncidentMeta.source === 'permalink'
+                          ? `#snap= · ${(frozenIncidentMeta.compressedByteLength / 1024).toFixed(1)} KB`
+                          : `${frozenIncidentMeta.filename ?? '.digdeep.gz'} · ${(frozenIncidentMeta.compressedByteLength / 1024).toFixed(1)} KB`}
+                      </span>
+                      <span className="font-mono text-[11px] text-slate-600 dark:text-slate-300">
+                        Captured {new Date(activeSnapshot.capturedAt).toISOString().replace('T', ' ').slice(0, 19)} UTC ·{' '}
+                        {activeSnapshot.queries.length} wire packets · zero live DoH queries
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                      Re-verified locally via WebCrypto against captured RFC 8484 wire bytes pinned
+                      to the incident timestamp. Run a live trace to diff what changed since capture.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    data-testid="frozen-compare-live-btn"
+                    disabled={loading || comparingFrozenLive || isOffline}
+                    onClick={() => void handleCompareFrozenAgainstLive()}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 px-3 py-1.5 text-xs font-semibold text-slate-950 transition-colors cursor-pointer"
+                    title={
+                      isOffline
+                        ? 'Reconnect to the internet to compare against live DNS'
+                        : `Query live ${formatDohShortLabel(settings.dohEndpoint)} DoH and open Snapshot Diff (Frozen vs Live)`
+                    }
+                  >
+                    {comparingFrozenLive ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <GitCompare className="w-3.5 h-3.5" />
+                    )}
+                    <span>Compare Against Live DNS</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    data-testid="download-frozen-gz-btn"
+                    onClick={() => void handleDownloadFrozenGzip()}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-white/70 dark:bg-slate-900/70 hover:border-cyan-500 px-2.5 py-1.5 text-xs font-medium text-slate-800 dark:text-slate-200 transition-colors cursor-pointer"
+                    title="Download compressed .digdeep.gz wire-packet bundle for incident archival"
+                  >
+                    <Download className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400" />
+                    <span>Download .digdeep.gz</span>
+                  </button>
+                </div>
+              </div>
+            )}
 
             {activeSnapshot.reverseDns && (
               <ReverseDnsCard
@@ -2779,6 +3234,7 @@ export function App() {
                   const snapMode: AnalysisMode = snap.mode ?? 'dnssec';
                   setFocusedGraphTarget(null);
                   setFocusedWireQuery(null);
+                  setFrozenIncidentMeta((cur) => (cur?.snapshotId === snap.id ? cur : null));
                   setActiveSnapshot(snap);
                   setAnalysisMode(snapMode);
                   setDomainInput(snap.queriedEmail ?? snap.displayDomain);
@@ -2831,6 +3287,7 @@ export function App() {
                   setSnapshots(next);
                   if (next[0]) setActiveSnapshot(next[0]);
                 }}
+                onImportFrozenGzip={handleImportFrozenGzip}
               />
             )}
           </>
@@ -2883,6 +3340,7 @@ export function App() {
             onSelectSnapshot={(snap) => {
               const snapMode: AnalysisMode = snap.mode ?? 'dnssec';
               setFocusedGraphTarget(null);
+              setFrozenIncidentMeta((cur) => (cur?.snapshotId === snap.id ? cur : null));
               setAnalysisMode(snapMode);
               setActiveSnapshot(snap);
               setActiveTab(
@@ -2912,6 +3370,7 @@ export function App() {
               setSnapshots(next);
               if (next[0]) setActiveSnapshot(next[0]);
             }}
+            onImportFrozenGzip={handleImportFrozenGzip}
           />
         )}
       </main>

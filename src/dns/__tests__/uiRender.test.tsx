@@ -1,5 +1,5 @@
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { App } from '../../App';
 import { AuditPanel } from '../../components/AuditPanel';
 import { ChainGraphView, prepareExportSvgElement } from '../../components/ChainGraphView';
@@ -42,6 +42,7 @@ import { runDnsvizAnalysis } from '../analyzer';
 import { runConsensusAnalysis } from '../consensusAnalyzer';
 import { CONSENSUS_DOH_RESOLVERS, RR_TYPES } from '../constants';
 import { base64ToBytes, bytesToBase64, hexToBytes } from '../encoding';
+import { buildFrozenPermalink } from '../frozenPermalink';
 import { runMailAnalysis } from '../mailAnalyzer';
 import {
   computePortfolioAsnConcentration,
@@ -289,7 +290,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexCss).toContain('env(safe-area-inset-bottom');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v39');
+    expect(swCode).toContain('digdeep-shell-v40');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -3717,4 +3718,137 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       if (prevDocument) Object.defineProperty(globalThis, 'document', prevDocument);
     }
   });
+
+  it(
+    'hydrates #snap= frozen incident permalinks 100% offline with Frozen Incident Banner and handles corrupted #snap= cleanly (#62)',
+    async () => {
+      const liveSnap = await runDnsvizAnalysis('cloudflare.com', { queryTypes: ['A'] });
+      const built = await buildFrozenPermalink('https://digdeep.example/', liveSnap, {
+        name: liveSnap.displayDomain,
+        mode: liveSnap.mode,
+        types: liveSnap.queryTypes,
+        dohEndpoint: liveSnap.dohEndpoint,
+        tab: 'audit',
+      });
+      expect(built.fitsInUrl).toBe(true);
+      expect(built.url).toBeDefined();
+
+      const mem = new Map<string, string>();
+      Object.defineProperty(globalThis, 'localStorage', {
+        value: {
+          getItem: (k: string) => mem.get(k) ?? null,
+          setItem: (k: string, v: string) => void mem.set(k, v),
+          removeItem: (k: string) => void mem.delete(k),
+          clear: () => mem.clear(),
+        },
+        configurable: true,
+      });
+
+      const { JSDOM } = (await import('jsdom' as string)) as {
+        JSDOM: new (
+          markup?: string,
+          opts?: { url?: string }
+        ) => { window: Window & typeof globalThis };
+      };
+      const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
+        url: built.url,
+      });
+
+      const prevWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+      const prevDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+      const prevOnline = Object.getOwnPropertyDescriptor(globalThis.navigator, 'onLine');
+      Object.defineProperty(globalThis, 'window', { value: dom.window, configurable: true });
+      Object.defineProperty(globalThis, 'document', {
+        value: dom.window.document,
+        configurable: true,
+      });
+      Object.defineProperty(globalThis.navigator, 'onLine', {
+        value: false,
+        configurable: true,
+      });
+      (dom.window as unknown as { matchMedia: () => { matches: boolean } }).matchMedia = () => ({
+        matches: false,
+      });
+      (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
+        true;
+
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockRejectedValue(new Error('Network must not be called when hydrating #snap='));
+
+      try {
+        const { act } = await import('react');
+        const { createRoot } = await import('react-dom/client');
+        const container = dom.window.document.getElementById('root')!;
+        const root = createRoot(container);
+
+        await act(async () => {
+          root.render(<App />);
+        });
+        // Flush async WebCrypto & DecompressionStream promises
+        for (let i = 0; i < 6; i++) {
+          await act(async () => {
+            await new Promise((r) => setTimeout(r, 25));
+          });
+          if (container.querySelector('[data-testid="frozen-snapshot-banner"]')) break;
+        }
+
+        expect(fetchSpy).not.toHaveBeenCalled();
+        const banner = container.querySelector('[data-testid="frozen-snapshot-banner"]');
+        expect(banner).toBeTruthy();
+        expect(banner!.textContent).toContain('Viewing Frozen Incident Snapshot');
+        expect(banner!.textContent).toContain('zero live DoH queries');
+        expect(container.querySelector('[data-testid="frozen-compare-live-btn"]')).toBeTruthy();
+        expect(container.querySelector('[data-testid="download-frozen-gz-btn"]')).toBeTruthy();
+        expect(container.querySelector('[data-testid="copy-frozen-link-btn"]')).toBeTruthy();
+        expect(container.textContent).toContain('cloudflare.com');
+
+        await act(async () => {
+          root.unmount();
+        });
+
+        // Now boot App with a corrupted #snap= payload and verify graceful error banner with 0 network calls
+        const badDom = new JSDOM(
+          '<!doctype html><html><body><div id="root"></div></body></html>',
+          {
+            url: 'https://digdeep.example/?name=cloudflare.com#snap=corrupted_not_gzip',
+          }
+        );
+        Object.defineProperty(globalThis, 'window', { value: badDom.window, configurable: true });
+        Object.defineProperty(globalThis, 'document', {
+          value: badDom.window.document,
+          configurable: true,
+        });
+        (badDom.window as unknown as { matchMedia: () => { matches: boolean } }).matchMedia =
+          () => ({ matches: false });
+
+        const badContainer = badDom.window.document.getElementById('root')!;
+        const badRoot = createRoot(badContainer);
+        await act(async () => {
+          badRoot.render(<App />);
+        });
+        for (let i = 0; i < 4; i++) {
+          await act(async () => {
+            await new Promise((r) => setTimeout(r, 20));
+          });
+          if (badContainer.querySelector('[data-testid="error-alert-banner"]')) break;
+        }
+
+        expect(fetchSpy).not.toHaveBeenCalled();
+        const errBanner = badContainer.querySelector('[data-testid="error-alert-banner"]');
+        expect(errBanner).toBeTruthy();
+        expect(errBanner!.textContent).toContain('Failed to decode frozen #snap=');
+
+        await act(async () => {
+          badRoot.unmount();
+        });
+      } finally {
+        fetchSpy.mockRestore();
+        if (prevOnline) Object.defineProperty(globalThis.navigator, 'onLine', prevOnline);
+        if (prevWindow) Object.defineProperty(globalThis, 'window', prevWindow);
+        if (prevDocument) Object.defineProperty(globalThis, 'document', prevDocument);
+      }
+    },
+    30_000
+  );
 });

@@ -49,6 +49,7 @@ export function HistoryPanel({
   onDelete,
   onClearUnpinned,
   onImportJson,
+  onImportFrozenGzip,
 }: {
   snapshots: AnalysisSnapshot[];
   activeSnapshotId?: string;
@@ -59,6 +60,7 @@ export function HistoryPanel({
   onDelete: (id: string) => void;
   onClearUnpinned: () => void;
   onImportJson: (text: string) => void;
+  onImportFrozenGzip?: (bytes: Uint8Array, filename: string) => Promise<void> | void;
 }) {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<
@@ -124,8 +126,41 @@ export function HistoryPanel({
     URL.revokeObjectURL(url);
   };
 
+  const handleImportFile = async (file: File) => {
+    try {
+      setImportError(null);
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      const isGzip =
+        (bytes.byteLength >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) ||
+        file.name.toLowerCase().endsWith('.gz');
+      if (isGzip) {
+        if (!onImportFrozenGzip) {
+          throw new Error('Frozen .digdeep.gz import handler is unavailable.');
+        }
+        await onImportFrozenGzip(bytes, file.name);
+      } else {
+        const text = new TextDecoder('utf-8').decode(bytes);
+        onImportJson(text);
+      }
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : 'Invalid snapshot file');
+    }
+  };
+
   return (
-    <div className="space-y-5">
+    <div
+      className="space-y-5"
+      onDragOver={(e) => {
+        e.preventDefault();
+      }}
+      onDrop={(e) => {
+        const file = e.dataTransfer?.files?.[0];
+        if (!file) return;
+        e.preventDefault();
+        void handleImportFile(file);
+      }}
+    >
       {/* LocalStorage Status & Actions Header */}
       <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="space-y-1.5 flex-1">
@@ -165,31 +200,23 @@ export function HistoryPanel({
           <input
             ref={fileInputRef}
             type="file"
-            accept=".json,application/json"
+            accept=".json,application/json,.gz"
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0];
               if (!file) return;
-              const reader = new FileReader();
-              reader.onload = () => {
-                try {
-                  setImportError(null);
-                  onImportJson(String(reader.result));
-                } catch (err) {
-                  setImportError(err instanceof Error ? err.message : 'Invalid JSON file');
-                }
-              };
-              reader.readAsText(file);
+              void handleImportFile(file);
               e.target.value = '';
             }}
           />
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
+            title="Import DigDeep JSON history or frozen .digdeep.gz incident bundle"
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 cursor-pointer"
           >
             <Upload className="w-3.5 h-3.5" />
-            Import JSON
+            Import JSON / .gz
           </button>
           {snapshots.length > 0 && (
             <>
