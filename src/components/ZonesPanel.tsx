@@ -26,6 +26,7 @@ import { displayFqdn, normalizeFqdn } from '../dns/encoding';
 import { evaluateIpv6ReadinessAudit } from '../dns/ipv6Readiness';
 import type { AnalysisSnapshot, Ipv6DelegationHopAudit, ZoneAnalysis } from '../dns/types';
 import { IpHoverBadge, RpkiStatusBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
+import { HostnameBadge } from './HostnameBadge';
 import { CryptoBlob } from './CryptoBlob';
 import { StatusBadge } from './StatusBadge';
 
@@ -657,7 +658,7 @@ export function ZonesPanel({
                     <div>
                       <span className="text-slate-500">MNAME: </span>
                       <span className="text-slate-800 dark:text-slate-200">
-                        {displayFqdn(zone.soa.mname)}
+                        <HostnameBadge hostname={zone.soa.mname} />
                       </span>
                     </div>
                     <div>
@@ -800,7 +801,7 @@ export function ZonesPanel({
                         >
                           <div className="flex flex-wrap items-center justify-between gap-1.5">
                             <div className="font-mono font-medium text-slate-800 dark:text-slate-200 truncate">
-                              {displayFqdn(ns.hostname)}
+                              <HostnameBadge hostname={ns.hostname} />
                             </div>
                             <div className="flex flex-wrap items-center gap-1">
                               {ns.status === 'dangling' && (
@@ -843,7 +844,13 @@ export function ZonesPanel({
                           </div>
                           {ns.cnameChain && ns.cnameChain.length > 0 && (
                             <div className="mt-0.5 font-mono text-[10px] text-amber-700 dark:text-amber-300">
-                              RFC 2181 §10.3 alias → {ns.cnameChain.map(displayFqdn).join(' → ')}
+                              RFC 2181 §10.3 alias →{' '}
+                              {ns.cnameChain.map((c, cIdx) => (
+                                <span key={c}>
+                                  <HostnameBadge hostname={c} />
+                                  {cIdx < ns.cnameChain!.length - 1 ? ' → ' : ''}
+                                </span>
+                              ))}
                             </div>
                           )}
                           {ns.bogonIps && ns.bogonIps.length > 0 && (
@@ -929,7 +936,7 @@ export function ZonesPanel({
                                 key={`extra-${t}`}
                                 className="rounded bg-amber-500/15 px-1 py-0.5 text-amber-800 dark:text-amber-200"
                               >
-                                +{displayFqdn(t)}
+                                <HostnameBadge hostname={t}>{`+${displayFqdn(t)}`}</HostnameBadge>
                               </span>
                             ))}
                             {obs.missingTargets.map((t) => (
@@ -937,7 +944,7 @@ export function ZonesPanel({
                                 key={`missing-${t}`}
                                 className="rounded bg-rose-500/15 px-1 py-0.5 text-rose-700 dark:text-rose-300"
                               >
-                                -{displayFqdn(t)}
+                                <HostnameBadge hostname={t}>{`-${displayFqdn(t)}`}</HostnameBadge>
                               </span>
                             ))}
                           </div>
@@ -1208,8 +1215,32 @@ export function ZonesPanel({
                                           {vIdx < p.answerValues.length - 1 ? ', ' : ''}
                                         </span>
                                       ))
-                                    : p.answerValues.join(', ')
-                                  : p.cnameChain.join(' → ')}
+                                    : p.answerValues.map((val, vIdx) => {
+                                        const mxMatch = val.match(/^(\d+\s+)(\S+)$/);
+                                        return (
+                                          <span key={val}>
+                                            {mxMatch ? (
+                                              <>
+                                                {mxMatch[1]}
+                                                {mxMatch[2] === '.' ? (
+                                                  '.'
+                                                ) : (
+                                                  <HostnameBadge hostname={mxMatch[2]!} />
+                                                )}
+                                              </>
+                                            ) : (
+                                              <HostnameBadge hostname={val} />
+                                            )}
+                                            {vIdx < p.answerValues.length - 1 ? ', ' : ''}
+                                          </span>
+                                        );
+                                      })
+                                  : p.cnameChain.map((c, cIdx) => (
+                                      <span key={c}>
+                                        <HostnameBadge hostname={c} />
+                                        {cIdx < p.cnameChain.length - 1 ? ' → ' : ''}
+                                      </span>
+                                    ))}
                               </span>
                             </div>
                             <StatusBadge status={p.dnssecStatus} size="xs" />

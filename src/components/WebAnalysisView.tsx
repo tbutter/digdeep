@@ -37,6 +37,7 @@ import {
   findWireQueryByGraphTargetId,
   findWireQueryByOwnerAndType,
 } from '../dns/wireQueryFilter';
+import { HostnameBadge } from './HostnameBadge';
 import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
 import { CryptoBlob } from './CryptoBlob';
 import { StatusBadge } from './StatusBadge';
@@ -275,7 +276,13 @@ function SvcbRecordCard({
           </span>
           <span className="font-mono text-xs text-slate-700 dark:text-slate-200">
             Target:{' '}
-            <strong>{rec.target === '.' ? '. (owner name)' : displayFqdn(rec.target)}</strong>
+            <strong>
+              {rec.target === '.' ? (
+                '. (owner name)'
+              ) : (
+                <HostnameBadge hostname={rec.target} />
+              )}
+            </strong>
           </span>
           <span className="font-mono text-[11px] text-slate-400">TTL {rec.ttl}s</span>
         </div>
@@ -433,7 +440,10 @@ function SvcbRecordCard({
                   </span>
                   <span>config_id={cfg.configId}</span>
                   <span>
-                    public_name=<strong>{cfg.publicName}</strong>
+                    public_name=
+                    <strong>
+                      <HostnameBadge hostname={cfg.publicName}>{cfg.publicName}</HostnameBadge>
+                    </strong>
                   </span>
                   <span>KEM={cfg.kemName}</span>
                   <span>pubKey={cfg.publicKeyLength * 8}b</span>
@@ -798,6 +808,17 @@ export function WebAnalysisView({
             </h2>
           </button>
           <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
+            {web.cnameChain.length > 0 && (
+              <span className="rounded bg-cyan-500/10 border border-cyan-500/25 px-2 py-0.5 text-cyan-800 dark:text-cyan-200">
+                CNAME:{' '}
+                {web.cnameChain.map((c, idx) => (
+                  <span key={c}>
+                    <HostnameBadge hostname={c} />
+                    {idx < web.cnameChain.length - 1 ? ' → ' : ''}
+                  </span>
+                ))}
+              </span>
+            )}
             {web.ipv4Addresses.length > 0 && (
               <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5">
                 A:{' '}
@@ -907,7 +928,9 @@ export function WebAnalysisView({
                       : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-slate-500'
                 }`}
               >
-                <span>{hop.displayName}</span>
+                <HostnameBadge hostname={hop.name} queryTypes={['CAA']}>
+                  {hop.displayName}
+                </HostnameBadge>
                 <span className="text-[10px] opacity-80">
                   ({hop.records.length > 0 ? `${hop.records.length} CAA` : 'no CAA'})
                 </span>
@@ -1405,6 +1428,21 @@ export function WebAnalysisView({
           {!collapsedSections.dane && (
             <>
               <p className="text-xs text-slate-600 dark:text-slate-400">{web.webDane.summary}</p>
+
+              {web.webDane.cnameChain.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
+                  <span className="font-medium text-slate-500">CNAME:</span>
+                  {web.webDane.cnameChain.map((c) => (
+                    <span
+                      key={c}
+                      className="inline-flex items-center gap-1 font-mono text-cyan-600 dark:text-cyan-400"
+                    >
+                      <ArrowRight className="w-3 h-3 text-slate-400" />
+                      <HostnameBadge hostname={c} queryTypes={['TLSA']} />
+                    </span>
+                  ))}
+                </div>
+              )}
 
               {web.webDane.records.length > 0 && (
                 <div className="space-y-2">

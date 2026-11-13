@@ -45,6 +45,7 @@ import {
   findWireQueryByGraphTargetId,
   findWireQueryByOwnerAndType,
 } from '../dns/wireQueryFilter';
+import { HostnameBadge } from './HostnameBadge';
 import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
 import { CryptoBlob } from './CryptoBlob';
 import { EmailHeaderVerifierCard } from './EmailHeaderVerifierCard';
@@ -280,6 +281,29 @@ function SpfTermPill({
     >
       {term.mechanism === 'ip4' || term.mechanism === 'ip6' ? (
         <IpHoverBadge ip={term.value ?? term.raw}>{term.raw}</IpHoverBadge>
+      ) : term.value &&
+        (!term.macros || term.macros.length === 0) &&
+        (term.mechanism === 'include' ||
+          term.mechanism === 'a' ||
+          term.mechanism === 'mx' ||
+          term.mechanism === 'ptr' ||
+          term.mechanism === 'exists' ||
+          term.modifier === 'redirect' ||
+          term.modifier === 'exp') ? (
+        <HostnameBadge
+          hostname={term.value}
+          queryTypes={
+            term.mechanism === 'include' ||
+            term.modifier === 'redirect' ||
+            term.modifier === 'exp'
+              ? ['TXT']
+              : term.mechanism === 'mx'
+                ? ['MX']
+                : ['A', 'AAAA']
+          }
+        >
+          {term.raw}
+        </HostnameBadge>
       ) : (
         <span>{term.raw}</span>
       )}
@@ -570,13 +594,24 @@ function MxHostCard({
               Pref {host.preference}
             </span>
             <span className="font-mono font-bold text-sm sm:text-base text-slate-900 dark:text-slate-100 break-all">
-              {host.displayExchange}
+              {host.isIpLiteral ? (
+                host.displayExchange
+              ) : (
+                <HostnameBadge hostname={host.exchange}>{host.displayExchange}</HostnameBadge>
+              )}
             </span>
             {host.cnameChain.length > 0 && (
               <span className="inline-flex items-center gap-1 rounded-md bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 px-2 py-0.5 font-mono text-[11px]">
                 <span>CNAME</span>
                 <ArrowRight className="w-3 h-3" />
-                <span>{host.cnameChain.map(displayFqdn).join(' → ')}</span>
+                <span>
+                  {host.cnameChain.map((c, cIdx) => (
+                    <span key={c}>
+                      <HostnameBadge hostname={c} />
+                      {cIdx < host.cnameChain.length - 1 ? ' → ' : ''}
+                    </span>
+                  ))}
+                </span>
               </span>
             )}
             {host.isIpLiteral && (
@@ -614,7 +649,13 @@ function MxHostCard({
                       className="text-[10px] text-slate-500 dark:text-slate-400"
                       title={addr.ptrQname ? `PTR ${displayFqdn(addr.ptrQname)}` : undefined}
                     >
-                      PTR→{addr.ptrTargets.map(displayFqdn).join(',')}
+                      PTR→
+                      {addr.ptrTargets.map((pt, ptIdx) => (
+                        <span key={pt}>
+                          <HostnameBadge hostname={pt} />
+                          {ptIdx < addr.ptrTargets!.length - 1 ? ',' : ''}
+                        </span>
+                      ))}
                     </span>
                   )}
                   {addr.fcrdnsStatus === 'valid' && (
@@ -709,7 +750,14 @@ function MxHostCard({
             {host.dane.cnameChain.length > 0 && (
               <span className="inline-flex items-center gap-1 font-mono text-[11px] text-cyan-600 dark:text-cyan-400">
                 <ArrowRight className="w-3 h-3" />
-                <span>{host.dane.cnameChain.map(displayFqdn).join(' → ')}</span>
+                <span>
+                  {host.dane.cnameChain.map((c, cIdx) => (
+                    <span key={c}>
+                      <HostnameBadge hostname={c} queryTypes={['TLSA']} />
+                      {cIdx < host.dane.cnameChain.length - 1 ? ' → ' : ''}
+                    </span>
+                  ))}
+                </span>
               </span>
             )}
             <StatusBadge status={host.dane.dnssecStatus} size="xs" />
@@ -955,7 +1003,7 @@ function DkimSelectorCard({
           {sel.cnameChain.map((c) => (
             <span key={c} className="inline-flex items-center gap-1 font-mono text-cyan-600 dark:text-cyan-400">
               <ArrowRight className="w-3 h-3 text-slate-400" />
-              {displayFqdn(c)}
+              <HostnameBadge hostname={c} queryTypes={['TXT']} />
             </span>
           ))}
         </div>
@@ -2023,7 +2071,7 @@ export function MailAnalysisView({
                     className="inline-flex items-center gap-1 font-mono text-cyan-600 dark:text-cyan-400"
                   >
                     <ArrowRight className="w-3 h-3 text-slate-400" />
-                    {displayFqdn(c)}
+                    <HostnameBadge hostname={c} queryTypes={['TXT']} />
                   </span>
                 ))}
               </div>
@@ -2312,6 +2360,21 @@ export function MailAnalysisView({
 
               <p className="text-xs text-slate-600 dark:text-slate-300">{mail.mtaSts.summary}</p>
 
+              {mail.mtaSts.cnameChain.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1 text-[11px] text-slate-600 dark:text-slate-300">
+                  <span className="text-slate-500">CNAME:</span>
+                  {mail.mtaSts.cnameChain.map((c) => (
+                    <span
+                      key={c}
+                      className="inline-flex items-center gap-1 font-mono text-cyan-600 dark:text-cyan-400"
+                    >
+                      <ArrowRight className="w-3 h-3 text-slate-400" />
+                      <HostnameBadge hostname={c} queryTypes={['TXT']} />
+                    </span>
+                  ))}
+                </div>
+              )}
+
               {mail.mtaSts.rawRecord && (
                 <div className="rounded-lg bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 px-2.5 py-1.5 font-mono text-[11px] text-slate-700 dark:text-slate-300 break-all">
                   {mail.mtaSts.rawRecord}
@@ -2411,6 +2474,21 @@ export function MailAnalysisView({
 
               <p className="text-xs text-slate-600 dark:text-slate-300">{mail.tlsRpt.summary}</p>
 
+              {mail.tlsRpt.cnameChain.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1 text-[11px] text-slate-600 dark:text-slate-300">
+                  <span className="text-slate-500">CNAME:</span>
+                  {mail.tlsRpt.cnameChain.map((c) => (
+                    <span
+                      key={c}
+                      className="inline-flex items-center gap-1 font-mono text-cyan-600 dark:text-cyan-400"
+                    >
+                      <ArrowRight className="w-3 h-3 text-slate-400" />
+                      <HostnameBadge hostname={c} queryTypes={['TXT']} />
+                    </span>
+                  ))}
+                </div>
+              )}
+
               {mail.tlsRpt.rawRecord && (
                 <div className="rounded-lg bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 px-2.5 py-1.5 font-mono text-[11px] text-slate-700 dark:text-slate-300 break-all">
                   {mail.tlsRpt.rawRecord}
@@ -2490,6 +2568,21 @@ export function MailAnalysisView({
               </div>
 
               <p className="text-xs text-slate-600 dark:text-slate-300">{mail.bimi.summary}</p>
+
+              {mail.bimi.cnameChain.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1 text-[11px] text-slate-600 dark:text-slate-300">
+                  <span className="text-slate-500">CNAME:</span>
+                  {mail.bimi.cnameChain.map((c) => (
+                    <span
+                      key={c}
+                      className="inline-flex items-center gap-1 font-mono text-cyan-600 dark:text-cyan-400"
+                    >
+                      <ArrowRight className="w-3 h-3 text-slate-400" />
+                      <HostnameBadge hostname={c} queryTypes={['TXT']} />
+                    </span>
+                  ))}
+                </div>
+              )}
 
               <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
                 DMARC Prerequisite:{' '}
@@ -2646,9 +2739,13 @@ export function MailAnalysisView({
                             className="flex items-center justify-between gap-1.5 text-slate-800 dark:text-slate-200"
                           >
                             <span className="truncate">
-                              {rec.isNullService
-                                ? '. (Service Not Available)'
-                                : `${displayFqdn(rec.target)}:${rec.port}`}
+                              {rec.isNullService ? (
+                                '. (Service Not Available)'
+                              ) : (
+                                <>
+                                  <HostnameBadge hostname={rec.target} />:{rec.port}
+                                </>
+                              )}
                             </span>
                             <span className="text-[10px] text-slate-500 shrink-0">
                               prio={rec.priority} w={rec.weight}

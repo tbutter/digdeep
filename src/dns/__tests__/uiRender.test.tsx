@@ -10,6 +10,11 @@ import { EmailHeaderVerifierCard } from '../../components/EmailHeaderVerifierCar
 import { GraphInspector } from '../../components/GraphInspector';
 import { HistoryPanel } from '../../components/HistoryPanel';
 import {
+  HostnameBadge,
+  inferDefaultQueryTypesForHostname,
+  parseHostnameToken,
+} from '../../components/HostnameBadge';
+import {
   ensureIpAsnInfoLoaded,
   getCachedOrInitialIpInfo,
   IpAsnHoverCardContent,
@@ -290,7 +295,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexCss).toContain('env(safe-area-inset-bottom');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v43');
+    expect(swCode).toContain('digdeep-shell-v44');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -4367,6 +4372,302 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       expect(searchInput.value).toBe('192.0.2.53');
       expect(container.textContent).toContain('IPv4 Reverse DNS Detected:');
       expect(container.textContent).toContain('53.2.0.192.in-addr.arpa');
+
+      await act(async () => {
+        root.unmount();
+      });
+    } finally {
+      if (prevClipboard) {
+        Object.defineProperty(globalThis.navigator, 'clipboard', prevClipboard);
+      }
+      if (prevOnline) Object.defineProperty(globalThis.navigator, 'onLine', prevOnline);
+      if (prevWindow) Object.defineProperty(globalThis, 'window', prevWindow);
+      if (prevDocument) Object.defineProperty(globalThis, 'document', prevDocument);
+    }
+  });
+
+  it('supports #41 HostnameBadge across Zones, Mail, Web, Consensus & dig views with 1-click history pivot, Cmd/Ctrl-Click new-tab deep links, and hover/tap Copy FQDN', async () => {
+    // 1. Token parsing & smart default RR type inference
+    expect(parseHostnameToken('NS1.Cloudflare.COM.')).toEqual({
+      canonicalFqdn: 'ns1.cloudflare.com.',
+      displayHostname: 'ns1.cloudflare.com',
+    });
+    expect(parseHostnameToken('include:_spf.google.com')).toEqual({
+      canonicalFqdn: '_spf.google.com.',
+      displayHostname: '_spf.google.com',
+    });
+    expect(parseHostnameToken('redirect=_spf.example.org')).toEqual({
+      canonicalFqdn: '_spf.example.org.',
+      displayHostname: '_spf.example.org',
+    });
+    expect(parseHostnameToken('+mx:mail.example.org/24')).toEqual({
+      canonicalFqdn: 'mail.example.org.',
+      displayHostname: 'mail.example.org',
+    });
+    expect(parseHostnameToken('.')).toBeNull();
+    expect(parseHostnameToken('1.1.1.1')).toBeNull();
+    expect(parseHostnameToken('*.example.org')).toBeNull();
+    expect(parseHostnameToken('%{i}._spf.example.org')).toBeNull();
+
+    expect(inferDefaultQueryTypesForHostname('ns1.example.org')).toEqual(['A', 'AAAA']);
+    expect(inferDefaultQueryTypesForHostname('_spf.google.com')).toEqual(['TXT']);
+    expect(inferDefaultQueryTypesForHostname('sel1._domainkey.example.org')).toEqual(['TXT']);
+    expect(inferDefaultQueryTypesForHostname('_dmarc.example.org')).toEqual(['TXT']);
+    expect(inferDefaultQueryTypesForHostname('_443._tcp.example.org')).toEqual(['TLSA']);
+
+    // 2. Verify SSR deep link rendering in ZonesPanel (NS + SOA MNAME) and ResponsesPanel (dig NS/MX/SOA)
+    const snapA: AnalysisSnapshot = {
+      ...ipv6FixtureForMobileTest(),
+      id: 'snap-host-pivot-a',
+      zones: [
+        {
+          ...ipv6FixtureForMobileTest().zones[0]!,
+          soa: {
+            kind: 'SOA',
+            mname: 'ns-master.example.org.',
+            rname: 'hostmaster.example.org.',
+            serial: 2026111301,
+            refresh: 3600,
+            retry: 600,
+            expire: 604800,
+            minimum: 300,
+          },
+        },
+      ],
+      queries: [
+        {
+          id: 'q-dig-41',
+          qname: 'example.org.',
+          qtype: 15,
+          qtypeName: 'MX',
+          cd: false,
+          doBit: true,
+          endpoint: 'https://1.1.1.1/dns-query',
+          purpose: 'target',
+          startedAt: 1700000000000,
+          latencyMs: 12,
+          httpStatus: 200,
+          wireBase64: '',
+          requestWireBase64: '',
+          packet: {
+            id: 1,
+            flags: {
+              qr: true,
+              opcode: 0,
+              aa: false,
+              tc: false,
+              rd: true,
+              ra: true,
+              z: 0,
+              ad: true,
+              cd: false,
+              rcode: 0,
+            },
+            questions: [{ name: 'example.org.', type: 15, typeName: 'MX', qclass: 1 }],
+            answers: [
+              {
+                name: 'example.org.',
+                type: 15,
+                typeName: 'MX',
+                rrclass: 1,
+                ttl: 300,
+                rdataBase64: '',
+                canonicalRdataBase64: '',
+                rdataText: '10 mx1.example.org.',
+                parsed: { kind: 'MX', preference: 10, exchange: 'mx1.example.org.' },
+                section: 'answer',
+              },
+              {
+                name: 'example.org.',
+                type: 5,
+                typeName: 'CNAME',
+                rrclass: 1,
+                ttl: 300,
+                rdataBase64: '',
+                canonicalRdataBase64: '',
+                rdataText: 'cdn.example.net.',
+                parsed: { kind: 'GENERIC', target: 'cdn.example.net.' },
+                section: 'answer',
+              },
+            ],
+            authorities: [
+              {
+                name: 'example.org.',
+                type: 2,
+                typeName: 'NS',
+                rrclass: 1,
+                ttl: 3600,
+                rdataBase64: '',
+                canonicalRdataBase64: '',
+                rdataText: 'ns1.example.org.',
+                parsed: { kind: 'GENERIC', target: 'ns1.example.org.' },
+                section: 'authority',
+              },
+            ],
+            additionals: [],
+            wireSize: 96,
+          },
+        },
+      ],
+    };
+
+    const zonesMarkup = renderToStaticMarkup(<ZonesPanel snapshot={snapA} />);
+    expect(zonesMarkup).toContain('data-hostname="ns-master.example.org"');
+    expect(zonesMarkup).toContain('data-hostname="ns1.example.org"');
+    expect(zonesMarkup).toContain('href="?name=ns1.example.org&amp;types=A,AAAA"');
+
+    const responsesMarkup = renderToStaticMarkup(<ResponsesPanel snapshot={snapA} />);
+    expect(responsesMarkup).toContain('data-hostname="mx1.example.org"');
+    expect(responsesMarkup).toContain('data-hostname="cdn.example.net"');
+    expect(responsesMarkup).toContain('data-hostname="ns1.example.org"');
+
+    // 3. Interactive JSDOM tests: hover Copy FQDN, Cmd/Ctrl-Click new-tab passthrough, 1-click pivot + Browser Back/Forward
+    const snapNs1: AnalysisSnapshot = {
+      ...ipv6FixtureForMobileTest(),
+      id: 'snap-host-pivot-ns1',
+      targetName: 'ns1.example.org.',
+      displayDomain: 'ns1.example.org',
+      queryTypes: ['A', 'AAAA'],
+    };
+
+    const mem = new Map<string, string>();
+    Object.defineProperty(globalThis, 'localStorage', {
+      value: {
+        getItem: (k: string) => mem.get(k) ?? null,
+        setItem: (k: string, v: string) => void mem.set(k, v),
+        removeItem: (k: string) => void mem.delete(k),
+        clear: () => mem.clear(),
+      },
+      configurable: true,
+    });
+    saveSnapshot(snapNs1);
+    saveSnapshot(snapA);
+
+    const { JSDOM } = (await import('jsdom' as string)) as {
+      JSDOM: new (
+        markup?: string,
+        opts?: { url?: string }
+      ) => { window: Window & typeof globalThis };
+    };
+    const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
+      url: 'https://digdeep.example/?name=example.org&types=A&tab=zones',
+    });
+
+    const prevWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    const prevDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+    const prevOnline = Object.getOwnPropertyDescriptor(globalThis.navigator, 'onLine');
+    const prevClipboard = Object.getOwnPropertyDescriptor(globalThis.navigator, 'clipboard');
+
+    const clipboardWrites: string[] = [];
+    Object.defineProperty(globalThis, 'window', { value: dom.window, configurable: true });
+    Object.defineProperty(globalThis, 'document', {
+      value: dom.window.document,
+      configurable: true,
+    });
+    Object.defineProperty(globalThis.navigator, 'onLine', {
+      value: false,
+      configurable: true,
+    });
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      value: {
+        writeText: vi.fn(async (txt: string) => {
+          clipboardWrites.push(txt);
+        }),
+      },
+      configurable: true,
+    });
+    (dom.window as unknown as { matchMedia: () => { matches: boolean } }).matchMedia = () => ({
+      matches: false,
+    });
+    (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
+      true;
+
+    try {
+      const { act } = await import('react');
+      const { createRoot } = await import('react-dom/client');
+      const container = dom.window.document.getElementById('root')!;
+      const root = createRoot(container);
+
+      // Test standalone SPF HostnameBadge hover Copy FQDN + Ctrl-Click passthrough
+      const pivots: Array<{ host: string; types: string[] }> = [];
+      await act(async () => {
+        root.render(
+          <div>
+            <HostnameBadge
+              hostname="include:_spf.google.com"
+              onPivot={(host, opts) => pivots.push({ host, types: opts.queryTypes })}
+            >
+              include:_spf.google.com
+            </HostnameBadge>
+          </div>
+        );
+      });
+
+      const spfBadge = container.querySelector(
+        '[data-testid="hostname-badge"][data-hostname="_spf.google.com"]'
+      ) as HTMLAnchorElement;
+      expect(spfBadge).toBeTruthy();
+      expect(spfBadge.getAttribute('href')).toBe('?name=_spf.google.com&types=TXT');
+
+      // Hover opens floating popover -> click Copy FQDN copies canonical "_spf.google.com"
+      await act(async () => {
+        spfBadge.dispatchEvent(new dom.window.MouseEvent('mouseover', { bubbles: true }));
+      });
+      const copyBtn = dom.window.document.body.querySelector(
+        '[data-testid="hostname-badge-copy-btn"]'
+      ) as HTMLButtonElement;
+      expect(copyBtn).toBeTruthy();
+      await act(async () => {
+        copyBtn.click();
+      });
+      expect(clipboardWrites).toEqual(['_spf.google.com']);
+      expect(copyBtn.textContent).toContain('Copied!');
+
+      // Ctrl-Click does NOT preventDefault (native browser new-tab navigation) and does NOT trigger in-place pivot
+      let ctrlClickPrevented = true;
+      await act(async () => {
+        const ctrlEv = new dom.window.MouseEvent('click', {
+          ctrlKey: true,
+          button: 0,
+          bubbles: true,
+          cancelable: true,
+        });
+        spfBadge.dispatchEvent(ctrlEv);
+        ctrlClickPrevented = ctrlEv.defaultPrevented;
+      });
+      expect(ctrlClickPrevented).toBe(false);
+      expect(pivots).toEqual([]);
+
+      // Mount full <App /> at example.org (Zones tab) -> 1-click NS HostnameBadge -> pivots to ns1.example.org & pushes history
+      await act(async () => {
+        root.render(<App />);
+      });
+
+      const searchInput = container.querySelector('input[type="text"]') as HTMLInputElement;
+      expect(searchInput.value).toBe('example.org');
+
+      const nsBadge = container.querySelector(
+        '[data-testid="hostname-badge"][data-hostname="ns1.example.org"]'
+      ) as HTMLAnchorElement;
+      expect(nsBadge).toBeTruthy();
+
+      await act(async () => {
+        nsBadge.click();
+      });
+
+      // Pivoted in-place to ns1.example.org and pushed URL history entry
+      expect(searchInput.value).toBe('ns1.example.org');
+      expect(dom.window.location.search).toContain('name=ns1.example.org');
+      expect(dom.window.location.search).toContain('types=A,AAAA');
+
+      // Browser Back (history.back + popstate) restores example.org snapshot
+      await act(async () => {
+        dom.window.history.back();
+        await new Promise((r) => setTimeout(r, 30));
+        dom.window.dispatchEvent(new dom.window.PopStateEvent('popstate'));
+      });
+      expect(searchInput.value).toBe('example.org');
+      expect(dom.window.location.search).toContain('name=example.org');
 
       await act(async () => {
         root.unmount();

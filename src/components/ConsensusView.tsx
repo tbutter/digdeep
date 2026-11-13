@@ -42,6 +42,7 @@ import {
   findConsensusResolverWireQuery,
   findEcsRegionWireQueries,
 } from '../dns/wireQueryFilter';
+import { HostnameBadge } from './HostnameBadge';
 import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './IpHoverBadge';
 
 function getRoleBadgeMeta(role: DohResolverRole): { label: string; cls: string } {
@@ -545,11 +546,8 @@ function EcsGeoSection({
                   <td className="py-2.5 px-3 max-w-[210px]">
                     {terminalCname ? (
                       <div className="space-y-0.5">
-                        <div
-                          className="text-[11px] text-cyan-700 dark:text-cyan-300 break-all"
-                          title={displayFqdn(terminalCname)}
-                        >
-                          {displayFqdn(terminalCname)}
+                        <div className="text-[11px] text-cyan-700 dark:text-cyan-300 break-all">
+                          <HostnameBadge hostname={terminalCname} />
                         </div>
                         {reg.ipv4.cnameChain.length > 1 && (
                           <div className="text-[10px] text-slate-400">
@@ -826,7 +824,12 @@ function EcsGeoSection({
               <div className="text-[11px] text-slate-500">
                 CNAME:{' '}
                 <span className="text-cyan-700 dark:text-cyan-300">
-                  {customResult.probe.cnameChain.map(displayFqdn).join(' → ')}
+                  {customResult.probe.cnameChain.map((c, cIdx) => (
+                    <span key={c}>
+                      <HostnameBadge hostname={c} />
+                      {cIdx < customResult.probe.cnameChain.length - 1 ? ' → ' : ''}
+                    </span>
+                  ))}
                 </span>
               </div>
             )}
@@ -1211,29 +1214,37 @@ export function ConsensusView({
                     </td>
 
                     <td className="py-2.5 px-3 max-w-[260px]">
-                      {r.ipv4Answers.length === 0 && r.ipv6Answers.length === 0 ? (
-                        <span className="text-slate-400 font-sans italic">none</span>
-                      ) : (
-                        <div className="flex flex-wrap gap-1">
-                          {[...r.ipv4Answers, ...r.ipv6Answers].slice(0, 4).map((ip) => (
-                            <span
-                              key={ip}
-                              className={`rounded px-1.5 py-0.5 text-[11px] ${
-                                r.isSinkholed
-                                  ? 'bg-amber-500/20 text-amber-800 dark:text-amber-200 border border-amber-500/40 font-bold'
-                                  : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
-                              }`}
-                            >
-                              <IpHoverBadge ip={ip} />
-                            </span>
-                          ))}
-                          {r.ipv4Answers.length + r.ipv6Answers.length > 4 && (
-                            <span className="text-[10px] text-slate-400">
-                              +{r.ipv4Answers.length + r.ipv6Answers.length - 4} more
-                            </span>
-                          )}
-                        </div>
-                      )}
+                      <div className="space-y-1">
+                        {r.cnameChain && r.cnameChain.length > 0 && (
+                          <div className="text-[10px] text-cyan-700 dark:text-cyan-300 break-all">
+                            CNAME →{' '}
+                            <HostnameBadge hostname={r.cnameChain[r.cnameChain.length - 1]!} />
+                          </div>
+                        )}
+                        {r.ipv4Answers.length === 0 && r.ipv6Answers.length === 0 ? (
+                          <span className="text-slate-400 font-sans italic">none</span>
+                        ) : (
+                          <div className="flex flex-wrap gap-1">
+                            {[...r.ipv4Answers, ...r.ipv6Answers].slice(0, 4).map((ip) => (
+                              <span
+                                key={ip}
+                                className={`rounded px-1.5 py-0.5 text-[11px] ${
+                                  r.isSinkholed
+                                    ? 'bg-amber-500/20 text-amber-800 dark:text-amber-200 border border-amber-500/40 font-bold'
+                                    : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                                }`}
+                              >
+                                <IpHoverBadge ip={ip} />
+                              </span>
+                            ))}
+                            {r.ipv4Answers.length + r.ipv6Answers.length > 4 && (
+                              <span className="text-[10px] text-slate-400">
+                                +{r.ipv4Answers.length + r.ipv6Answers.length - 4} more
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
                     </td>
 
                     <td className="py-2.5 px-3">

@@ -50,6 +50,7 @@ import { ConsensusView } from './components/ConsensusView';
 import { DohChooser } from './components/DohChooser';
 import { EmailDaneCard } from './components/EmailDaneCard';
 import { HistoryPanel } from './components/HistoryPanel';
+import { registerGlobalPivotHostnameHandler } from './components/HostnameBadge';
 import {
   IpHoverBadge,
   registerGlobalTraceIpHandler,
@@ -944,6 +945,93 @@ export function App() {
     return registerGlobalTraceIpHandler(handleTraceReverseIp);
   }, [handleTraceReverseIp]);
 
+  const handlePivotHostname = useCallback(
+    (
+      hostname: string,
+      pivotOpts: { mode: AnalysisMode; queryTypes: string[] }
+    ) => {
+      const cleanHost = hostname.trim().replace(/\.$/, '');
+      if (!cleanHost) return;
+      const modeToRun = pivotOpts.mode ?? 'dnssec';
+      const typesToRun =
+        pivotOpts.queryTypes && pivotOpts.queryTypes.length > 0
+          ? pivotOpts.queryTypes
+          : ['A', 'AAAA'];
+      const nextTab: ActiveTab =
+        modeToRun === 'mail'
+          ? 'mail'
+          : modeToRun === 'web'
+            ? 'web'
+            : modeToRun === 'consensus'
+              ? 'consensus'
+              : 'graph';
+
+      setCommandPaletteOpen(false);
+      setSettingsOpen(false);
+      setReportModalOpen(false);
+      setExamplesOpen(false);
+      setAutocompleteOpen(false);
+      setFocusedGraphTarget(null);
+      setFocusedWireQuery(null);
+      setAnalysisMode(modeToRun);
+      setDomainInput(cleanHost);
+      if (modeToRun === 'dnssec') {
+        setSelectedTypes(typesToRun);
+        if (typesToRun.some((t) => !(PRIMARY_TYPES as readonly string[]).includes(t))) {
+          setShowExtraTypes(true);
+        }
+      }
+      setActiveTab(nextTab);
+
+      if (isOffline) {
+        const matchingSaved = snapshots.find(
+          (s) =>
+            (s.mode ?? 'dnssec') === modeToRun &&
+            (s.queriedEmail ?? s.displayDomain).toLowerCase() === cleanHost.toLowerCase()
+        );
+        if (typeof window !== 'undefined' && window.history?.pushState) {
+          const url = new URL(window.location.href);
+          url.hash = '';
+          url.search = buildDeepLinkSearch({
+            name: cleanHost,
+            mode: modeToRun,
+            types: matchingSaved?.queryTypes ?? typesToRun,
+            dkimSelectors: matchingSaved?.customDkimSelectors,
+            dohEndpoint: matchingSaved?.dohEndpoint ?? settings.dohEndpoint,
+            tab: nextTab,
+            showSoaAndNs: settings.showSoaAndNs,
+            showStandbyKeys: settings.showStandbyKeys,
+          });
+          if (url.toString() !== window.location.href) {
+            window.history.pushState({}, '', url.toString());
+          }
+        }
+        if (matchingSaved) {
+          setFrozenIncidentMeta((cur) => (cur?.snapshotId === matchingSaved.id ? cur : null));
+          setActiveSnapshot(matchingSaved);
+        }
+        return;
+      }
+
+      void executeAnalysis(cleanHost, typesToRun, {
+        modeOverride: modeToRun,
+        pushHistory: true,
+      });
+    },
+    [
+      executeAnalysis,
+      isOffline,
+      settings.dohEndpoint,
+      settings.showSoaAndNs,
+      settings.showStandbyKeys,
+      snapshots,
+    ]
+  );
+
+  useEffect(() => {
+    return registerGlobalPivotHostnameHandler(handlePivotHostname, settings.dohEndpoint);
+  }, [handlePivotHostname, settings.dohEndpoint]);
+
   const modalOverlayOpen = settingsOpen || reportModalOpen || commandPaletteOpen;
   const mobileInspectorOpen = Boolean(
     focusedGraphTarget &&
@@ -1212,8 +1300,9 @@ export function App() {
       const cached = snapshots.find(
         (s) =>
           (s.mode ?? 'dnssec') === nextMode &&
-          (s.queriedEmail ?? s.displayDomain).toLowerCase() ===
-            parsed.name!.toLowerCase().replace(/\.$/, '') &&
+          ((s.queriedEmail ?? s.displayDomain).toLowerCase() ===
+            parsed.name!.toLowerCase().replace(/\.$/, '') ||
+            s.queriedIp?.toLowerCase() === parsed.name!.toLowerCase()) &&
           (nextMode === 'mail'
             ? (s.customDkimSelectors ?? []).join(',') === nextDkimSels.join(',')
             : nextMode === 'web' || nextMode === 'consensus'
