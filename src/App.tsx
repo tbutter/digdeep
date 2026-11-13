@@ -4,6 +4,7 @@ import {
   ArrowUp,
   Check,
   Clock,
+  Command,
   Download,
   FileCode2,
   FileText,
@@ -44,6 +45,7 @@ import {
 } from 'react';
 import { AuditPanel } from './components/AuditPanel';
 import { ChainGraphView } from './components/ChainGraphView';
+import { CommandPaletteModal } from './components/CommandPaletteModal';
 import { ConsensusView } from './components/ConsensusView';
 import { DohChooser } from './components/DohChooser';
 import { EmailDaneCard } from './components/EmailDaneCard';
@@ -64,6 +66,7 @@ import { StatusBadge, STATUS_META } from './components/StatusBadge';
 import { WebAnalysisView } from './components/WebAnalysisView';
 import { ZonesPanel } from './components/ZonesPanel';
 import { reverifySnapshot, runDnsvizAnalysis, SNAPSHOT_ENGINE_VERSION } from './dns/analyzer';
+import type { CommandPaletteAction } from './dns/commandPalette';
 import { runConsensusAnalysis } from './dns/consensusAnalyzer';
 import { ANALYSIS_MODES, formatDohShortLabel, QUERYABLE_RR_TYPES } from './dns/constants';
 import { parseEmailDaneInput } from './dns/emailDane';
@@ -303,6 +306,7 @@ export function App() {
   const [progress, setProgress] = useState<AnalysisProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [examplesOpen, setExamplesOpen] = useState(false);
   const [autocompleteOpen, setAutocompleteOpen] = useState(false);
   const [activeSuggestionIdx, setActiveSuggestionIdx] = useState(-1);
@@ -646,9 +650,17 @@ export function App() {
     updateNavTabsOverflow();
   }, [activeTab, activeSnapshot?.id, updateNavTabsOverflow]);
 
-  // Press '/' anywhere outside inputs to focus domain search bar
+  // Global Cmd+K / Ctrl+K Command Palette & '/' to focus domain search bar
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setExamplesOpen(false);
+        setAutocompleteOpen(false);
+        setActiveSuggestionIdx(-1);
+        setCommandPaletteOpen((prev) => !prev);
+        return;
+      }
       if (e.key === 'Escape') {
         setExamplesOpen(false);
         setAutocompleteOpen(false);
@@ -890,7 +902,7 @@ export function App() {
     ]
   );
 
-  const modalOverlayOpen = settingsOpen || reportModalOpen;
+  const modalOverlayOpen = settingsOpen || reportModalOpen || commandPaletteOpen;
   const mobileInspectorOpen = Boolean(
     focusedGraphTarget &&
       activeTab === 'graph' &&
@@ -938,7 +950,9 @@ export function App() {
 
     if (!prevModalOpenRef.current && modalOverlayOpen) {
       prevModalOpenRef.current = true;
-      pushTransientOverlay(settingsOpen ? 'settings' : 'report');
+      pushTransientOverlay(
+        commandPaletteOpen ? 'command-palette' : settingsOpen ? 'settings' : 'report'
+      );
     } else if (prevModalOpenRef.current && !modalOverlayOpen) {
       prevModalOpenRef.current = false;
       popTransientOverlay();
@@ -951,7 +965,7 @@ export function App() {
       prevMobileInspectorOpenRef.current = false;
       popTransientOverlay();
     }
-  }, [modalOverlayOpen, mobileInspectorOpen, settingsOpen]);
+  }, [commandPaletteOpen, modalOverlayOpen, mobileInspectorOpen, settingsOpen]);
 
   const hydrateFrozenHash = useCallback(
     async (rawHash: string, rawSearch: string) => {
@@ -1089,6 +1103,7 @@ export function App() {
         prevModalOpenRef.current = false;
         setSettingsOpen(false);
         setReportModalOpen(false);
+        setCommandPaletteOpen(false);
         return;
       }
       if (mobileInspectorOpenRef.current && pushedOverlayCountRef.current > 0) {
@@ -2024,6 +2039,138 @@ export function App() {
     setActiveTab(tabId);
   };
 
+  const handleExecuteCommandPaletteAction = (action: CommandPaletteAction) => {
+    const activeTarget =
+      activeSnapshot?.queriedEmail ??
+      activeSnapshot?.queriedIp ??
+      activeSnapshot?.displayDomain ??
+      (domainInput.trim() || 'digdeep.butter.eu');
+
+    switch (action.type) {
+      case 'focus-graph': {
+        if (
+          (action.ensureStandbyVisible && !settings.showStandbyKeys) ||
+          (action.ensureSoaNsVisible && !settings.showSoaAndNs)
+        ) {
+          const nextSettings: UserSettings = {
+            ...settings,
+            ...(action.ensureStandbyVisible ? { showStandbyKeys: true } : {}),
+            ...(action.ensureSoaNsVisible ? { showSoaAndNs: true } : {}),
+          };
+          setSettings(nextSettings);
+          saveUserSettings(nextSettings);
+        }
+        setFocusedGraphTarget(action.targetId);
+        setActiveTab('graph');
+        return;
+      }
+      case 'inspect-wire':
+        handleInspectWireQuery(action.queryId, action.wireMode);
+        return;
+      case 'switch-tab':
+        handleSelectNavTab(action.tab);
+        return;
+      case 'run-mode': {
+        setAnalysisMode(action.mode);
+        setDomainInput(activeTarget);
+        if (isOffline) {
+          const matchingSaved = snapshots.find(
+            (s) =>
+              (s.mode ?? 'dnssec') === action.mode &&
+              (s.queriedEmail ?? s.queriedIp ?? s.displayDomain).toLowerCase() ===
+                activeTarget.toLowerCase().replace(/\.$/, '')
+          );
+          if (matchingSaved) {
+            selectHistorySnapshot(matchingSaved);
+          }
+          return;
+        }
+        if (!loading && !untrustedDohPending) {
+          void executeAnalysis(activeTarget, selectedTypes, {
+            modeOverride: action.mode,
+            pushHistory: true,
+          });
+        }
+        return;
+      }
+      case 'reprobe':
+        if (!isOffline && !loading) {
+          void executeAnalysis(
+            activeTarget,
+            activeSnapshot?.queryTypes ?? selectedTypes,
+            {
+              modeOverride: activeSnapshot?.mode ?? analysisMode,
+              pushHistory: true,
+            }
+          );
+        }
+        return;
+      case 'switch-resolver': {
+        const nextSettings: UserSettings = {
+          ...settings,
+          dohEndpoint: action.endpoint,
+        };
+        setSettings(nextSettings);
+        saveUserSettings(nextSettings);
+        if (action.reprobe && !isOffline && !loading) {
+          void executeAnalysis(
+            activeTarget,
+            activeSnapshot?.queryTypes ?? selectedTypes,
+            {
+              modeOverride: activeSnapshot?.mode ?? analysisMode,
+              dohEndpointOverride: action.endpoint,
+              pushHistory: true,
+            }
+          );
+        }
+        return;
+      }
+      case 'copy-share-link':
+        void handleCopyShareLink();
+        return;
+      case 'copy-frozen-link':
+        void handleCopyFrozenLink();
+        return;
+      case 'download-frozen-gz':
+        void handleDownloadFrozenGzip();
+        return;
+      case 'compare-frozen-live':
+        void handleCompareFrozenAgainstLive();
+        return;
+      case 'copy-markdown':
+        void handleCopyMarkdownReport();
+        return;
+      case 'open-report-modal':
+        openReportModal(action.tab);
+        return;
+      case 'open-settings':
+        setSettingsOpen(true);
+        return;
+      case 'toggle-theme':
+        setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
+        return;
+      case 'toggle-standby-keys':
+        void handleUpdateSettings({
+          ...settings,
+          showStandbyKeys: !settings.showStandbyKeys,
+        });
+        return;
+      case 'toggle-soa-ns':
+        void handleUpdateSettings({
+          ...settings,
+          showSoaAndNs: !settings.showSoaAndNs,
+        });
+        return;
+      case 'select-history': {
+        const match = snapshots.find((s) => s.id === action.snapshotId);
+        if (match) {
+          selectHistorySnapshot(match);
+        }
+        return;
+      }
+    }
+  };
+
   if (activeSnapshot) {
     seedIpAsnCacheFromSnapshot(activeSnapshot);
     seedPublicSuffixCacheFromLogs(activeSnapshot.queries);
@@ -2075,6 +2222,21 @@ export function App() {
                 <span>Install App</span>
               </button>
             )}
+
+            <button
+              type="button"
+              data-testid="open-command-palette-btn"
+              onClick={() => setCommandPaletteOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:border-cyan-500 transition-colors cursor-pointer"
+              title="Open Global Command Palette (Cmd+K / Ctrl+K)"
+              aria-label="Open Global Command Palette"
+            >
+              <Command className="w-3.5 h-3.5 text-cyan-500" />
+              <span className="hidden lg:inline">Commands</span>
+              <kbd className="hidden sm:inline-block rounded border border-slate-300/80 dark:border-slate-700 bg-white dark:bg-slate-950 px-1 py-0.2 font-mono text-[10px] text-slate-500 dark:text-slate-400">
+                ⌘K
+              </kbd>
+            </button>
 
             <button
               type="button"
@@ -3461,6 +3623,25 @@ export function App() {
           </div>
         </div>
       </footer>
+
+      <CommandPaletteModal
+        open={commandPaletteOpen}
+        context={{
+          activeSnapshot,
+          snapshots,
+          activeTab,
+          analysisMode,
+          domainInput,
+          settings,
+          theme,
+          isOffline,
+          isViewingFrozenSnapshot: Boolean(
+            activeSnapshot && frozenIncidentMeta?.snapshotId === activeSnapshot.id
+          ),
+        }}
+        onClose={() => setCommandPaletteOpen(false)}
+        onExecuteAction={handleExecuteCommandPaletteAction}
+      />
 
       <ReportExportModal
         open={reportModalOpen}

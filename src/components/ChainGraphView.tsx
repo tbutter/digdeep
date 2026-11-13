@@ -368,7 +368,7 @@ export function ChainGraphView({
   useEffect(() => {
     hasUserZoomedRef.current = false;
     setSelection(null);
-    const id = requestAnimationFrame(() => {
+    const applyFit = () => {
       const rootEl = rootWrapperRef.current;
       const w =
         rootEl && rootEl.getBoundingClientRect().width > 0
@@ -377,8 +377,17 @@ export function ChainGraphView({
       setWrapperWidth(w);
       const h = computeDefaultCanvasHeight(graph, w);
       setTransform(computeDefaultGraphTransform(graph, w, h));
-    });
-    return () => cancelAnimationFrame(id);
+    };
+    if (typeof requestAnimationFrame !== 'function') {
+      applyFit();
+      return;
+    }
+    const id = requestAnimationFrame(applyFit);
+    return () => {
+      if (typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(id);
+      }
+    };
   }, [snapshot.id, graph]);
 
   // Keep wrapperWidth (and default zoom if user hasn't manually zoomed/panned) synced to container width

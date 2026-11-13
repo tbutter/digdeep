@@ -290,7 +290,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexCss).toContain('env(safe-area-inset-bottom');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v40');
+    expect(swCode).toContain('digdeep-shell-v41');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -3844,6 +3844,192 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
         });
       } finally {
         fetchSpy.mockRestore();
+        if (prevOnline) Object.defineProperty(globalThis.navigator, 'onLine', prevOnline);
+        if (prevWindow) Object.defineProperty(globalThis, 'window', prevWindow);
+        if (prevDocument) Object.defineProperty(globalThis, 'document', prevDocument);
+      }
+    },
+    30_000
+  );
+
+  it(
+    'opens Global Command Palette via Cmd+K / Ctrl+K (even from focused input), supports ArrowUp/ArrowDown/Enter/Esc & ARIA combobox semantics (#64)',
+    async () => {
+      const liveSnap = await runDnsvizAnalysis('cloudflare.com', { queryTypes: ['A'] });
+
+      const mem = new Map<string, string>();
+      Object.defineProperty(globalThis, 'localStorage', {
+        value: {
+          getItem: (k: string) => mem.get(k) ?? null,
+          setItem: (k: string, v: string) => void mem.set(k, v),
+          removeItem: (k: string) => void mem.delete(k),
+          clear: () => mem.clear(),
+        },
+        configurable: true,
+      });
+      saveSnapshot(liveSnap);
+
+      const { JSDOM } = (await import('jsdom' as string)) as {
+        JSDOM: new (
+          markup?: string,
+          opts?: { url?: string }
+        ) => { window: Window & typeof globalThis };
+      };
+      const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
+        url: 'https://digdeep.example/?name=cloudflare.com&tab=graph',
+      });
+
+      const prevWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+      const prevDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+      const prevOnline = Object.getOwnPropertyDescriptor(globalThis.navigator, 'onLine');
+      Object.defineProperty(globalThis, 'window', { value: dom.window, configurable: true });
+      Object.defineProperty(globalThis, 'document', {
+        value: dom.window.document,
+        configurable: true,
+      });
+      Object.defineProperty(globalThis.navigator, 'onLine', {
+        value: false,
+        configurable: true,
+      });
+      (dom.window as unknown as { matchMedia: () => { matches: boolean } }).matchMedia = () => ({
+        matches: false,
+      });
+      (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
+        true;
+
+      try {
+        const { act } = await import('react');
+        const { createRoot } = await import('react-dom/client');
+        const container = dom.window.document.getElementById('root')!;
+        const root = createRoot(container);
+
+        await act(async () => {
+          root.render(<App />);
+        });
+
+        expect(container.querySelector('[data-testid="open-command-palette-btn"]')).toBeTruthy();
+        expect(container.querySelector('[data-testid="command-palette-modal"]')).toBeNull();
+
+        // Focus the domain search input first, then dispatch Ctrl+K -> must still open palette
+        const searchInput = container.querySelector('input[type="text"]') as HTMLInputElement;
+        searchInput.focus();
+        await act(async () => {
+          dom.window.dispatchEvent(
+            new dom.window.KeyboardEvent('keydown', {
+              key: 'k',
+              ctrlKey: true,
+              bubbles: true,
+              cancelable: true,
+            })
+          );
+        });
+
+        const modal = container.querySelector('[data-testid="command-palette-modal"]');
+        expect(modal).toBeTruthy();
+        expect(modal!.getAttribute('role')).toBe('dialog');
+        expect(modal!.getAttribute('aria-modal')).toBe('true');
+
+        const comboInput = container.querySelector(
+          '[data-testid="command-palette-input"]'
+        ) as HTMLInputElement;
+        const listbox = container.querySelector('[data-testid="command-palette-listbox"]');
+        expect(comboInput.getAttribute('role')).toBe('combobox');
+        expect(comboInput.getAttribute('aria-controls')).toBe('digdeep-command-listbox');
+        expect(listbox?.getAttribute('role')).toBe('listbox');
+
+        // Navigate with ArrowDown / ArrowUp and verify aria-selected & aria-activedescendant update
+        const optionsBefore = listbox!.querySelectorAll('[role="option"]');
+        expect(optionsBefore.length).toBeGreaterThan(5);
+        expect(optionsBefore[0]!.getAttribute('aria-selected')).toBe('true');
+
+        await act(async () => {
+          comboInput.dispatchEvent(
+            new dom.window.KeyboardEvent('keydown', {
+              key: 'ArrowDown',
+              bubbles: true,
+              cancelable: true,
+            })
+          );
+        });
+        expect(listbox!.querySelectorAll('[role="option"]')[1]!.getAttribute('aria-selected')).toBe(
+          'true'
+        );
+        expect(comboInput.getAttribute('aria-activedescendant')).toBe(
+          listbox!.querySelectorAll('[role="option"]')[1]!.id
+        );
+
+        await act(async () => {
+          comboInput.dispatchEvent(
+            new dom.window.KeyboardEvent('keydown', {
+              key: 'ArrowUp',
+              bubbles: true,
+              cancelable: true,
+            })
+          );
+        });
+        expect(listbox!.querySelectorAll('[role="option"]')[0]!.getAttribute('aria-selected')).toBe(
+          'true'
+        );
+
+        // Filter to "Go to Audit & RFC Checks" via input value setter and press Enter
+        const nativeSetter = Object.getOwnPropertyDescriptor(
+          dom.window.HTMLInputElement.prototype,
+          'value'
+        )?.set;
+        await act(async () => {
+          nativeSetter?.call(comboInput, 'Audit & RFC Checks');
+          comboInput.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+        });
+
+        expect(
+          container.querySelector('[data-testid="command-item-nav-tab-audit"]')
+        ).toBeTruthy();
+
+        await act(async () => {
+          comboInput.dispatchEvent(
+            new dom.window.KeyboardEvent('keydown', {
+              key: 'Enter',
+              bubbles: true,
+              cancelable: true,
+            })
+          );
+        });
+
+        // Modal closes and active tab switched to 'audit'
+        expect(container.querySelector('[data-testid="command-palette-modal"]')).toBeNull();
+        expect(
+          container
+            .querySelector('[data-testid="nav-tab-audit"]')
+            ?.getAttribute('data-active-tab')
+        ).toBe('true');
+
+        // Open via header button and close via Escape
+        const headerBtn = container.querySelector(
+          '[data-testid="open-command-palette-btn"]'
+        ) as HTMLButtonElement;
+        await act(async () => {
+          headerBtn.click();
+        });
+        const reopenedInput = container.querySelector(
+          '[data-testid="command-palette-input"]'
+        ) as HTMLInputElement;
+        expect(reopenedInput).toBeTruthy();
+
+        await act(async () => {
+          reopenedInput.dispatchEvent(
+            new dom.window.KeyboardEvent('keydown', {
+              key: 'Escape',
+              bubbles: true,
+              cancelable: true,
+            })
+          );
+        });
+        expect(container.querySelector('[data-testid="command-palette-modal"]')).toBeNull();
+
+        await act(async () => {
+          root.unmount();
+        });
+      } finally {
         if (prevOnline) Object.defineProperty(globalThis.navigator, 'onLine', prevOnline);
         if (prevWindow) Object.defineProperty(globalThis, 'window', prevWindow);
         if (prevDocument) Object.defineProperty(globalThis, 'document', prevDocument);
