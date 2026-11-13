@@ -10,7 +10,7 @@ import {
   Trash2,
   Upload,
 } from 'lucide-react';
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { formatDohShortLabel } from '../dns/constants';
 import type { AnalysisMode, AnalysisSnapshot } from '../dns/types';
 import { diffSnapshots, getStorageStats } from '../storage/historyStore';
@@ -42,6 +42,7 @@ function formatDiffOptionLabel(s: AnalysisSnapshot): string {
 export function HistoryPanel({
   snapshots,
   activeSnapshotId,
+  externalDiffPair = null,
   onSelectSnapshot,
   onReprobe,
   onTogglePin,
@@ -51,6 +52,7 @@ export function HistoryPanel({
 }: {
   snapshots: AnalysisSnapshot[];
   activeSnapshotId?: string;
+  externalDiffPair?: { aId: string; bId: string; seq: number } | null;
   onSelectSnapshot: (snap: AnalysisSnapshot) => void;
   onReprobe: (domain: string, types: string[], mode?: AnalysisMode) => void;
   onTogglePin: (id: string, pinned: boolean) => void;
@@ -62,11 +64,22 @@ export function HistoryPanel({
   const [filter, setFilter] = useState<
     'all' | 'pinned' | 'secure' | 'bogus' | 'policy-error' | 'insecure'
   >('all');
-  const [diffAId, setDiffAId] = useState<string>(snapshots[1]?.id ?? snapshots[0]?.id ?? '');
-  const [diffBId, setDiffBId] = useState<string>(snapshots[0]?.id ?? '');
-  const [showDiff, setShowDiff] = useState(false);
+  const [diffAId, setDiffAId] = useState<string>(
+    () => externalDiffPair?.aId ?? snapshots[1]?.id ?? snapshots[0]?.id ?? ''
+  );
+  const [diffBId, setDiffBId] = useState<string>(
+    () => externalDiffPair?.bId ?? snapshots[0]?.id ?? ''
+  );
+  const [showDiff, setShowDiff] = useState<boolean>(() => Boolean(externalDiffPair));
   const [importError, setImportError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!externalDiffPair) return;
+    setDiffAId(externalDiffPair.aId);
+    setDiffBId(externalDiffPair.bId);
+    setShowDiff(true);
+  }, [externalDiffPair?.seq, externalDiffPair?.aId, externalDiffPair?.bId]);
 
   const stats = useMemo(() => getStorageStats(), [snapshots]);
 

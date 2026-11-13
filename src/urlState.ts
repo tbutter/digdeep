@@ -13,6 +13,7 @@ export type ActiveTab =
   | 'audit'
   | 'responses'
   | 'zones'
+  | 'watch'
   | 'portfolio'
   | 'history';
 
@@ -24,6 +25,7 @@ const VALID_TABS: readonly ActiveTab[] = [
   'audit',
   'responses',
   'zones',
+  'watch',
   'portfolio',
   'history',
 ];

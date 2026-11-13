@@ -25,6 +25,7 @@ import {
   Sparkles,
   Sun,
   Terminal,
+  Timer,
   WifiOff,
   X,
 } from 'lucide-react';
@@ -45,6 +46,7 @@ import { DohChooser } from './components/DohChooser';
 import { EmailDaneCard } from './components/EmailDaneCard';
 import { HistoryPanel } from './components/HistoryPanel';
 import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './components/IpHoverBadge';
+import { LiveWatchView } from './components/LiveWatchView';
 import { MailAnalysisView } from './components/MailAnalysisView';
 import { PortfolioView, type PortfolioDrillDownTab } from './components/PortfolioView';
 import {
@@ -62,6 +64,7 @@ import { reverifySnapshot, runDnsvizAnalysis, SNAPSHOT_ENGINE_VERSION } from './
 import { runConsensusAnalysis } from './dns/consensusAnalyzer';
 import { ANALYSIS_MODES, formatDohShortLabel, QUERYABLE_RR_TYPES } from './dns/constants';
 import { parseEmailDaneInput } from './dns/emailDane';
+import { normalizeFqdn } from './dns/encoding';
 import { parseReverseIpInput } from './dns/ipUtils';
 import {
   parseDkimSelectorInput,
@@ -87,7 +90,12 @@ import {
   type PortfolioBatchState,
 } from './dns/portfolioAnalyzer';
 import { formatSnapshotMarkdownReport } from './dns/reportExport';
-import type { AnalysisMode, AnalysisProgress, AnalysisSnapshot } from './dns/types';
+import {
+  createTtlWatchController,
+  type TtlWatchController,
+  type TtlWatchState,
+} from './dns/ttlWatch';
+import type { AnalysisMode, AnalysisProgress, AnalysisSnapshot, DohQueryLog } from './dns/types';
 import { runWebAnalysis } from './dns/webAnalyzer';
 import type { FocusedWireQueryRequest, FocusedWireSubMode } from './dns/wireQueryFilter';
 import { usePwaInstall } from './pwa/usePwaInstall';
@@ -333,11 +341,119 @@ export function App() {
   const [portfolioBatchState, setPortfolioBatchState] = useState<PortfolioBatchState | null>(null);
   const portfolioRunnerRef = useRef<PortfolioBatchRunner | null>(null);
 
+  const [historyDiffRequest, setHistoryDiffRequest] = useState<{
+    aId: string;
+    bId: string;
+    seq: number;
+  } | null>(null);
+
+  const watchControllerRef = useRef<TtlWatchController | null>(null);
+  const [watchState, setWatchState] = useState<TtlWatchState>(() => {
+    const initTarget =
+      initialBootState.activeSnapshot?.targetName ?? initialBootState.domainInput;
+    const ctrl = createTtlWatchController({
+      targetName: initTarget,
+      primaryEndpoint: initialBootState.settings.dohEndpoint,
+      trustAnchors: initialBootState.settings.trustAnchors,
+      initialSnapshot: initialBootState.activeSnapshot,
+      onUpdate: (next) => setWatchState(next),
+    });
+    watchControllerRef.current = ctrl;
+    return ctrl.getState();
+  });
+
   useEffect(() => {
     return () => {
       portfolioRunnerRef.current?.cancel();
+      watchControllerRef.current?.stop();
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const onVisibilityChange = () => {
+      watchControllerRef.current?.handleVisibilityChange(document.visibilityState === 'hidden');
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, []);
+
+  // Re-bind Live TTL Watch controller whenever the active target domain changes (or seed from a fresh snapshot before pulsing)
+  useEffect(() => {
+    const desiredTarget = normalizeFqdn(activeSnapshot?.targetName ?? domainInput);
+    const currentCtrl = watchControllerRef.current;
+    const currentState = currentCtrl?.getState();
+    const targetChanged = !currentState || currentState.targetName !== desiredTarget;
+    const shouldReseedIdle =
+      Boolean(activeSnapshot) &&
+      currentState?.targetName === desiredTarget &&
+      currentState.completedTicks === 0 &&
+      currentState.latestSnapshot?.id !== activeSnapshot?.id;
+
+    if (!targetChanged && !shouldReseedIdle) return;
+
+    currentCtrl?.stop();
+    const nextCtrl = createTtlWatchController({
+      targetName: desiredTarget,
+      primaryEndpoint: settings.dohEndpoint,
+      trustAnchors: settings.trustAnchors,
+      initialSnapshot:
+        activeSnapshot && normalizeFqdn(activeSnapshot.targetName) === desiredTarget
+          ? activeSnapshot
+          : null,
+      onUpdate: (next) => setWatchState(next),
+    });
+    watchControllerRef.current = nextCtrl;
+    setWatchState(nextCtrl.getState());
+  }, [activeSnapshot, domainInput, settings.dohEndpoint, settings.trustAnchors]);
+
+  const handleInspectWatchWireQuery = useCallback(
+    (queryLog: DohQueryLog, mode: FocusedWireSubMode = 'dig') => {
+      setActiveSnapshot((prev) => {
+        if (!prev) {
+          const latest = watchControllerRef.current?.getState().latestSnapshot ?? null;
+          if (!latest) return prev;
+          if (latest.queries.some((q) => q.id === queryLog.id)) return latest;
+          return { ...latest, queries: [...latest.queries, queryLog] };
+        }
+        if (prev.queries.some((q) => q.id === queryLog.id)) return prev;
+        return { ...prev, queries: [...prev.queries, queryLog] };
+      });
+      setFocusedWireQuery((prev) => ({
+        queryId: queryLog.id,
+        mode,
+        seq: (prev?.seq ?? 0) + 1,
+      }));
+      setActiveTab('responses');
+    },
+    []
+  );
+
+  const handleLoadWatchSnapshot = useCallback((snap: AnalysisSnapshot) => {
+    const updated = saveSnapshot(snap);
+    setSnapshots(updated);
+    setFocusedGraphTarget(null);
+    setFocusedWireQuery(null);
+    setActiveSnapshot(snap);
+    setAnalysisMode(snap.mode ?? 'consensus');
+    setDomainInput(snap.displayDomain);
+    setActiveTab(snap.mode === 'consensus' ? 'consensus' : 'graph');
+  }, []);
+
+  const handleOpenWatchInHistoryDiff = useCallback(
+    (older: AnalysisSnapshot, newer: AnalysisSnapshot) => {
+      saveSnapshot(older);
+      const updated = saveSnapshot(newer);
+      setSnapshots(updated);
+      setHistoryDiffRequest((prev) => ({
+        aId: older.id,
+        bId: newer.id,
+        seq: (prev?.seq ?? 0) + 1,
+      }));
+      setActiveTab('history');
+    },
+    []
+  );
 
   const recentHistoryDomains = useMemo(() => {
     const seen = new Set<string>();
@@ -655,7 +771,9 @@ export function App() {
         setExternalCustomWire(null);
 
         let nextTab: ActiveTab = activeTab;
-        if (modeToRun === 'mail') {
+        if (activeTab === 'watch') {
+          nextTab = 'watch';
+        } else if (modeToRun === 'mail') {
           if (
             activeTab === 'history' ||
             activeTab === 'portfolio' ||
@@ -960,7 +1078,9 @@ export function App() {
     if (isOffline && snapshots.length > 0) return;
     if (untrustedDohPending) return;
     const { deepLink } = initialBootState;
-    if (deepLink.tab === 'portfolio' && deepLink.name === null) return;
+    if ((deepLink.tab === 'portfolio' || deepLink.tab === 'watch') && deepLink.name === null) {
+      return;
+    }
     if (
       (!isOffline &&
         (deepLink.name !== null ||
@@ -1513,6 +1633,13 @@ export function App() {
           shortLabel: 'Zones',
           icon: Globe,
           badge: activeSnapshot.zones.length,
+        },
+        {
+          id: 'watch' as const,
+          label: 'Live TTL & Cache Watch',
+          shortLabel: 'Watch',
+          icon: Timer,
+          ...(watchState.transitions.length > 0 ? { badge: watchState.transitions.length } : {}),
         },
         {
           id: 'portfolio' as const,
@@ -2334,6 +2461,21 @@ export function App() {
 
                   <button
                     type="button"
+                    data-testid="open-watch-btn"
+                    onClick={() => setActiveTab('watch')}
+                    className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer ${
+                      activeTab === 'watch'
+                        ? 'border-cyan-500 bg-cyan-500/15 text-cyan-800 dark:text-cyan-200 font-semibold'
+                        : 'border-slate-200 dark:border-slate-700 hover:border-cyan-500 text-slate-700 dark:text-slate-200'
+                    }`}
+                    title="Open Live TTL Countdown, Cache-Decay & RFC 8767 Serve-Stale Watch Mode"
+                  >
+                    <Timer className="w-3.5 h-3.5 text-cyan-500" />
+                    <span>Watch TTL</span>
+                  </button>
+
+                  <button
+                    type="button"
                     disabled={loading}
                     onClick={() =>
                       void executeAnalysis(
@@ -2536,6 +2678,7 @@ export function App() {
                   setActiveTab('responses');
                 }}
                 onInspectWireQuery={handleInspectWireQuery}
+                onOpenLiveWatch={() => setActiveTab('watch')}
               />
             )}
 
@@ -2590,6 +2733,25 @@ export function App() {
 
             {activeTab === 'zones' && <ZonesPanel snapshot={activeSnapshot} />}
 
+            {activeTab === 'watch' && (
+              <LiveWatchView
+                watchState={watchState}
+                primaryEndpoint={settings.dohEndpoint}
+                activeSnapshot={activeSnapshot}
+                isOffline={isOffline}
+                onPulseOnce={() => void watchControllerRef.current?.pulseOnce()}
+                onStartWatch={(mode) => void watchControllerRef.current?.start(mode)}
+                onPauseWatch={() => watchControllerRef.current?.pause()}
+                onResumeWatch={() => watchControllerRef.current?.resume()}
+                onStopWatch={() => watchControllerRef.current?.stop()}
+                onContinueBeyondCap={() => watchControllerRef.current?.continueBeyondCap()}
+                onUpdateConfig={(patch) => watchControllerRef.current?.updateConfig(patch)}
+                onInspectWatchWireQuery={handleInspectWatchWireQuery}
+                onLoadSnapshot={handleLoadWatchSnapshot}
+                onOpenInHistoryDiff={handleOpenWatchInHistoryDiff}
+              />
+            )}
+
             {activeTab === 'portfolio' && (
               <PortfolioView
                 domainsText={portfolioDomainsText}
@@ -2612,6 +2774,7 @@ export function App() {
               <HistoryPanel
                 snapshots={snapshots}
                 activeSnapshotId={activeSnapshot.id}
+                externalDiffPair={historyDiffRequest}
                 onSelectSnapshot={(snap) => {
                   const snapMode: AnalysisMode = snap.mode ?? 'dnssec';
                   setFocusedGraphTarget(null);
@@ -2673,6 +2836,25 @@ export function App() {
           </>
         )}
 
+        {!activeSnapshot && !loading && activeTab === 'watch' && (
+          <LiveWatchView
+            watchState={watchState}
+            primaryEndpoint={settings.dohEndpoint}
+            activeSnapshot={null}
+            isOffline={isOffline}
+            onPulseOnce={() => void watchControllerRef.current?.pulseOnce()}
+            onStartWatch={(mode) => void watchControllerRef.current?.start(mode)}
+            onPauseWatch={() => watchControllerRef.current?.pause()}
+            onResumeWatch={() => watchControllerRef.current?.resume()}
+            onStopWatch={() => watchControllerRef.current?.stop()}
+            onContinueBeyondCap={() => watchControllerRef.current?.continueBeyondCap()}
+            onUpdateConfig={(patch) => watchControllerRef.current?.updateConfig(patch)}
+            onInspectWatchWireQuery={handleInspectWatchWireQuery}
+            onLoadSnapshot={handleLoadWatchSnapshot}
+            onOpenInHistoryDiff={handleOpenWatchInHistoryDiff}
+          />
+        )}
+
         {!activeSnapshot && !loading && activeTab === 'portfolio' && (
           <PortfolioView
             domainsText={portfolioDomainsText}
@@ -2691,9 +2873,13 @@ export function App() {
           />
         )}
 
-        {!activeSnapshot && !loading && activeTab !== 'portfolio' && (
+        {!activeSnapshot &&
+          !loading &&
+          activeTab !== 'portfolio' &&
+          activeTab !== 'watch' && (
           <HistoryPanel
             snapshots={snapshots}
+            externalDiffPair={historyDiffRequest}
             onSelectSnapshot={(snap) => {
               const snapMode: AnalysisMode = snap.mode ?? 'dnssec';
               setFocusedGraphTarget(null);

@@ -121,7 +121,9 @@ export function evaluateConsensusFromSnapshotData(params: {
         !q.ecsSubnet &&
         !q.purpose.startsWith('ECS ') &&
         q.endpoint === preset.url &&
-        (q.purpose.startsWith('Consensus probe') || preset.url === primaryEndpoint)
+        (q.purpose.startsWith('Consensus probe') ||
+          q.purpose.startsWith('Watch probe') ||
+          preset.url === primaryEndpoint)
     );
 
     if (epLogs.length === 0) {

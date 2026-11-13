@@ -17,6 +17,7 @@ import {
   parseIpToken,
   seedIpAsnCacheFromSnapshot,
 } from '../../components/IpHoverBadge';
+import { LiveWatchView } from '../../components/LiveWatchView';
 import { MailAnalysisView } from '../../components/MailAnalysisView';
 import { PortfolioView, type PortfolioDrillDownTab } from '../../components/PortfolioView';
 import { ReportExportModal } from '../../components/ReportExportModal';
@@ -39,6 +40,7 @@ import {
 } from '../../urlState';
 import { runDnsvizAnalysis } from '../analyzer';
 import { runConsensusAnalysis } from '../consensusAnalyzer';
+import { CONSENSUS_DOH_RESOLVERS, RR_TYPES } from '../constants';
 import { base64ToBytes, bytesToBase64, hexToBytes } from '../encoding';
 import { runMailAnalysis } from '../mailAnalyzer';
 import {
@@ -47,6 +49,11 @@ import {
   type PortfolioBatchState,
   type PortfolioDomainRow,
 } from '../portfolioAnalyzer';
+import {
+  buildWatchTickSample,
+  detectWatchTransitions,
+  type TtlWatchState,
+} from '../ttlWatch';
 import type { AnalysisSnapshot, DohQueryLog, ZoneAnalysis } from '../types';
 import { runWebAnalysis } from '../webAnalyzer';
 import { buildDnsQuery, parseDnsPacket } from '../wire';
@@ -282,7 +289,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexCss).toContain('env(safe-area-inset-bottom');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v38');
+    expect(swCode).toContain('digdeep-shell-v39');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -3326,5 +3333,388 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       root.unmount();
     });
     if (prevWindow) Object.defineProperty(globalThis, 'window', prevWindow);
+  });
+
+  it('renders LiveWatchView TTL countdown bars, clamping/Serve-Stale badges, transition timeline inline diff, HistoryPanel handoff, and ?tab=watch deep links (#32)', async () => {
+    // 1. Deep-link URL state round-trip for tab=watch
+    const parsedWatch = parseDeepLinkParams('?name=cloudflare.com&tab=watch');
+    expect(parsedWatch.name).toBe('cloudflare.com');
+    expect(parsedWatch.tab).toBe('watch');
+    const searchStr = buildDeepLinkSearch({
+      name: 'cloudflare.com',
+      tab: 'watch',
+      types: ['A', 'AAAA'],
+      dohEndpoint: 'https://1.1.1.1/dns-query',
+      showSoaAndNs: false,
+      showStandbyKeys: true,
+    });
+    expect(searchStr).toContain('tab=watch');
+
+    const cfPreset = CONSENSUS_DOH_RESOLVERS.find((r) => r.url === 'https://1.1.1.1/dns-query')!;
+    const q9Preset = CONSENSUS_DOH_RESOLVERS.find((r) => r.url === 'https://9.9.9.9/dns-query')!;
+    const t0 = 1_790_000_000_000;
+    const t1 = t0 + 20_000;
+
+    const makeWatchQuery = (
+      id: string,
+      endpoint: string,
+      ip: string,
+      ttl: number,
+      originalTtl: number,
+      edeCode?: number
+    ): DohQueryLog => ({
+      id,
+      qname: 'example.com.',
+      qtype: RR_TYPES.A,
+      qtypeName: 'A',
+      cd: false,
+      doBit: true,
+      endpoint,
+      startedAt: t0,
+      latencyMs: 14,
+      httpStatus: 200,
+      wireBase64: 'AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE=',
+      requestWireBase64: 'AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE=',
+      purpose: 'Watch probe (A)',
+      packet: {
+        id: 1,
+        flags: {
+          qr: true,
+          opcode: 0,
+          aa: false,
+          tc: false,
+          rd: true,
+          ra: true,
+          z: 0,
+          ad: true,
+          cd: false,
+          rcode: 0,
+        },
+        questions: [{ name: 'example.com.', type: RR_TYPES.A, typeName: 'A', qclass: 1 }],
+        answers: [
+          {
+            name: 'example.com.',
+            type: RR_TYPES.A,
+            typeName: 'A',
+            rrclass: 1,
+            ttl,
+            rdataBase64: 'AAECAw==',
+            canonicalRdataBase64: 'AAECAw==',
+            rdataText: ip,
+            parsed: { kind: 'GENERIC' },
+            section: 'answer',
+          },
+          {
+            name: 'example.com.',
+            type: RR_TYPES.RRSIG,
+            typeName: 'RRSIG',
+            rrclass: 1,
+            ttl,
+            rdataBase64: 'AA==',
+            canonicalRdataBase64: 'AA==',
+            rdataText: `A 13 2 ${originalTtl} 1810000000 1780000000 34505 example.com. sig==`,
+            parsed: {
+              kind: 'RRSIG',
+              typeCovered: RR_TYPES.A,
+              typeCoveredName: 'A',
+              algorithm: 13,
+              labels: 2,
+              originalTtl,
+              expiration: 1_810_000_000,
+              inception: 1_780_000_000,
+              keyTag: 34505,
+              signerName: 'example.com.',
+              signatureBase64: 'c2ln',
+              signedHeaderBase64: 'aGRy',
+            },
+            section: 'answer',
+          },
+        ],
+        authorities: [],
+        additionals: [],
+        edns: {
+          udpPayloadSize: 1232,
+          extendedRcode: 0,
+          version: 0,
+          doBit: true,
+          flags: 0x8000,
+          ede:
+            edeCode === 3
+              ? [{ infoCode: 3, name: 'Stale Answer', extraText: 'Upstream timeout' }]
+              : [],
+        },
+        wireSize: 96,
+      },
+    });
+
+    const sample1 = buildWatchTickSample({
+      tickNumber: 1,
+      capturedAtMs: t0,
+      targetName: 'example.com.',
+      qtype: RR_TYPES.A,
+      soaZone: 'example.com.',
+      presets: [cfPreset, q9Preset],
+      queries: [
+        makeWatchQuery('wq-cf-1', cfPreset.url, '198.51.100.10', 100, 200),
+        // Quad9 clamping floor to 300s > RRSIG originalTTL 200s
+        makeWatchQuery('wq-q9-1', q9Preset.url, '198.51.100.10', 300, 200),
+      ],
+    });
+
+    const sample2 = buildWatchTickSample({
+      tickNumber: 2,
+      capturedAtMs: t1,
+      targetName: 'example.com.',
+      qtype: RR_TYPES.A,
+      soaZone: 'example.com.',
+      presets: [cfPreset, q9Preset],
+      queries: [
+        // Cloudflare rotates GSLB IP & serves EDE 3 Stale Answer
+        makeWatchQuery('wq-cf-2', cfPreset.url, '198.51.100.77', 15, 200, 3),
+        makeWatchQuery('wq-q9-2', q9Preset.url, '198.51.100.10', 280, 200),
+      ],
+      previousSample: sample1,
+    });
+
+    const detected = detectWatchTransitions(sample1, sample2)!;
+    expect(detected).toBeTruthy();
+
+    const makeMockSnap = (id: string, ip: string, capturedAt: number): AnalysisSnapshot => ({
+      id,
+      version: 3,
+      mode: 'consensus',
+      targetName: 'example.com.',
+      displayDomain: 'example.com',
+      queryTypes: ['A'],
+      dohEndpoint: cfPreset.url,
+      capturedAt,
+      validatedAt: capturedAt,
+      durationMs: 25,
+      overallStatus: 'secure',
+      overallSummary: 'Secure',
+      zones: [
+        {
+          zoneName: 'example.com.',
+          parentZone: 'com.',
+          depth: 2,
+          status: 'secure',
+          statusReason: 'OK',
+          nsecMode: 'NSEC',
+          dnskeys: [],
+          dsVerifications: [],
+          trustAnchorMatches: [],
+          rrsets: [
+            {
+              id: 'rr-a',
+              zone: 'example.com.',
+              name: 'example.com.',
+              type: RR_TYPES.A,
+              typeName: 'A',
+              ttl: 100,
+              section: 'answer',
+              records: [
+                {
+                  name: 'example.com.',
+                  type: RR_TYPES.A,
+                  typeName: 'A',
+                  rrclass: 1,
+                  ttl: 100,
+                  rdataBase64: 'AA==',
+                  canonicalRdataBase64: 'AA==',
+                  rdataText: ip,
+                  parsed: { kind: 'GENERIC' },
+                  section: 'answer',
+                },
+              ],
+              rrsigs: [],
+              isQueryTarget: true,
+              status: 'secure',
+              statusReason: 'OK',
+            },
+          ],
+          negativeNodes: [],
+          nameservers: [],
+        },
+      ],
+      cnameEdges: [],
+      findings: [],
+      queries: [],
+      trustAnchorsUsed: [],
+    });
+
+    const snap1 = makeMockSnap('watch-snap-a', '198.51.100.10', t0);
+    const snap2 = makeMockSnap('watch-snap-b', '198.51.100.77', t1);
+
+    const watchState: TtlWatchState = {
+      targetName: 'example.com.',
+      displayDomain: 'example.com',
+      qtypeName: 'A',
+      pollMode: 'expiry-once',
+      maxIterations: 20,
+      enabledResolverUrls: [cfPreset.url, q9Preset.url],
+      status: 'paused-hidden',
+      completedTicks: 2,
+      nextPollAtMs: null,
+      currentSample: sample2,
+      latestSnapshot: snap2,
+      transitions: [
+        {
+          id: 'tr-test-1',
+          tickNumber: 2,
+          detectedAtMs: t1,
+          categories: detected.categories,
+          headline: detected.headline,
+          diffs: detected.diffs,
+          previousSample: sample1,
+          currentSample: sample2,
+          previousSnapshot: snap1,
+          currentSnapshot: snap2,
+        },
+      ],
+    };
+
+    // 2. SSR render check with deterministic nowMsOverride (5s after t1 -> 1.1.1.1 has 10s left)
+    const ssrHtml = renderToStaticMarkup(
+      <LiveWatchView
+        watchState={watchState}
+        primaryEndpoint={cfPreset.url}
+        activeSnapshot={snap2}
+        nowMsOverride={t1 + 5_000}
+        onPulseOnce={() => {}}
+        onStartWatch={() => {}}
+        onPauseWatch={() => {}}
+        onResumeWatch={() => {}}
+        onStopWatch={() => {}}
+        onContinueBeyondCap={() => {}}
+        onUpdateConfig={() => {}}
+      />
+    );
+    expect(ssrHtml).toContain('data-testid="live-watch-view"');
+    expect(ssrHtml).toContain('data-testid="watch-hidden-paused-banner"');
+    expect(ssrHtml).toContain('data-testid="watch-resolver-row"');
+    expect(ssrHtml).toContain('data-testid="watch-ttl-bar"');
+    expect(ssrHtml).toContain('SERVE-STALE (EDE 3/19)');
+    expect(ssrHtml).toContain('MIN-TTL FLOOR CLAMPED');
+    expect(ssrHtml).toContain('data-testid="watch-transition-timeline"');
+    expect(ssrHtml).toContain('data-testid="watch-compare-transition-btn"');
+
+    // Verify HistoryPanel externalDiffPair opens directly in Snapshot Diff view
+    const diffHistoryHtml = renderToStaticMarkup(
+      <HistoryPanel
+        snapshots={[snap2, snap1]}
+        activeSnapshotId={snap2.id}
+        externalDiffPair={{ aId: snap1.id, bId: snap2.id, seq: 1 }}
+        onSelectSnapshot={() => {}}
+        onReprobe={() => {}}
+        onTogglePin={() => {}}
+        onDelete={() => {}}
+        onClearUnpinned={() => {}}
+        onImportJson={() => {}}
+      />
+    );
+    expect(diffHistoryHtml).toContain('198.51.100.77');
+    expect(diffHistoryHtml).toContain('198.51.100.10');
+
+    // 3. Interactive JSDOM click on Compare Snapshot -> opens inline diff + History Diff handoff
+    const { JSDOM } = (await import('jsdom' as string)) as {
+      JSDOM: new (
+        markup?: string,
+        opts?: { url?: string }
+      ) => { window: Window & typeof globalThis };
+    };
+    const dom = new JSDOM(
+      '<!doctype html><html><body><div id="root"></div></body></html>',
+      { url: 'https://digdeep.example/?name=example.com&tab=watch' }
+    );
+    const prevWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    const prevDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+    Object.defineProperty(globalThis, 'window', { value: dom.window, configurable: true });
+    Object.defineProperty(globalThis, 'document', {
+      value: dom.window.document,
+      configurable: true,
+    });
+    (dom.window as unknown as { matchMedia: () => { matches: boolean } }).matchMedia = () => ({
+      matches: false,
+    });
+    (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
+      true;
+
+    try {
+      const { act } = await import('react');
+      const { createRoot } = await import('react-dom/client');
+      const container = dom.window.document.getElementById('root')!;
+      const root = createRoot(container);
+
+      let historyDiffCalledWith: [string, string] | null = null;
+      await act(async () => {
+        root.render(
+          <LiveWatchView
+            watchState={{ ...watchState, status: 'completed-cap', completedTicks: 20 }}
+            primaryEndpoint={cfPreset.url}
+            activeSnapshot={snap2}
+            nowMsOverride={t1 + 5_000}
+            onPulseOnce={() => {}}
+            onStartWatch={() => {}}
+            onPauseWatch={() => {}}
+            onResumeWatch={() => {}}
+            onStopWatch={() => {}}
+            onContinueBeyondCap={() => {}}
+            onUpdateConfig={() => {}}
+            onOpenInHistoryDiff={(older, newer) => {
+              historyDiffCalledWith = [older.id, newer.id];
+            }}
+          />
+        );
+      });
+
+      expect(container.querySelector('[data-testid="watch-cap-reached-banner"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="watch-inline-snapshot-diff"]')).toBeNull();
+
+      const compareBtn = container.querySelector(
+        '[data-testid="watch-compare-transition-btn"]'
+      ) as HTMLButtonElement;
+      await act(async () => {
+        compareBtn.click();
+      });
+
+      const inlineDiff = container.querySelector('[data-testid="watch-inline-snapshot-diff"]');
+      expect(inlineDiff).toBeTruthy();
+      expect(inlineDiff!.textContent).toContain('198.51.100.10');
+      expect(inlineDiff!.textContent).toContain('198.51.100.77');
+
+      const openHistoryBtn = Array.from(
+        inlineDiff!.querySelectorAll<HTMLButtonElement>('button')
+      ).find((b) => b.textContent?.includes('Save & Open in History Diff'))!;
+      await act(async () => {
+        openHistoryBtn.click();
+      });
+      expect(historyDiffCalledWith).toEqual(['watch-snap-a', 'watch-snap-b']);
+
+      await act(async () => {
+        root.unmount();
+      });
+
+      // Verify App boots cleanly onto LiveWatchView when ?name=example.com&tab=watch matches saved snapshot
+      mem.clear();
+      saveSnapshot({ ...snap2, mode: 'dnssec', queryTypes: ['A', 'AAAA'] });
+      const prevOnline = Object.getOwnPropertyDescriptor(globalThis.navigator, 'onLine');
+      Object.defineProperty(globalThis.navigator, 'onLine', {
+        value: false,
+        configurable: true,
+      });
+      try {
+        const appWatchHtml = renderToStaticMarkup(<App />);
+        expect(appWatchHtml).toContain('data-testid="open-watch-btn"');
+        expect(appWatchHtml).toContain('data-testid="nav-tab-watch"');
+        expect(appWatchHtml).toContain('data-testid="live-watch-view"');
+      } finally {
+        if (prevOnline) {
+          Object.defineProperty(globalThis.navigator, 'onLine', prevOnline);
+        }
+      }
+    } finally {
+      if (prevWindow) Object.defineProperty(globalThis, 'window', prevWindow);
+      if (prevDocument) Object.defineProperty(globalThis, 'document', prevDocument);
+    }
   });
 });

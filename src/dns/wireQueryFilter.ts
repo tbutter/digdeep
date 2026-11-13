@@ -68,7 +68,7 @@ export function classifyDohQueryBucket(q: DohQueryLog): WireQueryBucket {
   ) {
     return 'ecs';
   }
-  if (q.purpose.startsWith('Consensus probe')) {
+  if (q.purpose.startsWith('Consensus probe') || q.purpose.startsWith('Watch probe')) {
     return 'consensus';
   }
   for (const prefix of AUX_PURPOSE_PREFIXES) {

@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   Binary,
   Check,
+  Clock,
   Compass,
   Copy,
   GitCommit,
@@ -873,11 +874,13 @@ export function ConsensusView({
   onOpenChainGraph,
   onOpenWireResponses,
   onInspectWireQuery,
+  onOpenLiveWatch,
 }: {
   snapshot: AnalysisSnapshot;
   onOpenChainGraph: () => void;
   onOpenWireResponses: () => void;
   onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
+  onOpenLiveWatch?: () => void;
 }) {
   seedIpAsnCacheFromSnapshot(snapshot);
   const consensus = snapshot.consensusAnalysis;
@@ -1098,7 +1101,19 @@ export function ConsensusView({
             </h2>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {onOpenLiveWatch && (
+              <button
+                type="button"
+                data-testid="consensus-open-watch-btn"
+                onClick={onOpenLiveWatch}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 px-2.5 py-1 text-xs font-semibold text-cyan-800 dark:text-cyan-200 cursor-pointer"
+                title="Open Live TTL Countdown, Cache-Decay & RFC 8767 Serve-Stale Watch Mode"
+              >
+                <Clock className="w-3.5 h-3.5 text-cyan-500" />
+                <span>Live TTL Watch</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={onOpenWireResponses}
