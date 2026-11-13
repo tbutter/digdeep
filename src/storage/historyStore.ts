@@ -232,9 +232,20 @@ export function clearUnpinnedSnapshots(): AnalysisSnapshot[] {
   return writeSnapshotsWithEviction(pinnedOnly);
 }
 
+export function saveSnapshotsBatch(batch: AnalysisSnapshot[]): AnalysisSnapshot[] {
+  if (batch.length === 0) return loadSnapshots();
+  const batchIds = new Set(batch.map((s) => s.id));
+  const current = loadSnapshots().filter((s) => !batchIds.has(s.id));
+  return writeSnapshotsWithEviction([...batch, ...current]);
+}
+
 export function importSnapshotsFromJson(jsonText: string): AnalysisSnapshot[] {
   const parsed = JSON.parse(jsonText);
-  const incoming: AnalysisSnapshot[] = Array.isArray(parsed) ? parsed : [parsed];
+  const incoming: AnalysisSnapshot[] = Array.isArray(parsed)
+    ? parsed
+    : parsed && typeof parsed === 'object' && Array.isArray(parsed.snapshots)
+      ? parsed.snapshots
+      : [parsed];
   const valid = incoming.filter(
     (s) =>
       s &&

@@ -9,6 +9,7 @@ import {
   FileCheck2,
   Globe,
   KeyRound,
+  Layers,
   Lock,
   Network,
   RefreshCw,
@@ -20,6 +21,7 @@ import {
   Terminal,
 } from 'lucide-react';
 import { displayFqdn } from '../dns/encoding';
+import { MAX_PORTFOLIO_DOMAINS } from '../dns/portfolioAnalyzer';
 import { fetchCtLogEntries } from '../dns/webAnalyzer';
 import type {
   AnalysisSnapshot,
@@ -471,12 +473,14 @@ export function WebAnalysisView({
   onOpenChainGraph,
   onInspectWireQuery,
   onTraceDomain,
+  onBatchAuditDomains,
 }: {
   snapshot: AnalysisSnapshot;
   onJumpToGraphTarget: (targetId: string) => void;
   onOpenChainGraph: () => void;
   onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
   onTraceDomain?: (domain: string) => void;
+  onBatchAuditDomains?: (domains: string[], sourceLabel?: string) => void;
 }) {
   seedIpAsnCacheFromSnapshot(snapshot);
   const web = snapshot.webAnalysis;
@@ -1208,9 +1212,34 @@ export function WebAnalysisView({
                 <div className="text-xs font-semibold text-cyan-800 dark:text-cyan-200">
                   Subdomains Discovered in CT Subject Alternative Names ({mergedSubdomains.length}):
                 </div>
-                <span className="text-[11px] text-slate-500">
-                  Click any hostname to run a Web &amp; HTTPS trace
-                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] text-slate-500">
+                    Click any hostname to run a Web &amp; HTTPS trace
+                  </span>
+                  {onBatchAuditDomains && (
+                    <button
+                      type="button"
+                      data-testid="ct-audit-subdomains-portfolio-btn"
+                      onClick={() => {
+                        const batchList = Array.from(
+                          new Set([snapshot.displayDomain, ...mergedSubdomains])
+                        ).slice(0, MAX_PORTFOLIO_DOMAINS);
+                        onBatchAuditDomains(
+                          batchList,
+                          `CT SANs (${snapshot.displayDomain})`
+                        );
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 px-2.5 py-1 text-[11px] font-bold text-slate-950 shadow-sm transition-colors cursor-pointer"
+                      title={`Run bounded-concurrency Portfolio Security Triage across ${snapshot.displayDomain} and up to ${MAX_PORTFOLIO_DOMAINS - 1} discovered CT subdomains`}
+                    >
+                      <Layers className="w-3 h-3" />
+                      <span>
+                        Audit Discovered CT Subdomains (
+                        {Math.min(MAX_PORTFOLIO_DOMAINS, mergedSubdomains.length + 1)})
+                      </span>
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {mergedSubdomains.map((sub) =>

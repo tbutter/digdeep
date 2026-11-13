@@ -18,6 +18,7 @@ import {
   seedIpAsnCacheFromSnapshot,
 } from '../../components/IpHoverBadge';
 import { MailAnalysisView } from '../../components/MailAnalysisView';
+import { PortfolioView, type PortfolioDrillDownTab } from '../../components/PortfolioView';
 import { ReportExportModal } from '../../components/ReportExportModal';
 import { ResponsesPanel } from '../../components/ResponsesPanel';
 import { ReverseDnsCard } from '../../components/ReverseDnsCard';
@@ -40,6 +41,12 @@ import { runDnsvizAnalysis } from '../analyzer';
 import { runConsensusAnalysis } from '../consensusAnalyzer';
 import { base64ToBytes, bytesToBase64, hexToBytes } from '../encoding';
 import { runMailAnalysis } from '../mailAnalyzer';
+import {
+  computePortfolioAsnConcentration,
+  extractPortfolioPosture,
+  type PortfolioBatchState,
+  type PortfolioDomainRow,
+} from '../portfolioAnalyzer';
 import type { AnalysisSnapshot, DohQueryLog, ZoneAnalysis } from '../types';
 import { runWebAnalysis } from '../webAnalyzer';
 import { buildDnsQuery, parseDnsPacket } from '../wire';
@@ -275,7 +282,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexCss).toContain('env(safe-area-inset-bottom');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v37');
+    expect(swCode).toContain('digdeep-shell-v38');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -2817,5 +2824,507 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(auditHtml).toContain('NS_TARGET_IS_CNAME');
     expect(auditHtml).toContain('NS_BOGON_IP');
     expect(auditHtml).toContain('NS_RRSET_INCONSISTENT');
+  });
+
+  it('renders PortfolioView matrix, ASN concentration filter pills, drill-down actions, CT subdomain batch button, and ?tab=portfolio route (#34)', async () => {
+    expect(parseDeepLinkParams('?tab=portfolio').tab).toBe('portfolio');
+
+    const prevWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    const prevOnline = Object.getOwnPropertyDescriptor(globalThis.navigator, 'onLine');
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        location: { search: '?tab=portfolio', href: 'https://example.test/?tab=portfolio' },
+        matchMedia: () => ({ matches: false }),
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      },
+      configurable: true,
+    });
+    Object.defineProperty(globalThis.navigator, 'onLine', {
+      value: false,
+      configurable: true,
+    });
+
+    try {
+      const portfolioRouteHtml = renderToStaticMarkup(<App />);
+      expect(portfolioRouteHtml).toContain('data-testid="open-portfolio-btn"');
+      expect(portfolioRouteHtml).toContain('data-testid="portfolio-view"');
+      expect(portfolioRouteHtml).toContain('data-testid="portfolio-domains-input"');
+    } finally {
+      if (prevOnline) Object.defineProperty(globalThis.navigator, 'onLine', prevOnline);
+      if (prevWindow) Object.defineProperty(globalThis, 'window', prevWindow);
+    }
+
+    const mkSnap = (
+      domain: string,
+      status: AnalysisSnapshot['overallStatus'],
+      asn: number,
+      asName: string,
+      ech: boolean,
+      dmarc: 'reject' | 'missing',
+      ctSubs: string[] = []
+    ): AnalysisSnapshot => {
+      const fqdn = `${domain}.`;
+      const zoneStatus = status === 'policy-error' ? 'secure' : status;
+      return {
+        id: `snap-ui-${domain}`,
+        version: 3,
+        mode: ctSubs.length > 0 ? 'web' : 'dnssec',
+        targetName: fqdn,
+        displayDomain: domain,
+        queryTypes: ['A', 'AAAA', 'MX', 'TXT', 'HTTPS', 'CAA'],
+        dohEndpoint: 'https://cloudflare-dns.com/dns-query',
+        capturedAt: 1_780_000_000_000,
+        validatedAt: 1_780_000_000_000,
+        durationMs: 180,
+        overallStatus: status,
+        overallSummary: `Summary ${domain}`,
+        zones: [
+          {
+            zoneName: fqdn,
+            parentZone: 'com.',
+            depth: 2,
+            status: zoneStatus,
+            statusReason: 'OK',
+            nsecMode: status === 'insecure' ? 'UNSIGNED' : 'NSEC',
+            dnskeys:
+              status === 'insecure'
+                ? []
+                : [
+                    {
+                      id: `dnskey-${fqdn}-9999`,
+                      zone: fqdn,
+                      keyTag: 9999,
+                      flags: 257,
+                      algorithm: 13,
+                      protocol: 3,
+                      keySizeInfo: '256-bit ECDSA',
+                      publicKeyBase64: 'AA==',
+                      isSep: true,
+                      isZoneKey: true,
+                      isRevoked: false,
+                      role: 'ksk',
+                      signsTypes: ['DNSKEY', 'A'],
+                      matchedByParentDs: true,
+                      status: 'secure',
+                      statusReason: 'OK',
+                    },
+                  ],
+            dsVerifications: [],
+            trustAnchorMatches: [],
+            rrsets: [],
+            negativeNodes: [],
+            nameservers: [
+              { hostname: `ns1.${domain}.`, ipv4: ['198.51.100.1'], ipv6: ['2001:db8::1'] },
+            ],
+            nsDiversity: {
+              nameserverCount: 1,
+              probedCount: 1,
+              uniqueAsns: [{ asn, asName }],
+              uniquePrefixes: ['198.51.100.0/24'],
+              hasIpv4: true,
+              hasIpv6: true,
+              ipv4NsCount: 1,
+              ipv6NsCount: 1,
+              dualStackNsCount: 1,
+              dualStackReady: true,
+              danglingHosts: [],
+              singleAsn: true,
+              singlePrefix: true,
+              status: 'single-asn',
+              summary: '1 ASN',
+            },
+          },
+        ],
+        cnameEdges: [],
+        findings: [],
+        queries: [],
+        trustAnchorsUsed: [],
+        mailAnalysis: {
+          mxStatus: 'none',
+          mxDnssecStatus: 'insecure',
+          mxHosts: [],
+          daneStatus: 'not-deployed',
+          daneSummary: 'No DANE',
+          spf: {
+            present: true,
+            verdict: 'strict-fail',
+            dnsLookupCount: 2,
+            dnsLookupLimit: 10,
+            voidLookupCount: 0,
+            voidLookupLimit: 2,
+            dnssecStatus: 'secure',
+            allSpfRecords: ['v=spf1 -all'],
+            legacySpfRecords: [],
+            effectiveAllQualifier: '-',
+            rootNode: {
+              domain: fqdn,
+              displayDomain: domain,
+              via: 'root',
+              depth: 0,
+              spfRecords: ['v=spf1 -all'],
+              terms: [],
+            },
+            summary: 'SPF -all',
+          },
+          dmarc: {
+            present: dmarc !== 'missing',
+            verdict: dmarc === 'reject' ? 'reject' : 'none',
+            queriedOwner: `_dmarc.${fqdn}`,
+            effectiveOwner: `_dmarc.${fqdn}`,
+            cnameChain: [],
+            usedOrgFallback: false,
+            dnssecStatus: 'secure',
+            allDmarcRecords: [],
+            policy: dmarc === 'missing' ? undefined : dmarc,
+            adkim: 'r',
+            aspf: 'r',
+            pct: 100,
+            rua: [],
+            ruf: [],
+            fo: '0',
+            ri: 86400,
+            tags: [],
+            issues: [],
+            summary: 'DMARC',
+          },
+          dkim: {
+            status: 'not-found',
+            probedSelectors: [],
+            customSelectors: [],
+            selectors: [],
+            summary: '',
+          },
+          mtaSts: {
+            present: false,
+            status: 'not-deployed',
+            qname: `_mta-sts.${fqdn}`,
+            resolvedOwner: `_mta-sts.${fqdn}`,
+            cnameChain: [],
+            dnssecStatus: 'insecure',
+            allStsRecords: [],
+            extensions: [],
+            policyUrl: `https://mta-sts.${domain}/.well-known/mta-sts.txt`,
+            issues: [],
+            summary: '',
+          },
+          tlsRpt: {
+            present: false,
+            status: 'not-deployed',
+            qname: `_smtp._tls.${fqdn}`,
+            resolvedOwner: `_smtp._tls.${fqdn}`,
+            cnameChain: [],
+            dnssecStatus: 'insecure',
+            allTlsRptRecords: [],
+            rua: [],
+            extensions: [],
+            issues: [],
+            summary: '',
+          },
+          bimi: {
+            present: false,
+            status: 'not-deployed',
+            selector: 'default',
+            qname: `default._bimi.${fqdn}`,
+            resolvedOwner: `default._bimi.${fqdn}`,
+            cnameChain: [],
+            dnssecStatus: 'insecure',
+            allBimiRecords: [],
+            dmarcEligible: false,
+            dmarcEligibilityReason: '',
+            issues: [],
+            summary: '',
+          },
+          fcrdnsSummary: {
+            checkedIpCount: 0,
+            validCount: 0,
+            noPtrCount: 0,
+            mismatchCount: 0,
+            status: 'unchecked',
+            summary: '',
+          },
+        },
+        webAnalysis: {
+          targetDomain: fqdn,
+          displayDomain: domain,
+          cnameChain: [],
+          ipv4Addresses: ['198.51.100.1'],
+          ipv6Addresses: ['2001:db8::1'],
+          addressDnssecStatus: 'secure',
+          httpsStatus: ech ? 'ech-enabled' : 'not-deployed',
+          httpsDnssecStatus: 'secure',
+          httpsRecords: ech
+            ? [
+                {
+                  ownerName: fqdn,
+                  rrtypeName: 'HTTPS',
+                  ttl: 300,
+                  priority: 1,
+                  isAliasMode: false,
+                  target: '.',
+                  params: [],
+                  alpns: ['h3', 'h2'],
+                  hasH3: true,
+                  hasH2: true,
+                  noDefaultAlpn: false,
+                  ipv4Hints: [],
+                  ipv6Hints: [],
+                  ipv4HintsMatched: [],
+                  ipv4HintsDrifted: [],
+                  ipv6HintsMatched: [],
+                  ipv6HintsDrifted: [],
+                  echConfigs: [],
+                  issues: [],
+                },
+              ]
+            : [],
+          svcbRecords: [],
+          supportsHttp3: ech,
+          supportsHttp2: ech,
+          echEnabled: ech,
+          echPublicNames: ech ? ['cloudflare-ech.com'] : [],
+          ipHintStatus: 'not-used',
+          httpsSummary: 'HTTPS',
+          caa: {
+            status: ech ? 'enforced' : 'unprotected',
+            effectiveOwner: ech ? fqdn : undefined,
+            dnssecStatus: 'secure',
+            hops: [],
+            issueCas: ech ? ['letsencrypt.org'] : [],
+            issuewildCas: [],
+            iodefUris: [],
+            hasAcmeAccountBinding: false,
+            hasCriticalUnknownTag: false,
+            issues: [],
+            summary: 'CAA',
+          },
+          webDane: {
+            qname: `_443._tcp.${fqdn}`,
+            resolvedOwner: `_443._tcp.${fqdn}`,
+            cnameChain: [],
+            status: 'no-tlsa-unsigned',
+            dnssecStatus: 'insecure',
+            records: [],
+            rolloverReady: false,
+            summary: '',
+          },
+          sshfp: {
+            present: false,
+            status: 'not-deployed',
+            dnssecStatus: 'insecure',
+            records: [],
+            summary: '',
+          },
+          ...(ctSubs.length > 0
+            ? {
+                ctAnalysis: {
+                  status: 'caa-compliant' as const,
+                  source: 'crt.sh' as const,
+                  queriedDomain: domain,
+                  fetchedAt: 1_780_000_000_000,
+                  totalEntries: 2,
+                  activeCertCount: 2,
+                  expiredCertCount: 0,
+                  mismatchedActiveCertCount: 0,
+                  issuers: [
+                    {
+                      friendlyName: "Let's Encrypt",
+                      mappedCaaDomains: ['letsencrypt.org'],
+                      activeCertCount: 2,
+                      wildcardCertCount: 0,
+                      latestNotBefore: '2026-01-01',
+                      caaAuthorized: true,
+                      authorizedForIssue: true,
+                      authorizedForWildcard: false,
+                    },
+                  ],
+                  certificates: [],
+                  discoveredSubdomains: ctSubs,
+                  tlsaMatchedCertCount: 0,
+                  summary: '2 active certificates',
+                },
+              }
+            : {}),
+        },
+      };
+    };
+
+    const snapOne = mkSnap('one.example', 'secure', 13335, 'CLOUDFLARENET', true, 'reject', [
+      'api.one.example',
+      'docs.one.example',
+    ]);
+    const snapTwo = mkSnap('two.example', 'insecure', 13335, 'CLOUDFLARENET', false, 'missing');
+    const snapThree = mkSnap('three.example', 'secure', 16509, 'AMAZON-02', false, 'reject');
+
+    // Verify 1-click CT Subdomain Batch Audit button in WebAnalysisView
+    const { JSDOM } = (await import('jsdom' as string)) as {
+      JSDOM: new (markup?: string) => { window: Window & typeof globalThis };
+    };
+    const liveDom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>');
+    Object.defineProperty(globalThis, 'window', { value: liveDom.window, configurable: true });
+    Object.defineProperty(globalThis, 'document', {
+      value: liveDom.window.document,
+      configurable: true,
+    });
+    (liveDom.window as unknown as { matchMedia: (q: string) => { matches: boolean } }).matchMedia =
+      () => ({ matches: false });
+    (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
+      true;
+
+    const { act } = await import('react');
+    const { createRoot } = await import('react-dom/client');
+    const container = liveDom.window.document.getElementById('root')!;
+    const root = createRoot(container);
+
+    let batchAuditCall: { domains: string[]; label?: string } | null = null;
+    await act(async () => {
+      root.render(
+        <WebAnalysisView
+          snapshot={snapOne}
+          onJumpToGraphTarget={() => {}}
+          onOpenChainGraph={() => {}}
+          onBatchAuditDomains={(domains, label) => {
+            batchAuditCall = { domains, label };
+          }}
+        />
+      );
+    });
+
+    const ctBatchBtn = container.querySelector(
+      '[data-testid="ct-audit-subdomains-portfolio-btn"]'
+    ) as HTMLButtonElement;
+    expect(ctBatchBtn).toBeTruthy();
+    expect(ctBatchBtn.textContent).toContain('Audit Discovered CT Subdomains (3)');
+
+    await act(async () => {
+      ctBatchBtn.click();
+    });
+    expect(batchAuditCall).toEqual({
+      domains: ['one.example', 'api.one.example', 'docs.one.example'],
+      label: 'CT SANs (one.example)',
+    });
+
+    // Interactive PortfolioView sorting, ASN pill filtering, and snapshot drill-down
+    const rows: PortfolioDomainRow[] = [
+      {
+        index: 0,
+        domain: 'one.example',
+        status: 'done',
+        completedQueries: 20,
+        durationMs: 180,
+        snapshot: snapOne,
+        posture: extractPortfolioPosture(snapOne),
+      },
+      {
+        index: 1,
+        domain: 'two.example',
+        status: 'done',
+        completedQueries: 18,
+        durationMs: 160,
+        snapshot: snapTwo,
+        posture: extractPortfolioPosture(snapTwo),
+      },
+      {
+        index: 2,
+        domain: 'three.example',
+        status: 'done',
+        completedQueries: 19,
+        durationMs: 170,
+        snapshot: snapThree,
+        posture: extractPortfolioPosture(snapThree),
+      },
+      {
+        index: 3,
+        domain: 'pending.example',
+        status: 'running',
+        completedQueries: 7,
+        phaseMessage: 'Probing NS BGP ASNs…',
+      },
+    ];
+
+    const batchState: PortfolioBatchState = {
+      id: 'portfolio-test-1',
+      status: 'running',
+      concurrency: 3,
+      dohEndpoint: 'https://cloudflare-dns.com/dns-query',
+      sourceLabel: 'CT SANs (one.example)',
+      startedAt: 1_780_000_000_000,
+      totalDomains: 4,
+      completedDomains: 3,
+      failedDomains: 0,
+      runningDomains: 1,
+      totalQueries: 64,
+      rows,
+      asnConcentration: computePortfolioAsnConcentration(rows),
+    };
+
+    let selectedSnapCall: { domain: string; tab?: PortfolioDrillDownTab } | null = null;
+    await act(async () => {
+      root.render(
+        <PortfolioView
+          domainsText={'one.example\ntwo.example\nthree.example\npending.example'}
+          onChangeDomainsText={() => {}}
+          concurrency={3}
+          onChangeConcurrency={() => {}}
+          dohEndpoint="https://cloudflare-dns.com/dns-query"
+          batchState={batchState}
+          recentHistoryDomains={['ietf.org']}
+          onStartBatch={() => {}}
+          onPauseBatch={() => {}}
+          onResumeBatch={() => {}}
+          onCancelBatch={() => {}}
+          onSelectSnapshot={(snap, tab) => {
+            selectedSnapCall = { domain: snap.displayDomain, tab };
+          }}
+        />
+      );
+    });
+
+    expect(container.querySelector('[data-testid="portfolio-pause-btn"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="portfolio-cancel-btn"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="portfolio-export-csv-btn"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="portfolio-export-md-btn"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="portfolio-export-json-btn"]')).toBeTruthy();
+
+    const asn16509Pill = container.querySelector(
+      '[data-testid="portfolio-asn-pill-16509"]'
+    ) as HTMLButtonElement;
+    expect(asn16509Pill).toBeTruthy();
+
+    // Filter matrix by AS16509 -> only three.example remains visible
+    await act(async () => {
+      asn16509Pill.click();
+    });
+    expect(container.querySelector('[data-testid="portfolio-row-three.example"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="portfolio-row-one.example"]')).toBeNull();
+
+    // Toggle AS16509 off -> all rows visible again
+    await act(async () => {
+      asn16509Pill.click();
+    });
+    expect(container.querySelector('[data-testid="portfolio-row-one.example"]')).toBeTruthy();
+
+    // Click row to drill down into Chain Graph
+    const rowOne = container.querySelector(
+      '[data-testid="portfolio-row-one.example"]'
+    ) as HTMLTableRowElement;
+    await act(async () => {
+      rowOne.click();
+    });
+    expect(selectedSnapCall).toEqual({ domain: 'one.example', tab: 'graph' });
+
+    // Click explicit Mail drill-down button
+    const mailBtn = container.querySelector(
+      '[data-testid="portfolio-drill-mail-one.example"]'
+    ) as HTMLButtonElement;
+    await act(async () => {
+      mailBtn.click();
+    });
+    expect(selectedSnapCall).toEqual({ domain: 'one.example', tab: 'mail' });
+
+    await act(async () => {
+      root.unmount();
+    });
+    if (prevWindow) Object.defineProperty(globalThis, 'window', prevWindow);
   });
 });

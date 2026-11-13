@@ -1043,8 +1043,50 @@ export async function reverifySnapshot(
     queries: snapshot.queries,
     trustAnchors: options.trustAnchors ?? snapshot.trustAnchorsUsed,
   });
+
+  // Preserve & re-verify combined Mail/Web posture on unified Portfolio snapshots (mode === 'dnssec')
+  let extraMail = updated.mailAnalysis;
+  let extraWeb = updated.webAnalysis;
+  const extraFindings = [...updated.findings];
+  const dnssecStatusForSub =
+    updated.overallStatus === 'policy-error' ? 'secure' : updated.overallStatus;
+  if (!extraMail && snapshot.mailAnalysis) {
+    const mailRes = evaluateMailFromSnapshotData({
+      targetName: updated.targetName,
+      queries: updated.queries,
+      zones: updated.zones,
+      cnameEdges: updated.cnameEdges,
+      targetDomainStatus: dnssecStatusForSub,
+      customDkimSelectors: snapshot.customDkimSelectors,
+      mtaStsPolicyFetch: snapshot.mtaStsPolicyFetch,
+    });
+    extraMail = mailRes.mailAnalysis;
+    for (const mf of mailRes.mailFindings) {
+      if (mf.code === 'DKIM_NO_COMMON_SELECTOR_MATCH') continue;
+      if (!extraFindings.some((f) => f.id === mf.id)) extraFindings.push(mf);
+    }
+  }
+  if (!extraWeb && snapshot.webAnalysis) {
+    const webRes = evaluateWebFromSnapshotData({
+      targetName: updated.targetName,
+      queries: updated.queries,
+      zones: updated.zones,
+      cnameEdges: updated.cnameEdges,
+      targetDomainStatus: dnssecStatusForSub,
+      ctLogFetch: snapshot.ctLogFetch,
+      validatedAt: updated.validatedAt,
+    });
+    extraWeb = webRes.webAnalysis;
+    for (const wf of webRes.webFindings) {
+      if (!extraFindings.some((f) => f.id === wf.id)) extraFindings.push(wf);
+    }
+  }
+
   return {
     ...updated,
+    ...(extraMail ? { mailAnalysis: extraMail } : {}),
+    ...(extraWeb ? { webAnalysis: extraWeb } : {}),
+    findings: extraFindings,
     pinned: snapshot.pinned,
     note: snapshot.note,
   };

@@ -8,6 +8,8 @@ export interface DohClientOptions {
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
   initialLogs?: readonly DohQueryLog[];
+  sharedQueryCache?: Map<string, Promise<DohQueryLog>>;
+  signal?: AbortSignal;
 }
 
 /**
@@ -18,6 +20,8 @@ export class DohSession {
   private readonly endpoint: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
+  private readonly sharedQueryCache?: Map<string, Promise<DohQueryLog>>;
+  private readonly externalSignal?: AbortSignal;
   private readonly inflight = new Map<string, Promise<DohQueryLog>>();
   private readonly logs: DohQueryLog[] = [];
   private counter = 0;
@@ -27,6 +31,8 @@ export class DohSession {
     this.endpoint = options.endpoint ?? DEFAULT_DOH_ENDPOINT;
     this.timeoutMs = options.timeoutMs ?? 9000;
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
+    this.sharedQueryCache = options.sharedQueryCache;
+    this.externalSignal = options.signal;
     if (options.initialLogs) {
       for (const log of options.initialLogs) {
         this.logs.push(log);
@@ -60,8 +66,35 @@ export class DohSession {
       return existing;
     }
 
+    if (this.sharedQueryCache) {
+      const cachedPromise = this.sharedQueryCache.get(key);
+      if (cachedPromise) {
+        const clonedPromise = cachedPromise.then((cached) => {
+          const cloned: DohQueryLog = {
+            ...cached,
+            id: `q-${++this.counter}-${normName}-${rrTypeToString(qtype)}`,
+            purpose: opts.purpose,
+          };
+          this.logs.push(cloned);
+          this.onQueryCompleted?.(this.logs.length, cloned);
+          return cloned;
+        });
+        this.inflight.set(key, clonedPromise);
+        return clonedPromise;
+      }
+    }
+
     const promise = this.executeQuery(normName, qtype, cd, doBit, opts.purpose, opts.ecs, ecsSubnet);
     this.inflight.set(key, promise);
+    if (this.sharedQueryCache) {
+      this.sharedQueryCache.set(
+        key,
+        promise.catch((err) => {
+          this.sharedQueryCache?.delete(key);
+          throw err;
+        })
+      );
+    }
     return promise;
   }
 
@@ -90,7 +123,12 @@ export class DohSession {
 
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
+      if (this.externalSignal?.aborted) {
+        throw new Error('Batch audit canceled');
+      }
       const controller = new AbortController();
+      const onExternalAbort = () => controller.abort();
+      this.externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
       const timer = setTimeout(() => controller.abort(), this.timeoutMs);
       try {
         const resp = await this.fetchImpl(url, {
@@ -141,10 +179,16 @@ export class DohSession {
         return log;
       } catch (err) {
         clearTimeout(timer);
+        this.externalSignal?.removeEventListener('abort', onExternalAbort);
+        if (this.externalSignal?.aborted) {
+          throw new Error('Batch audit canceled');
+        }
         lastError = err;
         if (attempt === 0) {
           await new Promise((r) => setTimeout(r, 250));
         }
+      } finally {
+        this.externalSignal?.removeEventListener('abort', onExternalAbort);
       }
     }
 

@@ -13,6 +13,7 @@ export type ActiveTab =
   | 'audit'
   | 'responses'
   | 'zones'
+  | 'portfolio'
   | 'history';
 
 const VALID_TABS: readonly ActiveTab[] = [
@@ -23,6 +24,7 @@ const VALID_TABS: readonly ActiveTab[] = [
   'audit',
   'responses',
   'zones',
+  'portfolio',
   'history',
 ];
 const VALID_MODES: readonly AnalysisMode[] = ['dnssec', 'mail', 'web', 'consensus'];
@@ -287,9 +289,11 @@ export function buildDeepLinkSearch(
         : mode === 'consensus'
           ? 'consensus'
           : 'graph';
-  // History is stored in browser localStorage, so shared links open on the primary tab instead
+  // History & Portfolio are local browser sessions, so single-domain shared links open on the primary tab instead
   const effectiveTab: ActiveTab =
-    options?.forShare && state.tab === 'history' ? defaultTab : state.tab;
+    options?.forShare && (state.tab === 'history' || state.tab === 'portfolio')
+      ? defaultTab
+      : state.tab;
 
   if (effectiveTab !== defaultTab) {
     params.set('tab', effectiveTab);

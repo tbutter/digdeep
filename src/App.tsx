@@ -8,6 +8,7 @@ import {
   FileCode2,
   FileText,
   Globe,
+  Layers,
   Link2,
   Mail,
   Moon,
@@ -45,6 +46,7 @@ import { EmailDaneCard } from './components/EmailDaneCard';
 import { HistoryPanel } from './components/HistoryPanel';
 import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './components/IpHoverBadge';
 import { MailAnalysisView } from './components/MailAnalysisView';
+import { PortfolioView, type PortfolioDrillDownTab } from './components/PortfolioView';
 import {
   copyTextToClipboard,
   ReportExportModal,
@@ -76,6 +78,14 @@ import {
   formatRelativeTime,
   parseOmniboxInput,
 } from './dns/omniboxParse';
+import {
+  createPortfolioBatchRunner,
+  DEFAULT_PORTFOLIO_CONCURRENCY,
+  detectMultiDomainPaste,
+  SAMPLE_PORTFOLIO_DOMAINS,
+  type PortfolioBatchRunner,
+  type PortfolioBatchState,
+} from './dns/portfolioAnalyzer';
 import { formatSnapshotMarkdownReport } from './dns/reportExport';
 import type { AnalysisMode, AnalysisProgress, AnalysisSnapshot } from './dns/types';
 import { runWebAnalysis } from './dns/webAnalyzer';
@@ -313,6 +323,77 @@ export function App() {
     setReportModalOpen(true);
   }, []);
   const { canInstall, isOffline, promptInstall } = usePwaInstall();
+
+  const [portfolioDomainsText, setPortfolioDomainsText] = useState<string>(() =>
+    SAMPLE_PORTFOLIO_DOMAINS.join('\n')
+  );
+  const [portfolioConcurrency, setPortfolioConcurrency] = useState<number>(
+    DEFAULT_PORTFOLIO_CONCURRENCY
+  );
+  const [portfolioBatchState, setPortfolioBatchState] = useState<PortfolioBatchState | null>(null);
+  const portfolioRunnerRef = useRef<PortfolioBatchRunner | null>(null);
+
+  useEffect(() => {
+    return () => {
+      portfolioRunnerRef.current?.cancel();
+    };
+  }, []);
+
+  const recentHistoryDomains = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const s of snapshots) {
+      const d = s.displayDomain.trim();
+      if (!d || d === '.' || d.endsWith('.arpa')) continue;
+      const low = d.toLowerCase();
+      if (!seen.has(low)) {
+        seen.add(low);
+        out.push(d);
+      }
+    }
+    return out;
+  }, [snapshots]);
+
+  const handleStartPortfolioBatch = useCallback(
+    (domains: string[], sourceLabel?: string, concurrencyOverride?: number) => {
+      portfolioRunnerRef.current?.cancel();
+      const runner = createPortfolioBatchRunner({
+        domains,
+        concurrency: concurrencyOverride ?? portfolioConcurrency,
+        dohEndpoint: settings.dohEndpoint,
+        trustAnchors: settings.trustAnchors,
+        sourceLabel,
+        onUpdate: (nextState) => {
+          setPortfolioBatchState(nextState);
+        },
+        onSnapshotReady: (snap) => {
+          const updated = saveSnapshot(snap);
+          setSnapshots(updated);
+        },
+      });
+      portfolioRunnerRef.current = runner;
+      setActiveTab('portfolio');
+      void runner.start();
+    },
+    [portfolioConcurrency, settings.dohEndpoint, settings.trustAnchors]
+  );
+
+  const handleSelectPortfolioSnapshot = useCallback(
+    (snap: AnalysisSnapshot, targetTab: PortfolioDrillDownTab = 'graph') => {
+      const snapMode: AnalysisMode = snap.mode ?? 'dnssec';
+      setFocusedGraphTarget(null);
+      setFocusedWireQuery(null);
+      setActiveSnapshot(snap);
+      setAnalysisMode(snapMode);
+      setDomainInput(snap.queriedEmail ?? snap.displayDomain);
+      setCustomDkimSelectors(snap.customDkimSelectors ?? []);
+      if (snapMode === 'dnssec') {
+        setSelectedTypes(snap.queryTypes);
+      }
+      setActiveTab(targetTab);
+    },
+    []
+  );
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const inputOverlayRef = useRef<HTMLDivElement | null>(null);
@@ -575,22 +656,35 @@ export function App() {
 
         let nextTab: ActiveTab = activeTab;
         if (modeToRun === 'mail') {
-          if (activeTab === 'history' || (activeSnapshot?.mode ?? 'dnssec') !== 'mail') {
+          if (
+            activeTab === 'history' ||
+            activeTab === 'portfolio' ||
+            (activeSnapshot?.mode ?? 'dnssec') !== 'mail'
+          ) {
             nextTab = 'mail';
             setActiveTab('mail');
           }
         } else if (modeToRun === 'web') {
-          if (activeTab === 'history' || (activeSnapshot?.mode ?? 'dnssec') !== 'web') {
+          if (
+            activeTab === 'history' ||
+            activeTab === 'portfolio' ||
+            (activeSnapshot?.mode ?? 'dnssec') !== 'web'
+          ) {
             nextTab = 'web';
             setActiveTab('web');
           }
         } else if (modeToRun === 'consensus') {
-          if (activeTab === 'history' || (activeSnapshot?.mode ?? 'dnssec') !== 'consensus') {
+          if (
+            activeTab === 'history' ||
+            activeTab === 'portfolio' ||
+            (activeSnapshot?.mode ?? 'dnssec') !== 'consensus'
+          ) {
             nextTab = 'consensus';
             setActiveTab('consensus');
           }
         } else if (
           activeTab === 'history' ||
+          activeTab === 'portfolio' ||
           activeTab === 'mail' ||
           activeTab === 'web' ||
           activeTab === 'consensus'
@@ -866,6 +960,7 @@ export function App() {
     if (isOffline && snapshots.length > 0) return;
     if (untrustedDohPending) return;
     const { deepLink } = initialBootState;
+    if (deepLink.tab === 'portfolio' && deepLink.name === null) return;
     if (
       (!isOffline &&
         (deepLink.name !== null ||
@@ -1031,6 +1126,22 @@ export function App() {
       }
       setOmniboxNotice(parsed.summaryLabel);
       return;
+    }
+
+    if (replacesFullInput) {
+      const multiDomains = detectMultiDomainPaste(pasted);
+      if (multiDomains && multiDomains.length >= 2) {
+        e.preventDefault();
+        setExamplesOpen(false);
+        setAutocompleteOpen(false);
+        setActiveSuggestionIdx(-1);
+        setPortfolioDomainsText(multiDomains.join('\n'));
+        setActiveTab('portfolio');
+        setOmniboxNotice(
+          `Loaded ${multiDomains.length} domains into Portfolio Triage — click Run Portfolio Audit`
+        );
+        return;
+      }
     }
 
     if (replacesFullInput && parsed.wasTransformed) {
@@ -1346,7 +1457,7 @@ export function App() {
 
   const snapshotNavTabs = activeSnapshot
     ? [
-        ...(activeSnapshot.mode === 'mail'
+        ...(activeSnapshot.mode === 'mail' || Boolean(activeSnapshot.mailAnalysis)
           ? [
               {
                 id: 'mail' as const,
@@ -1356,7 +1467,7 @@ export function App() {
               },
             ]
           : []),
-        ...(activeSnapshot.mode === 'web'
+        ...(activeSnapshot.mode === 'web' || Boolean(activeSnapshot.webAnalysis)
           ? [
               {
                 id: 'web' as const,
@@ -1402,6 +1513,13 @@ export function App() {
           shortLabel: 'Zones',
           icon: Globe,
           badge: activeSnapshot.zones.length,
+        },
+        {
+          id: 'portfolio' as const,
+          label: 'Portfolio Triage Matrix',
+          shortLabel: 'Portfolio',
+          icon: Layers,
+          ...(portfolioBatchState ? { badge: portfolioBatchState.totalDomains } : {}),
         },
         {
           id: 'history' as const,
@@ -1475,6 +1593,32 @@ export function App() {
                 <span>Install App</span>
               </button>
             )}
+
+            <button
+              type="button"
+              data-testid="open-portfolio-btn"
+              onClick={() => setActiveTab('portfolio')}
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
+                activeTab === 'portfolio'
+                  ? 'border-cyan-500 bg-cyan-500/15 text-cyan-800 dark:text-cyan-200 font-semibold'
+                  : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:border-cyan-500'
+              }`}
+              title="Multi-Domain Portfolio Security Triage Matrix & Batch Export (CSV / JSON / Markdown)"
+            >
+              <Layers className="w-3.5 h-3.5 text-cyan-500" />
+              <span>Portfolio</span>
+              {portfolioBatchState && (
+                <span
+                  className={`rounded-full px-1.5 py-0.2 font-mono text-[10px] ${
+                    portfolioBatchState.status === 'running'
+                      ? 'bg-cyan-500/20 text-cyan-700 dark:text-cyan-300'
+                      : 'bg-slate-200 dark:bg-slate-800'
+                  }`}
+                >
+                  {portfolioBatchState.completedDomains}/{portfolioBatchState.totalDomains}
+                </span>
+              )}
+            </button>
 
             <button
               type="button"
@@ -2314,7 +2458,8 @@ export function App() {
             </div>
 
             {/* Active View Content */}
-            {activeTab === 'mail' && activeSnapshot.mode === 'mail' && (
+            {activeTab === 'mail' &&
+              (activeSnapshot.mode === 'mail' || Boolean(activeSnapshot.mailAnalysis)) && (
               <MailAnalysisView
                 key={activeSnapshot.id}
                 snapshot={activeSnapshot}
@@ -2351,7 +2496,8 @@ export function App() {
               />
             )}
 
-            {activeTab === 'web' && activeSnapshot.mode === 'web' && (
+            {activeTab === 'web' &&
+              (activeSnapshot.mode === 'web' || Boolean(activeSnapshot.webAnalysis)) && (
               <WebAnalysisView
                 key={activeSnapshot.id}
                 snapshot={activeSnapshot}
@@ -2368,6 +2514,10 @@ export function App() {
                     modeOverride: 'web',
                     pushHistory: true,
                   });
+                }}
+                onBatchAuditDomains={(domains, label) => {
+                  setPortfolioDomainsText(domains.join('\n'));
+                  handleStartPortfolioBatch(domains, label);
                 }}
               />
             )}
@@ -2390,8 +2540,12 @@ export function App() {
             )}
 
             {(activeTab === 'graph' ||
-              (activeTab === 'mail' && activeSnapshot.mode !== 'mail') ||
-              (activeTab === 'web' && activeSnapshot.mode !== 'web') ||
+              (activeTab === 'mail' &&
+                activeSnapshot.mode !== 'mail' &&
+                !activeSnapshot.mailAnalysis) ||
+              (activeTab === 'web' &&
+                activeSnapshot.mode !== 'web' &&
+                !activeSnapshot.webAnalysis) ||
               (activeTab === 'consensus' && activeSnapshot.mode !== 'consensus')) && (
               <ChainGraphView
                 snapshot={activeSnapshot}
@@ -2435,6 +2589,24 @@ export function App() {
             )}
 
             {activeTab === 'zones' && <ZonesPanel snapshot={activeSnapshot} />}
+
+            {activeTab === 'portfolio' && (
+              <PortfolioView
+                domainsText={portfolioDomainsText}
+                onChangeDomainsText={setPortfolioDomainsText}
+                concurrency={portfolioConcurrency}
+                onChangeConcurrency={setPortfolioConcurrency}
+                dohEndpoint={settings.dohEndpoint}
+                batchState={portfolioBatchState}
+                recentHistoryDomains={recentHistoryDomains}
+                isOffline={isOffline}
+                onStartBatch={(domains, label) => handleStartPortfolioBatch(domains, label)}
+                onPauseBatch={() => portfolioRunnerRef.current?.pause()}
+                onResumeBatch={() => portfolioRunnerRef.current?.resume()}
+                onCancelBatch={() => portfolioRunnerRef.current?.cancel()}
+                onSelectSnapshot={handleSelectPortfolioSnapshot}
+              />
+            )}
 
             {activeTab === 'history' && (
               <HistoryPanel
@@ -2501,7 +2673,25 @@ export function App() {
           </>
         )}
 
-        {!activeSnapshot && !loading && (
+        {!activeSnapshot && !loading && activeTab === 'portfolio' && (
+          <PortfolioView
+            domainsText={portfolioDomainsText}
+            onChangeDomainsText={setPortfolioDomainsText}
+            concurrency={portfolioConcurrency}
+            onChangeConcurrency={setPortfolioConcurrency}
+            dohEndpoint={settings.dohEndpoint}
+            batchState={portfolioBatchState}
+            recentHistoryDomains={recentHistoryDomains}
+            isOffline={isOffline}
+            onStartBatch={(domains, label) => handleStartPortfolioBatch(domains, label)}
+            onPauseBatch={() => portfolioRunnerRef.current?.pause()}
+            onResumeBatch={() => portfolioRunnerRef.current?.resume()}
+            onCancelBatch={() => portfolioRunnerRef.current?.cancel()}
+            onSelectSnapshot={handleSelectPortfolioSnapshot}
+          />
+        )}
+
+        {!activeSnapshot && !loading && activeTab !== 'portfolio' && (
           <HistoryPanel
             snapshots={snapshots}
             onSelectSnapshot={(snap) => {
