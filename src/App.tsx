@@ -50,7 +50,11 @@ import { ConsensusView } from './components/ConsensusView';
 import { DohChooser } from './components/DohChooser';
 import { EmailDaneCard } from './components/EmailDaneCard';
 import { HistoryPanel } from './components/HistoryPanel';
-import { IpHoverBadge, seedIpAsnCacheFromSnapshot } from './components/IpHoverBadge';
+import {
+  IpHoverBadge,
+  registerGlobalTraceIpHandler,
+  seedIpAsnCacheFromSnapshot,
+} from './components/IpHoverBadge';
 import { LiveWatchView } from './components/LiveWatchView';
 import { MailAnalysisView } from './components/MailAnalysisView';
 import { PortfolioView, type PortfolioDrillDownTab } from './components/PortfolioView';
@@ -901,6 +905,44 @@ export function App() {
       focusedGraphTarget,
     ]
   );
+
+  const handleTraceReverseIp = useCallback(
+    (ip: string) => {
+      const cleanIp = ip.trim();
+      if (!cleanIp) return;
+      setCommandPaletteOpen(false);
+      setSettingsOpen(false);
+      setReportModalOpen(false);
+      setExamplesOpen(false);
+      setAutocompleteOpen(false);
+      setAnalysisMode('dnssec');
+      setDomainInput(cleanIp);
+      setSelectedTypes(['PTR']);
+      setShowExtraTypes(true);
+      setActiveTab('graph');
+      if (isOffline) {
+        const matchingSaved = snapshots.find(
+          (s) =>
+            (s.mode ?? 'dnssec') === 'dnssec' &&
+            (s.queriedIp?.toLowerCase() === cleanIp.toLowerCase() ||
+              s.displayDomain.toLowerCase() === cleanIp.toLowerCase())
+        );
+        if (matchingSaved) {
+          setActiveSnapshot(matchingSaved);
+        }
+        return;
+      }
+      void executeAnalysis(cleanIp, ['PTR'], {
+        modeOverride: 'dnssec',
+        pushHistory: true,
+      });
+    },
+    [executeAnalysis, isOffline, snapshots]
+  );
+
+  useEffect(() => {
+    return registerGlobalTraceIpHandler(handleTraceReverseIp);
+  }, [handleTraceReverseIp]);
 
   const modalOverlayOpen = settingsOpen || reportModalOpen || commandPaletteOpen;
   const mobileInspectorOpen = Boolean(

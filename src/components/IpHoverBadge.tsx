@@ -1,4 +1,15 @@
-import { Globe, Loader2, Network, Server, ShieldAlert, ShieldCheck } from 'lucide-react';
+import {
+  Check,
+  Copy,
+  Globe,
+  Loader2,
+  Network,
+  Search,
+  Server,
+  ShieldAlert,
+  ShieldCheck,
+  X,
+} from 'lucide-react';
 import {
   type ReactNode,
   useCallback,
@@ -57,6 +68,60 @@ const inflightLookups = new Map<string, Promise<IpAsnNetworkInfo>>();
 const listeners = new Set<() => void>();
 let activeDohEndpoint = DEFAULT_DOH_ENDPOINT;
 let lastSeededSnapshotKey = '';
+
+export type TraceIpHandler = (canonicalIp: string) => void;
+let globalTraceIpHandler: TraceIpHandler | null = null;
+let activePinnedDismiss: (() => void) | null = null;
+
+/**
+ * Registers the app-level callback invoked when a user activates "Trace rDNS (PTR)"
+ * inside any `IpHoverBadge` popover card. Returns an unsubscribe function.
+ */
+export function registerGlobalTraceIpHandler(handler: TraceIpHandler | null): () => void {
+  globalTraceIpHandler = handler;
+  return () => {
+    if (globalTraceIpHandler === handler) {
+      globalTraceIpHandler = null;
+    }
+  };
+}
+
+/**
+ * Dismisses whichever `IpHoverBadge` popover is currently pinned open, if any.
+ */
+export function dismissActivePinnedIpCard(): void {
+  if (activePinnedDismiss) {
+    const fn = activePinnedDismiss;
+    activePinnedDismiss = null;
+    fn();
+  }
+}
+
+async function copyIpToClipboard(text: string): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // fall through to legacy textarea copy
+    }
+  }
+  if (typeof document === 'undefined') return false;
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', 'true');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function notifyCacheListeners(): void {
   for (const fn of listeners) {
@@ -686,170 +751,275 @@ export function RpkiStatusBadge({
 }
 
 /**
- * Renders the interior of the floating BGP ASN / Network hover card for one or more IPs.
+ * Renders the interior of the floating BGP ASN / Network hover & tap card for one or more IPs.
  */
 export function IpAsnHoverCardContent({
   entries,
   titleLabel,
+  onTraceIp,
+  onDismiss,
+  showCloseButton = false,
+  showActions = true,
+  mobileSheet = false,
 }: {
   entries: Array<{ token: ParsedIpToken; info: IpAsnNetworkInfo }>;
   titleLabel?: string;
+  onTraceIp?: (ip: string) => void;
+  onDismiss?: () => void;
+  showCloseButton?: boolean;
+  showActions?: boolean;
+  mobileSheet?: boolean;
 }) {
+  const [copiedIp, setCopiedIp] = useState<string | null>(null);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) {
+        clearTimeout(copyTimerRef.current);
+      }
+    };
+  }, []);
+
   if (entries.length === 0) return null;
 
+  const handleCopy = async (ipToCopy: string) => {
+    const ok = await copyIpToClipboard(ipToCopy);
+    if (ok) {
+      setCopiedIp(ipToCopy);
+      if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => {
+        setCopiedIp((cur) => (cur === ipToCopy ? null : cur));
+      }, 1800);
+    }
+  };
+
   return (
-    <div className="w-80 max-w-[calc(100vw-24px)] rounded-xl border border-slate-200 dark:border-slate-700/90 bg-white/98 dark:bg-slate-900/98 backdrop-blur-md shadow-xl p-3 text-left text-xs text-slate-800 dark:text-slate-100 space-y-2.5">
-      {titleLabel && (
-        <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 border-b border-slate-100 dark:border-slate-800 pb-1.5">
-          <Network className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
-          <span className="truncate">{titleLabel}</span>
+    <div
+      className={`${
+        mobileSheet
+          ? 'w-full max-w-md mx-auto max-h-[75vh] overflow-y-auto'
+          : 'w-80 max-w-[calc(100vw-24px)]'
+      } rounded-xl border border-slate-200 dark:border-slate-700/90 bg-white/98 dark:bg-slate-900/98 backdrop-blur-md shadow-xl p-3 text-left text-xs text-slate-800 dark:text-slate-100 space-y-2.5`}
+    >
+      {(titleLabel || (showCloseButton && onDismiss)) && (
+        <div className="flex items-center justify-between gap-2 text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 border-b border-slate-100 dark:border-slate-800 pb-1.5">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <Network className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
+            <span className="truncate">{titleLabel ?? 'BGP Origin · RPKI · Quick Actions'}</span>
+          </div>
+          {showCloseButton && onDismiss && (
+            <button
+              type="button"
+              data-testid="ip-card-close-btn"
+              aria-label="Close IP network card"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDismiss();
+              }}
+              className="rounded p-0.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer shrink-0"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       )}
 
       <div className="space-y-2.5 divide-y divide-slate-100 dark:divide-slate-800/80">
-        {entries.map(({ token, info }, idx) => (
-          <div
-            key={`${token.canonicalIp}-${token.cidrSuffix ?? ''}-${idx}`}
-            className={idx > 0 ? 'pt-2.5 space-y-1.5' : 'space-y-1.5'}
-          >
-            {/* Header Row: IPv4/IPv6 badge + IP address + RIR/Country badge */}
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5 min-w-0">
-                <span
-                  className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold shrink-0 ${
-                    token.family === 6
-                      ? 'bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30'
-                      : 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30'
-                  }`}
-                >
-                  IPv{token.family}
-                </span>
-                <span className="font-mono font-bold text-xs text-slate-900 dark:text-slate-100 break-all">
-                  {token.canonicalIp}
-                  {token.cidrSuffix ?? ''}
-                </span>
-              </div>
-
-              {info.isPublic ? (
-                (info.rir || info.country) && (
-                  <span className="rounded bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase text-slate-600 dark:text-slate-300 shrink-0">
-                    {[info.rir, info.country].filter(Boolean).join(' · ')}
-                  </span>
-                )
-              ) : (
-                <span className="rounded bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 px-1.5 py-0.5 font-mono text-[10px] font-semibold shrink-0">
-                  SPECIAL RANGE
-                </span>
-              )}
-            </div>
-
-            {/* Body: ASN + Organization + Routed BGP Prefix */}
-            {info.status === 'special' ? (
-              <div className="flex items-start gap-1.5 rounded-lg bg-amber-500/10 border border-amber-500/25 px-2.5 py-1.5 text-[11px] text-amber-800 dark:text-amber-200">
-                <ShieldAlert className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-500" />
-                <span>{info.specialRangeNote ?? 'Non-public / reserved IP address range'}</span>
-              </div>
-            ) : info.status === 'loading' ? (
-              <div className="flex items-center gap-2 py-1 text-[11px] text-slate-500 dark:text-slate-400">
-                <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-500 shrink-0" />
-                <span>Resolving BGP ASN &amp; network via DoH…</span>
-              </div>
-            ) : info.status === 'ready' && info.asns.length > 0 ? (
-              <div className="space-y-1.5">
-                {info.asns.map((asn) => (
-                  <div
-                    key={asn.asn}
-                    className="rounded-lg bg-slate-50 dark:bg-slate-950/80 border border-slate-200/80 dark:border-slate-800 px-2.5 py-1.5 space-y-0.5"
+        {entries.map(({ token, info }, idx) => {
+          const isCopied = copiedIp === token.canonicalIp;
+          return (
+            <div
+              key={`${token.canonicalIp}-${token.cidrSuffix ?? ''}-${idx}`}
+              className={idx > 0 ? 'pt-2.5 space-y-1.5' : 'space-y-1.5'}
+            >
+              {/* Header Row: IPv4/IPv6 badge + IP address + RIR/Country badge */}
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span
+                    className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold shrink-0 ${
+                      token.family === 6
+                        ? 'bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30'
+                        : 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30'
+                    }`}
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="inline-flex items-center gap-1 rounded bg-cyan-500/15 text-cyan-800 dark:text-cyan-200 border border-cyan-500/30 px-1.5 py-0.5 font-mono text-[11px] font-bold">
-                        <Globe className="w-3 h-3 text-cyan-500" />
-                        AS{asn.asn}
-                      </span>
-                      {asn.allocatedDate && (
-                        <span className="font-mono text-[10px] text-slate-400">
-                          Alloc {asn.allocatedDate}
-                        </span>
-                      )}
-                    </div>
-                    {asn.asName && (
-                      <div className="font-medium text-[11px] text-slate-800 dark:text-slate-200 break-words pt-0.5">
-                        {asn.asName}
-                      </div>
-                    )}
-                  </div>
-                ))}
+                    IPv{token.family}
+                  </span>
+                  <span className="font-mono font-bold text-xs text-slate-900 dark:text-slate-100 break-all">
+                    {token.canonicalIp}
+                    {token.cidrSuffix ?? ''}
+                  </span>
+                </div>
 
-                {info.bgpPrefixes.length > 0 && (
-                  <div className="flex flex-wrap items-center justify-between gap-1.5 pt-0.5 text-[11px] font-mono">
-                    <span className="text-slate-500 dark:text-slate-400 flex items-center gap-1">
-                      <Server className="w-3 h-3 text-cyan-500" />
-                      <span>BGP Network:</span>
+                {info.isPublic ? (
+                  (info.rir || info.country) && (
+                    <span className="rounded bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase text-slate-600 dark:text-slate-300 shrink-0">
+                      {[info.rir, info.country].filter(Boolean).join(' · ')}
                     </span>
-                    <div className="flex flex-wrap gap-1">
-                      {info.bgpPrefixes.map((pfx) => (
-                        <span
-                          key={pfx}
-                          className="rounded bg-cyan-500/10 border border-cyan-500/25 px-1.5 py-0.5 font-bold text-cyan-800 dark:text-cyan-200"
-                        >
-                          {pfx}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
+                  )
+                ) : (
+                  <span className="rounded bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 px-1.5 py-0.5 font-mono text-[10px] font-semibold shrink-0">
+                    SPECIAL RANGE
+                  </span>
                 )}
+              </div>
 
-                {info.rpkiStatus && info.rpkiStatus !== 'error' && (
-                  <div className="space-y-1 pt-0.5">
-                    <div className="flex flex-wrap items-center justify-between gap-1.5 text-[11px] font-mono">
-                      <span className="text-slate-500 dark:text-slate-400 flex items-center gap-1">
-                        <ShieldCheck className="w-3 h-3 text-cyan-500" />
-                        <span>RPKI ROA:</span>
-                      </span>
-                      <RpkiStatusBadge
-                        status={info.rpkiStatus}
-                        validation={info.rpkiValidations?.[0]}
-                        compact
-                      />
-                    </div>
-                    {info.rpkiValidations?.[0]?.roas &&
-                      info.rpkiValidations[0].roas.length > 0 && (
-                        <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 flex flex-wrap items-center justify-end gap-1">
-                          {info.rpkiStatus === 'invalid-asn' ? (
-                            <span className="text-rose-600 dark:text-rose-400">
-                              ROA Origin:{' '}
-                              {Array.from(
-                                new Set(
-                                  info.rpkiValidations[0].roas.map((r) => `AS${r.originAsn}`)
-                                )
-                              )
-                                .slice(0, 3)
-                                .join(', ')}{' '}
-                              (maxLen /{info.rpkiValidations[0].roas[0].maxLength})
-                            </span>
-                          ) : (
-                            <span>
-                              ROA AS{info.rpkiValidations[0].roas[0].originAsn} ·{' '}
-                              {info.rpkiValidations[0].roas[0].prefix} (maxLen /
-                              {info.rpkiValidations[0].roas[0].maxLength})
-                            </span>
-                          )}
+              {/* Body: ASN + Organization + Routed BGP Prefix */}
+              {info.status === 'special' ? (
+                <div className="flex items-start gap-1.5 rounded-lg bg-amber-500/10 border border-amber-500/25 px-2.5 py-1.5 text-[11px] text-amber-800 dark:text-amber-200">
+                  <ShieldAlert className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-500" />
+                  <span>{info.specialRangeNote ?? 'Non-public / reserved IP address range'}</span>
+                </div>
+              ) : info.status === 'loading' ? (
+                <div className="flex items-center gap-2 py-1 text-[11px] text-slate-500 dark:text-slate-400">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-500 shrink-0" />
+                  <span>Resolving BGP ASN &amp; network via DoH…</span>
+                </div>
+              ) : info.status === 'ready' && info.asns.length > 0 ? (
+                <div className="space-y-1.5">
+                  {info.asns.map((asn) => (
+                    <div
+                      key={asn.asn}
+                      className="rounded-lg bg-slate-50 dark:bg-slate-950/80 border border-slate-200/80 dark:border-slate-800 px-2.5 py-1.5 space-y-0.5"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="inline-flex items-center gap-1 rounded bg-cyan-500/15 text-cyan-800 dark:text-cyan-200 border border-cyan-500/30 px-1.5 py-0.5 font-mono text-[11px] font-bold">
+                          <Globe className="w-3 h-3 text-cyan-500" />
+                          AS{asn.asn}
+                        </span>
+                        {asn.allocatedDate && (
+                          <span className="font-mono text-[10px] text-slate-400">
+                            Alloc {asn.allocatedDate}
+                          </span>
+                        )}
+                      </div>
+                      {asn.asName && (
+                        <div className="font-medium text-[11px] text-slate-800 dark:text-slate-200 break-words pt-0.5">
+                          {asn.asName}
                         </div>
                       )}
-                  </div>
-                )}
-              </div>
-            ) : info.status === 'unannounced' ? (
-              <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                No global BGP origin announcement found in Team Cymru DNS.
-              </div>
-            ) : (
-              <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                Unable to query BGP origin TXT via DoH.
-              </div>
-            )}
-          </div>
-        ))}
+                    </div>
+                  ))}
+
+                  {info.bgpPrefixes.length > 0 && (
+                    <div className="flex flex-wrap items-center justify-between gap-1.5 pt-0.5 text-[11px] font-mono">
+                      <span className="text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                        <Server className="w-3 h-3 text-cyan-500" />
+                        <span>BGP Network:</span>
+                      </span>
+                      <div className="flex flex-wrap gap-1">
+                        {info.bgpPrefixes.map((pfx) => (
+                          <span
+                            key={pfx}
+                            className="rounded bg-cyan-500/10 border border-cyan-500/25 px-1.5 py-0.5 font-bold text-cyan-800 dark:text-cyan-200"
+                          >
+                            {pfx}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {info.rpkiStatus && info.rpkiStatus !== 'error' && (
+                    <div className="space-y-1 pt-0.5">
+                      <div className="flex flex-wrap items-center justify-between gap-1.5 text-[11px] font-mono">
+                        <span className="text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                          <ShieldCheck className="w-3 h-3 text-cyan-500" />
+                          <span>RPKI ROA:</span>
+                        </span>
+                        <RpkiStatusBadge
+                          status={info.rpkiStatus}
+                          validation={info.rpkiValidations?.[0]}
+                          compact
+                        />
+                      </div>
+                      {info.rpkiValidations?.[0]?.roas &&
+                        info.rpkiValidations[0].roas.length > 0 && (
+                          <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 flex flex-wrap items-center justify-end gap-1">
+                            {info.rpkiStatus === 'invalid-asn' ? (
+                              <span className="text-rose-600 dark:text-rose-400">
+                                ROA Origin:{' '}
+                                {Array.from(
+                                  new Set(
+                                    info.rpkiValidations[0].roas.map((r) => `AS${r.originAsn}`)
+                                  )
+                                )
+                                  .slice(0, 3)
+                                  .join(', ')}{' '}
+                                (maxLen /{info.rpkiValidations[0].roas[0].maxLength})
+                              </span>
+                            ) : (
+                              <span>
+                                ROA AS{info.rpkiValidations[0].roas[0].originAsn} ·{' '}
+                                {info.rpkiValidations[0].roas[0].prefix} (maxLen /
+                                {info.rpkiValidations[0].roas[0].maxLength})
+                              </span>
+                            )}
+                          </div>
+                        )}
+                    </div>
+                  )}
+                </div>
+              ) : info.status === 'unannounced' ? (
+                <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                  No global BGP origin announcement found in Team Cymru DNS.
+                </div>
+              ) : (
+                <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Unable to query BGP origin TXT via DoH.
+                </div>
+              )}
+
+              {/* Quick-Action Footer: Copy IP + Trace Reverse DNS (PTR) */}
+              {showActions && (
+                <div className="flex items-center gap-1.5 pt-1.5 border-t border-slate-100 dark:border-slate-800/80">
+                  <button
+                    type="button"
+                    data-testid="ip-card-copy-btn"
+                    data-ip={token.canonicalIp}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleCopy(token.canonicalIp);
+                    }}
+                    className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700/90 bg-slate-50 dark:bg-slate-800/80 hover:border-cyan-500/70 hover:bg-slate-100 dark:hover:bg-slate-800 px-2.5 py-1.5 text-[11px] font-medium text-slate-700 dark:text-slate-200 transition-colors cursor-pointer"
+                    title={`Copy ${token.canonicalIp} to clipboard`}
+                  >
+                    {isCopied ? (
+                      <>
+                        <Check className="w-3 h-3 text-emerald-500 shrink-0" />
+                        <span className="text-emerald-700 dark:text-emerald-300 font-semibold">
+                          Copied!
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3 h-3 text-slate-500 dark:text-slate-400 shrink-0" />
+                        <span>Copy IP</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    data-testid="ip-card-trace-ptr-btn"
+                    data-ip={token.canonicalIp}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const traceHandler = onTraceIp ?? globalTraceIpHandler;
+                      onDismiss?.();
+                      traceHandler?.(token.canonicalIp);
+                    }}
+                    className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg border border-cyan-500/35 bg-cyan-500/10 hover:bg-cyan-500/20 hover:border-cyan-500/70 px-2.5 py-1.5 text-[11px] font-semibold text-cyan-800 dark:text-cyan-200 transition-colors cursor-pointer"
+                    title={`Run live Reverse DNS (PTR) & DNSSEC trace for ${token.canonicalIp}`}
+                  >
+                    <Search className="w-3 h-3 text-cyan-600 dark:text-cyan-400 shrink-0" />
+                    <span>Trace rDNS (PTR)</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -857,52 +1027,193 @@ export function IpAsnHoverCardContent({
 
 /**
  * Inline wrapper for any IPv4/IPv6 address (or CIDR / SPF `ip4:`/`ip6:` token) that displays
- * a floating hover card with the IP's BGP ASN, Organization, Routed Network Prefix, RIR, and Country.
+ * an interactive BGP ASN, Organization, Routed Network Prefix, RIR, Country, and RPKI ROA card
+ * on desktop hover or mobile/keyboard tap, complete with Copy IP & Trace rDNS (PTR) actions.
  */
 export function IpHoverBadge({
   ip,
   children,
   className = '',
+  onTraceIp,
 }: {
   ip: string;
   children?: ReactNode;
   className?: string;
+  onTraceIp?: (ip: string) => void;
 }) {
   const parsed = parseIpToken(ip);
   const triggerRef = useRef<HTMLSpanElement | null>(null);
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const hoverCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastTouchTimeRef = useRef<number>(0);
+
   const [hovered, setHovered] = useState(false);
+  const [pinned, setPinned] = useState(false);
   const [coords, setCoords] = useState<{
     left: number;
     top: number;
     placement: 'top' | 'bottom';
+    mobileSheet: boolean;
   } | null>(null);
 
-  const entries = useIpAsnInfos(parsed ? [ip] : [], hovered);
+  const isOpen = hovered || pinned;
+  const entries = useIpAsnInfos(parsed ? [ip] : [], isOpen);
 
-  const updatePosition = useCallback(() => {
-    const el = triggerRef.current;
-    if (!el || typeof window === 'undefined') return;
-    const rect = el.getBoundingClientRect();
-    const cardWidth = 320;
-    const half = cardWidth / 2;
-    const center = rect.left + rect.width / 2;
-    const clampedLeft = Math.max(
-      12 + half,
-      Math.min(window.innerWidth - 12 - half, center)
-    );
-    const placement: 'top' | 'bottom' = rect.top > 180 ? 'top' : 'bottom';
-    const top = placement === 'top' ? rect.top - 8 : rect.bottom + 8;
-    setCoords({ left: clampedLeft, top, placement });
+  const clearHoverTimer = useCallback(() => {
+    if (hoverCloseTimerRef.current !== null) {
+      clearTimeout(hoverCloseTimerRef.current);
+      hoverCloseTimerRef.current = null;
+    }
   }, []);
 
-  const handleEnter = () => {
-    updatePosition();
+  const dismissCard = useCallback(() => {
+    clearHoverTimer();
+    setPinned(false);
+    setHovered(false);
+  }, [clearHoverTimer]);
+
+  useEffect(() => {
+    return () => clearHoverTimer();
+  }, [clearHoverTimer]);
+
+  // Coordinate module-level active pinned badge so tapping another IP badge closes the previous one
+  useEffect(() => {
+    if (!pinned) {
+      if (activePinnedDismiss === dismissCard) {
+        activePinnedDismiss = null;
+      }
+      return;
+    }
+    if (activePinnedDismiss && activePinnedDismiss !== dismissCard) {
+      activePinnedDismiss();
+    }
+    activePinnedDismiss = dismissCard;
+    return () => {
+      if (activePinnedDismiss === dismissCard) {
+        activePinnedDismiss = null;
+      }
+    };
+  }, [pinned, dismissCard]);
+
+  const updatePosition = useCallback(
+    (isPinnedMode?: boolean) => {
+      const el = triggerRef.current;
+      if (!el || typeof window === 'undefined') return;
+      const vw = window.innerWidth || 1024;
+      const useMobileSheet = Boolean((isPinnedMode ?? pinned) && vw < 640);
+      if (useMobileSheet) {
+        setCoords({ left: 12, top: 0, placement: 'bottom', mobileSheet: true });
+        return;
+      }
+      const rect = el.getBoundingClientRect();
+      const cardWidth = Math.min(320, Math.max(240, vw - 24));
+      const half = cardWidth / 2;
+      const center = rect.left + rect.width / 2;
+      const clampedLeft = Math.max(12 + half, Math.min(vw - 12 - half, center));
+      const placement: 'top' | 'bottom' = rect.top > 230 ? 'top' : 'bottom';
+      const top = placement === 'top' ? rect.top - 8 : rect.bottom + 8;
+      setCoords({ left: clampedLeft, top, placement, mobileSheet: false });
+    },
+    [pinned]
+  );
+
+  const scheduleHoverClose = useCallback(() => {
+    clearHoverTimer();
+    hoverCloseTimerRef.current = setTimeout(() => {
+      setHovered(false);
+    }, 150);
+  }, [clearHoverTimer]);
+
+  const handleMouseEnter = () => {
+    if (Date.now() - lastTouchTimeRef.current < 600) {
+      return;
+    }
+    clearHoverTimer();
+    updatePosition(pinned);
     setHovered(true);
   };
 
-  const handleLeave = () => {
-    setHovered(false);
+  const handleMouseLeave = () => {
+    if (Date.now() - lastTouchTimeRef.current < 600) {
+      return;
+    }
+    scheduleHoverClose();
   };
+
+  const handleTogglePin = (e: { stopPropagation: () => void }) => {
+    e.stopPropagation();
+    clearHoverTimer();
+    if (pinned) {
+      setPinned(false);
+      setHovered(false);
+    } else {
+      updatePosition(true);
+      setPinned(true);
+    }
+  };
+
+  // Dismiss on outside tap/click, Escape, or page scroll out of viewport
+  useEffect(() => {
+    if (!isOpen || typeof document === 'undefined') return;
+
+    const handleOutsideInteraction = (e: Event) => {
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (triggerRef.current?.contains(target)) return;
+      if (cardRef.current?.contains(target)) return;
+      dismissCard();
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        const focusWasInCard = Boolean(cardRef.current?.contains(document.activeElement));
+        dismissCard();
+        if (focusWasInCard) {
+          triggerRef.current?.focus();
+        }
+      }
+    };
+
+    const handleResize = () => {
+      updatePosition();
+    };
+
+    const handleScroll = (e: Event) => {
+      const target = e.target as Node | null;
+      if (target && cardRef.current?.contains(target)) {
+        return;
+      }
+      const el = triggerRef.current;
+      if (!el || typeof window === 'undefined') return;
+      const rect = el.getBoundingClientRect();
+      const vh = window.innerHeight || 768;
+      if (vh > 0 && (rect.bottom < -16 || rect.top > vh + 16)) {
+        dismissCard();
+        return;
+      }
+      updatePosition();
+    };
+
+    document.addEventListener('pointerdown', handleOutsideInteraction, true);
+    document.addEventListener('mousedown', handleOutsideInteraction, true);
+    document.addEventListener('keydown', handleKeyDown, true);
+    if (typeof window !== 'undefined') {
+      window.addEventListener('resize', handleResize);
+      window.addEventListener('scroll', handleScroll, true);
+    }
+
+    return () => {
+      document.removeEventListener('pointerdown', handleOutsideInteraction, true);
+      document.removeEventListener('mousedown', handleOutsideInteraction, true);
+      document.removeEventListener('keydown', handleKeyDown, true);
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('resize', handleResize);
+        window.removeEventListener('scroll', handleScroll, true);
+      }
+    };
+  }, [isOpen, dismissCard, updatePosition]);
 
   if (!parsed) {
     return <span className={className}>{children ?? ip}</span>;
@@ -912,33 +1223,90 @@ export function IpHoverBadge({
     <>
       <span
         ref={triggerRef}
-        onMouseEnter={handleEnter}
-        onMouseLeave={handleLeave}
-        onFocus={handleEnter}
-        onBlur={handleLeave}
-        className={`decoration-dotted hover:underline hover:decoration-cyan-500/80 cursor-help ${className}`}
+        role="button"
+        tabIndex={0}
+        aria-expanded={isOpen}
+        aria-haspopup="dialog"
+        data-testid="ip-hover-badge"
+        data-ip={parsed.canonicalIp}
+        data-pinned={pinned ? 'true' : undefined}
+        onTouchStart={() => {
+          lastTouchTimeRef.current = Date.now();
+        }}
+        onPointerDown={(e) => {
+          if (e.pointerType === 'touch' || e.pointerType === 'pen') {
+            lastTouchTimeRef.current = Date.now();
+          }
+        }}
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+        onClick={handleTogglePin}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            handleTogglePin(e);
+          }
+        }}
+        className={`rounded-sm outline-none focus-visible:ring-1 focus-visible:ring-cyan-500/80 ${
+          pinned
+            ? 'underline decoration-solid decoration-cyan-500 text-cyan-700 dark:text-cyan-300'
+            : 'decoration-dotted hover:underline hover:decoration-cyan-500/80'
+        } cursor-help ${className}`}
       >
         {children ?? ip}
       </span>
-      {hovered &&
+      {isOpen &&
         coords &&
         typeof document !== 'undefined' &&
         document.body &&
         createPortal(
           <div
-            style={{
-              position: 'fixed',
-              left: `${coords.left}px`,
-              top: `${coords.top}px`,
-              transform:
-                coords.placement === 'top'
-                  ? 'translate(-50%, -100%)'
-                  : 'translate(-50%, 0)',
-              zIndex: 9999,
-              pointerEvents: 'none',
+            ref={cardRef}
+            role="dialog"
+            aria-label={`IP network details for ${parsed.canonicalIp}`}
+            data-testid="ip-hover-card-portal"
+            data-mobile-sheet={coords.mobileSheet ? 'true' : 'false'}
+            onMouseEnter={() => {
+              if (Date.now() - lastTouchTimeRef.current >= 600) {
+                clearHoverTimer();
+                setHovered(true);
+              }
             }}
+            onMouseLeave={() => {
+              if (Date.now() - lastTouchTimeRef.current >= 600) {
+                scheduleHoverClose();
+              }
+            }}
+            style={
+              coords.mobileSheet
+                ? {
+                    position: 'fixed',
+                    left: '12px',
+                    right: '12px',
+                    bottom: 'max(12px, env(safe-area-inset-bottom, 12px))',
+                    zIndex: 9999,
+                    pointerEvents: 'auto',
+                  }
+                : {
+                    position: 'fixed',
+                    left: `${coords.left}px`,
+                    top: `${coords.top}px`,
+                    transform:
+                      coords.placement === 'top'
+                        ? 'translate(-50%, -100%)'
+                        : 'translate(-50%, 0)',
+                    zIndex: 9999,
+                    pointerEvents: 'auto',
+                  }
+            }
           >
-            <IpAsnHoverCardContent entries={entries} />
+            <IpAsnHoverCardContent
+              entries={entries}
+              onTraceIp={onTraceIp}
+              onDismiss={dismissCard}
+              showCloseButton={pinned}
+              mobileSheet={coords.mobileSheet}
+            />
           </div>,
           document.body
         )}

@@ -290,7 +290,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexCss).toContain('env(safe-area-inset-bottom');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v42');
+    expect(swCode).toContain('digdeep-shell-v43');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -4161,4 +4161,267 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(auditHtml).toContain('Remediation:');
     expect(auditHtml).toContain('register AAAA glue at com');
   });
+
+  it('supports #45 tap-interactive mobile IP/BGP/RPKI cards, keyboard Enter/Space/Escape, outside-tap dismissal, Copy IP, and Trace rDNS (PTR) in App', async () => {
+    const ssrBadge = renderToStaticMarkup(<IpHoverBadge ip="192.0.2.1" />);
+    expect(ssrBadge).toContain('role="button"');
+    expect(ssrBadge).toContain('tabindex="0"');
+    expect(ssrBadge).toContain('aria-expanded="false"');
+    expect(ssrBadge).toContain('cursor-help');
+
+    const mem = new Map<string, string>();
+    Object.defineProperty(globalThis, 'localStorage', {
+      value: {
+        getItem: (k: string) => mem.get(k) ?? null,
+        setItem: (k: string, v: string) => void mem.set(k, v),
+        removeItem: (k: string) => void mem.delete(k),
+        clear: () => mem.clear(),
+      },
+      configurable: true,
+    });
+
+    const { JSDOM } = (await import('jsdom' as string)) as {
+      JSDOM: new (
+        markup?: string,
+        opts?: { url?: string }
+      ) => { window: Window & typeof globalThis };
+    };
+    const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
+      url: 'https://digdeep.example/',
+    });
+
+    const prevWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    const prevDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+    const prevOnline = Object.getOwnPropertyDescriptor(globalThis.navigator, 'onLine');
+    const prevClipboard = Object.getOwnPropertyDescriptor(globalThis.navigator, 'clipboard');
+
+    const clipboardWrites: string[] = [];
+    Object.defineProperty(globalThis, 'window', { value: dom.window, configurable: true });
+    Object.defineProperty(globalThis, 'document', {
+      value: dom.window.document,
+      configurable: true,
+    });
+    Object.defineProperty(globalThis.navigator, 'onLine', {
+      value: false,
+      configurable: true,
+    });
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      value: {
+        writeText: vi.fn(async (txt: string) => {
+          clipboardWrites.push(txt);
+        }),
+      },
+      configurable: true,
+    });
+    Object.defineProperty(dom.window, 'innerWidth', {
+      value: 375,
+      configurable: true,
+      writable: true,
+    });
+    (dom.window as unknown as { matchMedia: () => { matches: boolean } }).matchMedia = () => ({
+      matches: true,
+    });
+    (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
+      true;
+
+    try {
+      const { act } = await import('react');
+      const { createRoot } = await import('react-dom/client');
+      const container = dom.window.document.getElementById('root')!;
+      const root = createRoot(container);
+      const tracedIps: string[] = [];
+
+      await act(async () => {
+        root.render(
+          <div>
+            <IpHoverBadge ip="ip4:198.51.100.0/24" onTraceIp={(ip) => tracedIps.push(ip)}>
+              ip4:198.51.100.0/24
+            </IpHoverBadge>
+            <IpHoverBadge ip="192.0.2.1" onTraceIp={(ip) => tracedIps.push(ip)} />
+            <div data-testid="outside-area">Outside</div>
+          </div>
+        );
+      });
+
+      const badges = container.querySelectorAll('[data-testid="ip-hover-badge"]');
+      expect(badges.length).toBe(2);
+      const badgeA = badges[0] as HTMLElement;
+      const badgeB = badges[1] as HTMLElement;
+
+      // 1. Tap badgeA on narrow 375px viewport -> opens mobile bottom-docked interactive card
+      await act(async () => {
+        badgeA.dispatchEvent(new dom.window.Event('touchstart', { bubbles: true }));
+        badgeA.click();
+      });
+
+      let portals = dom.window.document.body.querySelectorAll(
+        '[data-testid="ip-hover-card-portal"]'
+      );
+      expect(portals.length).toBe(1);
+      expect(portals[0]!.getAttribute('data-mobile-sheet')).toBe('true');
+      expect((portals[0] as HTMLElement).style.pointerEvents).toBe('auto');
+      expect(portals[0]!.textContent).toContain('198.51.100.0/24');
+      expect(badgeA.getAttribute('aria-expanded')).toBe('true');
+
+      // 2. Tap badgeB -> automatically dismisses badgeA's pinned card and opens badgeB's card
+      await act(async () => {
+        badgeB.dispatchEvent(new dom.window.Event('touchstart', { bubbles: true }));
+        badgeB.click();
+      });
+
+      portals = dom.window.document.body.querySelectorAll('[data-testid="ip-hover-card-portal"]');
+      expect(portals.length).toBe(1);
+      expect(portals[0]!.textContent).toContain('192.0.2.1');
+      expect(badgeA.getAttribute('aria-expanded')).toBe('false');
+      expect(badgeB.getAttribute('aria-expanded')).toBe('true');
+
+      // 3. Click "Copy IP" inside the portal -> copies canonical IP & shows "Copied!" without closing card
+      const copyBtn = portals[0]!.querySelector(
+        '[data-testid="ip-card-copy-btn"]'
+      ) as HTMLButtonElement;
+      expect(copyBtn).toBeTruthy();
+      await act(async () => {
+        copyBtn.click();
+      });
+      expect(clipboardWrites).toEqual(['192.0.2.1']);
+      expect(copyBtn.textContent).toContain('Copied!');
+      expect(
+        dom.window.document.body.querySelectorAll('[data-testid="ip-hover-card-portal"]').length
+      ).toBe(1);
+
+      // 4. Outside mousedown dismisses the open card
+      const outsideEl = container.querySelector('[data-testid="outside-area"]') as HTMLElement;
+      await act(async () => {
+        outsideEl.dispatchEvent(new dom.window.MouseEvent('mousedown', { bubbles: true }));
+      });
+      expect(
+        dom.window.document.body.querySelectorAll('[data-testid="ip-hover-card-portal"]').length
+      ).toBe(0);
+
+      // 5. Keyboard Enter opens and Escape dismisses
+      await act(async () => {
+        badgeA.dispatchEvent(
+          new dom.window.KeyboardEvent('keydown', {
+            key: 'Enter',
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+      });
+      expect(
+        dom.window.document.body.querySelectorAll('[data-testid="ip-hover-card-portal"]').length
+      ).toBe(1);
+
+      await act(async () => {
+        dom.window.document.dispatchEvent(
+          new dom.window.KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+      });
+      expect(
+        dom.window.document.body.querySelectorAll('[data-testid="ip-hover-card-portal"]').length
+      ).toBe(0);
+
+      // 6. Verify App-level global "Trace rDNS (PTR)" wiring switches omnibox to canonical IP Reverse DNS mode
+      saveSnapshot({
+        ...ipv6FixtureForMobileTest(),
+      });
+      await act(async () => {
+        root.render(<App />);
+      });
+
+      // Switch to Zones tab where NS IP badges are rendered
+      const zonesTabBtn = container.querySelector(
+        '[data-testid="nav-tab-zones"]'
+      ) as HTMLButtonElement;
+      expect(zonesTabBtn).toBeTruthy();
+      await act(async () => {
+        zonesTabBtn.click();
+      });
+
+      const appIpBadge = container.querySelector(
+        '[data-testid="ip-hover-badge"][data-ip="192.0.2.53"]'
+      ) as HTMLElement;
+      expect(appIpBadge).toBeTruthy();
+      await act(async () => {
+        appIpBadge.click();
+      });
+
+      const tracePtrBtn = dom.window.document.body.querySelector(
+        '[data-testid="ip-card-trace-ptr-btn"][data-ip="192.0.2.53"]'
+      ) as HTMLButtonElement;
+      expect(tracePtrBtn).toBeTruthy();
+
+      await act(async () => {
+        tracePtrBtn.click();
+      });
+
+      // Card dismissed and App omnibox switched to 192.0.2.53 Reverse DNS (PTR)
+      expect(
+        dom.window.document.body.querySelectorAll('[data-testid="ip-hover-card-portal"]').length
+      ).toBe(0);
+      const searchInput = container.querySelector('input[type="text"]') as HTMLInputElement;
+      expect(searchInput.value).toBe('192.0.2.53');
+      expect(container.textContent).toContain('IPv4 Reverse DNS Detected:');
+      expect(container.textContent).toContain('53.2.0.192.in-addr.arpa');
+
+      await act(async () => {
+        root.unmount();
+      });
+    } finally {
+      if (prevClipboard) {
+        Object.defineProperty(globalThis.navigator, 'clipboard', prevClipboard);
+      }
+      if (prevOnline) Object.defineProperty(globalThis.navigator, 'onLine', prevOnline);
+      if (prevWindow) Object.defineProperty(globalThis, 'window', prevWindow);
+      if (prevDocument) Object.defineProperty(globalThis, 'document', prevDocument);
+    }
+  });
 });
+
+function ipv6FixtureForMobileTest(): AnalysisSnapshot {
+  return {
+    id: 'snap-mobile-ip-45',
+    version: 18,
+    targetName: 'example.org.',
+    displayDomain: 'example.org',
+    queryTypes: ['A'],
+    dohEndpoint: 'https://1.1.1.1/dns-query',
+    capturedAt: 1700000000000,
+    validatedAt: 1700000000000,
+    durationMs: 42,
+    overallStatus: 'secure',
+    overallSummary: 'Chain of trust verified.',
+    zones: [
+      {
+        zoneName: 'example.org.',
+        parentZone: 'org.',
+        depth: 2,
+        status: 'secure',
+        statusReason: 'Signed',
+        nsecMode: 'NSEC',
+        dnskeys: [],
+        dsVerifications: [],
+        trustAnchorMatches: [],
+        rrsets: [],
+        negativeNodes: [],
+        nameservers: [
+          {
+            hostname: 'ns1.example.org.',
+            ipv4: ['192.0.2.53'],
+            ipv6: [],
+            status: 'ok',
+            addressStack: 'ipv4-only',
+          },
+        ],
+      },
+    ],
+    cnameEdges: [],
+    findings: [],
+    queries: [],
+    trustAnchorsUsed: [],
+  };
+}

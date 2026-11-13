@@ -1340,6 +1340,7 @@ export function ChainGraphView({
             <IpAsnHoverCardContent
               entries={hoveredIpEntries}
               titleLabel={`${hoveredIpNode.title} · ${hoveredIpNode.badge} RRset`}
+              showActions={false}
             />
           </div>,
           document.body
