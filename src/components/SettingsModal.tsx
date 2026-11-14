@@ -1,4 +1,4 @@
-import { Clock, KeyRound, Plus, RotateCcw, Server, Trash2, X } from 'lucide-react';
+import { Columns2, Clock, KeyRound, Plus, RotateCcw, Server, Trash2, X } from 'lucide-react';
 import { useEffect, useState, type FocusEvent, type FormEvent } from 'react';
 import {
   DEFAULT_DOH_ENDPOINT,
@@ -248,6 +248,38 @@ export function SettingsModal({
                 <RotateCcw className="w-3 h-3" /> Reset to default (1.1.1.1)
               </button>
             )}
+          </section>
+
+          {/* 1.5 Desktop Workspace Layout */}
+          <section className="space-y-2.5 pt-4 border-t border-slate-200 dark:border-slate-800">
+            <div className="flex items-center gap-1.5 font-semibold uppercase tracking-wider text-slate-500">
+              <Columns2 className="w-3.5 h-3.5 text-cyan-500" />
+              Desktop Workspace Layout (xl+ · &ge; 1280px)
+            </div>
+            <label className="rounded-lg border border-slate-200 dark:border-slate-800 p-3 flex items-start gap-2.5 cursor-pointer hover:border-cyan-500/50 transition-colors">
+              <input
+                type="checkbox"
+                data-testid="settings-toggle-wire-drawer"
+                checked={settings.dockWireDrawerDesktop ?? true}
+                onChange={(e) =>
+                  onSaveSettings({
+                    ...settings,
+                    dockWireDrawerDesktop: e.target.checked,
+                  })
+                }
+                className="mt-0.5 accent-cyan-500"
+              />
+              <div className="min-w-0 space-y-0.5">
+                <div className="font-semibold text-slate-900 dark:text-slate-100">
+                  Side-by-Side Desktop Wire &amp; Hex Dissector Split Drawer
+                </div>
+                <div className="text-[11px] text-slate-500 leading-relaxed">
+                  Open <strong>Inspect Wire</strong> &amp; <strong>Dissect Hex</strong> in a sticky
+                  right-hand split pane alongside Chain Graph, Audit, Consensus, Mail, Web, and
+                  Live Watch on wide screens without losing scroll or filter context.
+                </div>
+              </div>
+            </label>
           </section>
 
           {/* 2. Offline Time-Travel RRSIG Validation */}

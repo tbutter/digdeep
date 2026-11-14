@@ -297,6 +297,8 @@ function EcsGeoSection({
   ecsGeo,
   queries,
   onInspectWireQuery,
+  activeWireQueryId = null,
+  activeWireMode = null,
 }: {
   targetDomain: string;
   displayDomain: string;
@@ -304,6 +306,8 @@ function EcsGeoSection({
   ecsGeo: EcsGeoAnalysisResult;
   queries: DohQueryLog[];
   onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
+  activeWireQueryId?: string | null;
+  activeWireMode?: FocusedWireSubMode | null;
 }) {
   const [customSubnet, setCustomSubnet] = useState('81.2.69.0/24');
   const [customQtype, setCustomQtype] = useState<'A' | 'AAAA'>('A');
@@ -516,11 +520,33 @@ function EcsGeoSection({
               const ecsWire = onInspectWireQuery
                 ? findEcsRegionWireQueries(reg, queries)
                 : { ipv4: undefined, ipv6: undefined };
+              const isEcsRowWireActive = Boolean(
+                activeWireQueryId &&
+                  (ecsWire.ipv4?.id === activeWireQueryId || ecsWire.ipv6?.id === activeWireQueryId)
+              );
+              const isEcsV4Active = Boolean(
+                activeWireQueryId &&
+                  ecsWire.ipv4?.id === activeWireQueryId &&
+                  (!activeWireMode || activeWireMode === 'dig')
+              );
+              const isEcsV6Active = Boolean(
+                activeWireQueryId &&
+                  ecsWire.ipv6?.id === activeWireQueryId &&
+                  (!activeWireMode || activeWireMode === 'dig')
+              );
+              const isEcsHexActive = Boolean(
+                isEcsRowWireActive && (activeWireMode === 'hex-resp' || activeWireMode === 'hex-req')
+              );
               return (
                 <tr
                   key={reg.regionId}
-                  className={`hover:bg-slate-50/80 dark:hover:bg-slate-950/40 transition-colors ${
-                    reg.isPrivacyOptOut ? 'bg-slate-50/40 dark:bg-slate-950/25' : ''
+                  data-wire-active={isEcsRowWireActive ? 'true' : undefined}
+                  className={`transition-colors ${
+                    isEcsRowWireActive
+                      ? 'bg-cyan-500/10 ring-1 ring-inset ring-cyan-500/40'
+                      : reg.isPrivacyOptOut
+                        ? 'bg-slate-50/40 dark:bg-slate-950/25 hover:bg-slate-50/80 dark:hover:bg-slate-950/40'
+                        : 'hover:bg-slate-50/80 dark:hover:bg-slate-950/40'
                   }`}
                 >
                   <td className="py-2.5 px-3.5">
@@ -632,9 +658,14 @@ function EcsGeoSection({
                             {ecsWire.ipv4 && (
                               <button
                                 type="button"
+                                data-wire-active={isEcsV4Active ? 'true' : undefined}
                                 onClick={() => onInspectWireQuery(ecsWire.ipv4!.id, 'dig')}
                                 title={`Inspect IPv4 ECS wire query (${reg.ipv4.querySubnet})`}
-                                className="inline-flex items-center gap-0.5 rounded border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-1.5 py-0.5 text-[10px] font-medium text-cyan-700 dark:text-cyan-300 cursor-pointer"
+                                className={`inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 text-[10px] cursor-pointer ${
+                                  isEcsV4Active
+                                    ? 'border-cyan-500 bg-cyan-500 text-slate-950 font-semibold'
+                                    : 'border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 font-medium text-cyan-700 dark:text-cyan-300'
+                                }`}
                               >
                                 <Terminal className="w-2.5 h-2.5" />
                                 <span>v4</span>
@@ -643,9 +674,14 @@ function EcsGeoSection({
                             {ecsWire.ipv6 && (
                               <button
                                 type="button"
+                                data-wire-active={isEcsV6Active ? 'true' : undefined}
                                 onClick={() => onInspectWireQuery(ecsWire.ipv6!.id, 'dig')}
                                 title={`Inspect IPv6 ECS wire query (${reg.ipv6.querySubnet})`}
-                                className="inline-flex items-center gap-0.5 rounded border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-1.5 py-0.5 text-[10px] font-medium text-cyan-700 dark:text-cyan-300 cursor-pointer"
+                                className={`inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 text-[10px] cursor-pointer ${
+                                  isEcsV6Active
+                                    ? 'border-cyan-500 bg-cyan-500 text-slate-950 font-semibold'
+                                    : 'border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 font-medium text-cyan-700 dark:text-cyan-300'
+                                }`}
                               >
                                 <Terminal className="w-2.5 h-2.5" />
                                 <span>v6</span>
@@ -653,11 +689,16 @@ function EcsGeoSection({
                             )}
                             <button
                               type="button"
+                              data-wire-active={isEcsHexActive ? 'true' : undefined}
                               onClick={() =>
                                 onInspectWireQuery((ecsWire.ipv4 ?? ecsWire.ipv6)!.id, 'hex-resp')
                               }
                               title="Dissect RFC 7871 EDNS0 Option 8 wire bytes"
-                              className="inline-flex items-center gap-0.5 rounded border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:text-slate-300 cursor-pointer"
+                              className={`inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 text-[10px] cursor-pointer ${
+                                isEcsHexActive
+                                  ? 'border-cyan-500 bg-cyan-500 text-slate-950 font-semibold'
+                                  : 'border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 font-medium text-slate-600 dark:text-slate-300'
+                              }`}
                             >
                               <Binary className="w-2.5 h-2.5" />
                               <span>Hex</span>
@@ -878,12 +919,16 @@ export function ConsensusView({
   onOpenWireResponses,
   onInspectWireQuery,
   onOpenLiveWatch,
+  activeWireQueryId = null,
+  activeWireMode = null,
 }: {
   snapshot: AnalysisSnapshot;
   onOpenChainGraph: () => void;
   onOpenWireResponses: () => void;
   onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
   onOpenLiveWatch?: () => void;
+  activeWireQueryId?: string | null;
+  activeWireMode?: FocusedWireSubMode | null;
 }) {
   seedIpAsnCacheFromSnapshot(snapshot);
   const consensus = snapshot.consensusAnalysis;
@@ -1044,10 +1089,18 @@ export function ConsensusView({
               const edeWireQuery = onInspectWireQuery
                 ? findConsensusEdeWireQuery(item.resolverLabel, item.infoCode, snapshot)
                 : undefined;
+              const isEdeWireActive = Boolean(
+                activeWireQueryId && edeWireQuery?.id === activeWireQueryId
+              );
               return (
                 <div
                   key={`${item.resolverLabel}-${item.infoCode}-${idx}`}
-                  className="rounded-lg border border-amber-500/25 bg-white/90 dark:bg-slate-900/90 px-3 py-2 text-xs flex flex-col gap-1"
+                  data-wire-active={isEdeWireActive ? 'true' : undefined}
+                  className={`rounded-lg border px-3 py-2 text-xs flex flex-col gap-1 transition-all ${
+                    isEdeWireActive
+                      ? 'border-cyan-500 bg-cyan-500/10 ring-1 ring-cyan-500/40'
+                      : 'border-amber-500/25 bg-white/90 dark:bg-slate-900/90'
+                  }`}
                 >
                   <div className="flex items-center justify-between gap-2 font-mono">
                     <span className="font-bold text-slate-900 dark:text-slate-100">
@@ -1068,9 +1121,14 @@ export function ConsensusView({
                       {edeWireQuery && onInspectWireQuery && (
                         <button
                           type="button"
+                          data-wire-active={isEdeWireActive ? 'true' : undefined}
                           onClick={() => onInspectWireQuery(edeWireQuery.id, 'hex-resp')}
                           title="Dissect RFC 8914 EDNS0 Option 15 bytes in DoH Wire Dissector"
-                          className="inline-flex items-center gap-1 rounded border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-slate-50 dark:bg-slate-950 px-1.5 py-0.5 font-sans text-[10px] font-medium text-cyan-700 dark:text-cyan-300 cursor-pointer"
+                          className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-sans text-[10px] cursor-pointer ${
+                            isEdeWireActive
+                              ? 'border-cyan-500 bg-cyan-500 text-slate-950 font-semibold'
+                              : 'border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-slate-50 dark:bg-slate-950 font-medium text-cyan-700 dark:text-cyan-300'
+                          }`}
                         >
                           <Binary className="w-2.5 h-2.5" />
                           <span>Dissect</span>
@@ -1156,10 +1214,25 @@ export function ConsensusView({
                 const resolverWireQuery = onInspectWireQuery
                   ? findConsensusResolverWireQuery(r, snapshot)
                   : undefined;
+                const isResolverWireActive = Boolean(
+                  activeWireQueryId && resolverWireQuery?.id === activeWireQueryId
+                );
+                const isResolverDigActive = Boolean(
+                  isResolverWireActive && (!activeWireMode || activeWireMode === 'dig')
+                );
+                const isResolverHexActive = Boolean(
+                  isResolverWireActive &&
+                    (activeWireMode === 'hex-resp' || activeWireMode === 'hex-req')
+                );
                 return (
                   <tr
                     key={r.endpoint}
-                    className="hover:bg-slate-50/80 dark:hover:bg-slate-950/40 transition-colors"
+                    data-wire-active={isResolverWireActive ? 'true' : undefined}
+                    className={`transition-colors ${
+                      isResolverWireActive
+                        ? 'bg-cyan-500/10 ring-1 ring-inset ring-cyan-500/40'
+                        : 'hover:bg-slate-50/80 dark:hover:bg-slate-950/40'
+                    }`}
                   >
                     <td className="py-2.5 px-3.5">
                       <div className="font-bold text-slate-900 dark:text-slate-100">
@@ -1291,18 +1364,28 @@ export function ConsensusView({
                           <div className="inline-flex items-center gap-1 font-sans">
                             <button
                               type="button"
+                              data-wire-active={isResolverDigActive ? 'true' : undefined}
                               onClick={() => onInspectWireQuery(resolverWireQuery.id, 'dig')}
                               title={`Inspect ${r.shortLabel} DoH packet in dig format`}
-                              className="inline-flex items-center gap-0.5 rounded border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-1.5 py-0.5 text-[10px] font-medium text-cyan-700 dark:text-cyan-300 cursor-pointer"
+                              className={`inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 text-[10px] cursor-pointer ${
+                                isResolverDigActive
+                                  ? 'border-cyan-500 bg-cyan-500 text-slate-950 font-semibold'
+                                  : 'border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 font-medium text-cyan-700 dark:text-cyan-300'
+                              }`}
                             >
                               <Terminal className="w-2.5 h-2.5" />
                               <span>Wire</span>
                             </button>
                             <button
                               type="button"
+                              data-wire-active={isResolverHexActive ? 'true' : undefined}
                               onClick={() => onInspectWireQuery(resolverWireQuery.id, 'hex-resp')}
                               title={`Dissect ${r.shortLabel} DoH wire bytes`}
-                              className="inline-flex items-center gap-0.5 rounded border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:text-slate-300 cursor-pointer"
+                              className={`inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 text-[10px] cursor-pointer ${
+                                isResolverHexActive
+                                  ? 'border-cyan-500 bg-cyan-500 text-slate-950 font-semibold'
+                                  : 'border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 font-medium text-slate-600 dark:text-slate-300'
+                              }`}
                             >
                               <Binary className="w-2.5 h-2.5" />
                               <span>Hex</span>
@@ -1328,6 +1411,8 @@ export function ConsensusView({
           ecsGeo={consensus.ecsGeo}
           queries={snapshot.queries}
           onInspectWireQuery={onInspectWireQuery}
+          activeWireQueryId={activeWireQueryId}
+          activeWireMode={activeWireMode}
         />
       )}
     </div>

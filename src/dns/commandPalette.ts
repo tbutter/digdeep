@@ -96,6 +96,9 @@ export type CommandPaletteAction =
       type: 'toggle-soa-ns';
     }
   | {
+      type: 'toggle-wire-drawer-desktop';
+    }
+  | {
       type: 'select-history';
       snapshotId: string;
     };
@@ -805,6 +808,30 @@ export function buildCommandPaletteItems(ctx: BuildCommandPaletteContext): Comma
       defaultPriority: 66,
       includeWhenEmpty: true,
       action: { type: 'toggle-theme' },
+    },
+    {
+      id: 'action-toggle-wire-drawer',
+      category: 'actions',
+      title: `${(settings.dockWireDrawerDesktop ?? true) ? 'Disable' : 'Enable'} Side-by-Side Desktop Wire & Hex Split Drawer`,
+      subtitle:
+        'Dock Inspect Wire & Dissect Hex alongside Graph, Audit, Consensus, Mail, Web & Watch on xl+ screens',
+      badge: (settings.dockWireDrawerDesktop ?? true) ? 'SPLIT: ON' : 'SPLIT: OFF',
+      isActive: settings.dockWireDrawerDesktop ?? true,
+      keywords: [
+        'wire',
+        'hex',
+        'drawer',
+        'split',
+        'pane',
+        'dock',
+        'side-by-side',
+        'desktop',
+        'layout',
+        'toggle',
+      ],
+      defaultPriority: 65.5,
+      includeWhenEmpty: true,
+      action: { type: 'toggle-wire-drawer-desktop' },
     },
     {
       id: 'action-toggle-standby-keys',

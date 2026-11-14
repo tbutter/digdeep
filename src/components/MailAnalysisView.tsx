@@ -942,19 +942,29 @@ function getDkimStatusMeta(sel: DkimSelectorResult): {
 function DkimSelectorCard({
   sel,
   wireQueryId,
+  activeWireQueryId = null,
   onJumpToGraphTarget,
   onInspectWireQuery,
 }: {
   sel: DkimSelectorResult;
   wireQueryId?: string;
+  activeWireQueryId?: string | null;
   onJumpToGraphTarget: (targetId: string) => void;
   onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
 }) {
   const statusMeta = getDkimStatusMeta(sel);
   const graphTargetId = sel.txtRrsetId ?? sel.negativeNodeId;
+  const isWireActive = Boolean(activeWireQueryId && wireQueryId === activeWireQueryId);
 
   return (
-    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-3.5 space-y-2.5">
+    <div
+      data-wire-active={isWireActive ? 'true' : undefined}
+      className={`rounded-xl border p-3.5 space-y-2.5 transition-all ${
+        isWireActive
+          ? 'border-cyan-500 bg-cyan-500/5 ring-1 ring-cyan-500/40'
+          : 'border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60'
+      }`}
+    >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <span className="rounded-lg bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 px-2 py-0.5 font-mono text-xs font-bold">
@@ -986,10 +996,15 @@ function DkimSelectorCard({
           {wireQueryId && onInspectWireQuery && (
             <button
               type="button"
+              data-wire-active={isWireActive ? 'true' : undefined}
               onClick={() => onInspectWireQuery(wireQueryId, 'dig')}
-              className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-0.5 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:border-cyan-500 cursor-pointer"
+              className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] cursor-pointer ${
+                isWireActive
+                  ? 'border-cyan-500 bg-cyan-500 text-slate-950 font-semibold'
+                  : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 font-medium text-slate-700 dark:text-slate-200 hover:border-cyan-500'
+              }`}
             >
-              <Terminal className="w-3 h-3 text-cyan-500" />
+              <Terminal className={`w-3 h-3 ${isWireActive ? '' : 'text-cyan-500'}`} />
               <span>Wire</span>
             </button>
           )}
@@ -1090,6 +1105,7 @@ export function MailAnalysisView({
   onJumpToGraphTarget,
   onOpenChainGraph,
   onInspectWireQuery,
+  activeWireQueryId = null,
   onProbeDkimSelectors,
   onSwitchMailDomain,
   externalRawEmail,
@@ -1099,6 +1115,7 @@ export function MailAnalysisView({
   onJumpToGraphTarget: (targetId: string) => void;
   onOpenChainGraph: () => void;
   onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
+  activeWireQueryId?: string | null;
   onProbeDkimSelectors?: (rawSelectorsInput: string) => void;
   onSwitchMailDomain?: (domain: string, dkimSelectors: string[]) => void;
   externalRawEmail?: { payload: string; seq: number } | null;
@@ -1553,6 +1570,7 @@ export function MailAnalysisView({
         onSwitchMailDomain={onSwitchMailDomain}
         onJumpToGraphTarget={onJumpToGraphTarget}
         onInspectWireQuery={onInspectWireQuery}
+        activeWireQueryId={activeWireQueryId}
       />
 
       {/* Section 1: MX Exchangers & SMTP DANE (_25._tcp TLSA) */}
@@ -1589,19 +1607,29 @@ export function MailAnalysisView({
                 <span>Locate MX RRset in Graph</span>
                 <ArrowUpRight className="w-3.5 h-3.5" />
               </button>
-              {onInspectWireQuery && findWireQueryByGraphTargetId(mail.mxRrsetId, snapshot) && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    const q = findWireQueryByGraphTargetId(mail.mxRrsetId, snapshot);
-                    if (q) onInspectWireQuery(q.id, 'dig');
-                  }}
-                  className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-cyan-700 dark:text-cyan-300 hover:border-cyan-500 transition-colors cursor-pointer"
-                >
-                  <Terminal className="w-3.5 h-3.5" />
-                  <span>MX Wire</span>
-                </button>
-              )}
+              {onInspectWireQuery &&
+                (() => {
+                  const mxWire = findWireQueryByGraphTargetId(mail.mxRrsetId, snapshot);
+                  if (!mxWire) return null;
+                  const isMxWireActive = Boolean(
+                    activeWireQueryId && mxWire.id === activeWireQueryId
+                  );
+                  return (
+                    <button
+                      type="button"
+                      data-wire-active={isMxWireActive ? 'true' : undefined}
+                      onClick={() => onInspectWireQuery(mxWire.id, 'dig')}
+                      className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs transition-colors cursor-pointer ${
+                        isMxWireActive
+                          ? 'border-cyan-500 bg-cyan-500 text-slate-950 font-semibold'
+                          : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 font-medium text-cyan-700 dark:text-cyan-300 hover:border-cyan-500'
+                      }`}
+                    >
+                      <Terminal className="w-3.5 h-3.5" />
+                      <span>MX Wire</span>
+                    </button>
+                  );
+                })()}
             </div>
           )}
         </div>
@@ -1681,19 +1709,28 @@ export function MailAnalysisView({
                 <ArrowUpRight className="w-3.5 h-3.5" />
               </button>
               {onInspectWireQuery &&
-                findWireQueryByGraphTargetId(mail.spf.txtRrsetId, snapshot) && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const q = findWireQueryByGraphTargetId(mail.spf.txtRrsetId, snapshot);
-                      if (q) onInspectWireQuery(q.id, 'dig');
-                    }}
-                    className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-cyan-700 dark:text-cyan-300 hover:border-cyan-500 transition-colors cursor-pointer"
-                  >
-                    <Terminal className="w-3.5 h-3.5" />
-                    <span>SPF Wire</span>
-                  </button>
-                )}
+                (() => {
+                  const spfWire = findWireQueryByGraphTargetId(mail.spf.txtRrsetId, snapshot);
+                  if (!spfWire) return null;
+                  const isSpfWireActive = Boolean(
+                    activeWireQueryId && spfWire.id === activeWireQueryId
+                  );
+                  return (
+                    <button
+                      type="button"
+                      data-wire-active={isSpfWireActive ? 'true' : undefined}
+                      onClick={() => onInspectWireQuery(spfWire.id, 'dig')}
+                      className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs transition-colors cursor-pointer ${
+                        isSpfWireActive
+                          ? 'border-cyan-500 bg-cyan-500 text-slate-950 font-semibold'
+                          : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 font-medium text-cyan-700 dark:text-cyan-300 hover:border-cyan-500'
+                      }`}
+                    >
+                      <Terminal className="w-3.5 h-3.5" />
+                      <span>SPF Wire</span>
+                    </button>
+                  );
+                })()}
             </div>
           )}
         </div>
@@ -1974,25 +2011,31 @@ export function MailAnalysisView({
                 <ArrowUpRight className="w-3.5 h-3.5" />
               </button>
               {onInspectWireQuery &&
-                findWireQueryByGraphTargetId(
-                  mail.dmarc.txtRrsetId ?? mail.dmarc.negativeNodeId,
-                  snapshot
-                ) && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const q = findWireQueryByGraphTargetId(
-                        mail.dmarc.txtRrsetId ?? mail.dmarc.negativeNodeId,
-                        snapshot
-                      );
-                      if (q) onInspectWireQuery(q.id, 'dig');
-                    }}
-                    className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-cyan-700 dark:text-cyan-300 hover:border-cyan-500 transition-colors cursor-pointer"
-                  >
-                    <Terminal className="w-3.5 h-3.5" />
-                    <span>DMARC Wire</span>
-                  </button>
-                )}
+                (() => {
+                  const dmarcWire = findWireQueryByGraphTargetId(
+                    mail.dmarc.txtRrsetId ?? mail.dmarc.negativeNodeId,
+                    snapshot
+                  );
+                  if (!dmarcWire) return null;
+                  const isDmarcWireActive = Boolean(
+                    activeWireQueryId && dmarcWire.id === activeWireQueryId
+                  );
+                  return (
+                    <button
+                      type="button"
+                      data-wire-active={isDmarcWireActive ? 'true' : undefined}
+                      onClick={() => onInspectWireQuery(dmarcWire.id, 'dig')}
+                      className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs transition-colors cursor-pointer ${
+                        isDmarcWireActive
+                          ? 'border-cyan-500 bg-cyan-500 text-slate-950 font-semibold'
+                          : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 font-medium text-cyan-700 dark:text-cyan-300 hover:border-cyan-500'
+                      }`}
+                    >
+                      <Terminal className="w-3.5 h-3.5" />
+                      <span>DMARC Wire</span>
+                    </button>
+                  );
+                })()}
             </div>
           )}
         </div>
@@ -2273,6 +2316,7 @@ export function MailAnalysisView({
                         findWireQueryByOwnerAndType(snapshot.queries, sel.qname, 'TXT')?.id)
                       : undefined
                   }
+                  activeWireQueryId={activeWireQueryId}
                   onJumpToGraphTarget={onJumpToGraphTarget}
                   onInspectWireQuery={onInspectWireQuery}
                 />

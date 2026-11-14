@@ -27,11 +27,13 @@ export function AuditPanel({
   onJumpToGraphTarget,
   onInspectWireQuery,
   onOpenReportModal,
+  activeWireQueryId = null,
 }: {
   snapshot: AnalysisSnapshot;
   onJumpToGraphTarget: (targetId: string) => void;
   onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
   onOpenReportModal?: (initialTab: ReportExportTab) => void;
+  activeWireQueryId?: string | null;
 }) {
   const [filter, setFilter] = useState<'all' | AuditFinding['severity']>('all');
   const [copiedReport, setCopiedReport] = useState(false);
@@ -47,6 +49,7 @@ export function AuditPanel({
   const resolverCd0Query = snapshot.queries.find(
     (q) => !q.cd && !q.ecsSubnet && !q.purpose.startsWith('Consensus probe')
   );
+  const isCd0WireActive = Boolean(activeWireQueryId && resolverCd0Query?.id === activeWireQueryId);
 
   const errors = snapshot.findings.filter((f) => f.severity === 'error');
   const warnings = snapshot.findings.filter((f) => f.severity === 'warning');
@@ -78,7 +81,13 @@ export function AuditPanel({
           </div>
         </div>
 
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-2">
+        <div
+          className={`rounded-xl border bg-white dark:bg-slate-900/70 p-4 space-y-2 transition-shadow ${
+            isCd0WireActive
+              ? 'border-cyan-500 ring-2 ring-cyan-500/40'
+              : 'border-slate-200 dark:border-slate-800'
+          }`}
+        >
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
               <Server className="w-4 h-4" />
@@ -122,16 +131,23 @@ export function AuditPanel({
                 <div className="pt-1">
                   <button
                     type="button"
+                    data-wire-active={isCd0WireActive ? 'true' : undefined}
                     onClick={() =>
                       onInspectWireQuery(
                         resolverCd0Query.id,
                         snapshot.resolverVerdict?.ede.length ? 'hex-resp' : 'dig'
                       )
                     }
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-slate-50 dark:bg-slate-950 px-2.5 py-1 text-xs font-medium text-cyan-700 dark:text-cyan-300 transition-colors cursor-pointer"
+                    className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs transition-colors cursor-pointer ${
+                      isCd0WireActive
+                        ? 'border-cyan-500 bg-cyan-500 text-slate-950 font-semibold shadow-sm'
+                        : 'border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-slate-50 dark:bg-slate-950 font-medium text-cyan-700 dark:text-cyan-300'
+                    }`}
                   >
                     <Terminal className="w-3.5 h-3.5" />
-                    <span>Inspect CD=0 Wire Packet</span>
+                    <span>
+                      Inspect CD=0 Wire Packet{isCd0WireActive ? ' ●' : ''}
+                    </span>
                   </button>
                 </div>
               )}
@@ -231,13 +247,17 @@ export function AuditPanel({
             const wireQuery = onInspectWireQuery
               ? findAuditFindingWireQuery(f, snapshot)
               : undefined;
+            const isWireActive = Boolean(activeWireQueryId && wireQuery?.id === activeWireQueryId);
             const preferredWireMode: FocusedWireSubMode =
               f.code === 'ECS_WIRE_FORMAT_ANOMALY' || f.code.includes('EDE') ? 'hex-resp' : 'dig';
 
             return (
               <div
                 key={f.id}
-                className={`rounded-xl border p-4 flex flex-col sm:flex-row sm:items-start justify-between gap-3 ${borderCls}`}
+                data-wire-active={isWireActive ? 'true' : undefined}
+                className={`rounded-xl border p-4 flex flex-col sm:flex-row sm:items-start justify-between gap-3 transition-shadow ${borderCls} ${
+                  isWireActive ? 'ring-2 ring-cyan-500/60 dark:ring-cyan-400/60' : ''
+                }`}
               >
                 <div className="flex items-start gap-3">
                   {f.severity === 'error' ? (
@@ -293,12 +313,17 @@ export function AuditPanel({
                     {wireQuery && onInspectWireQuery && (
                       <button
                         type="button"
+                        data-wire-active={isWireActive ? 'true' : undefined}
                         onClick={() => onInspectWireQuery(wireQuery.id, preferredWireMode)}
                         title={`Inspect ${wireQuery.qname} ${wireQuery.qtypeName} (${wireQuery.purpose})`}
-                        className="inline-flex items-center gap-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-cyan-700 dark:text-cyan-300 hover:border-cyan-500 transition-colors cursor-pointer"
+                        className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs transition-colors cursor-pointer ${
+                          isWireActive
+                            ? 'border-cyan-500 bg-cyan-500 text-slate-950 font-semibold shadow-sm'
+                            : 'border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-medium text-cyan-700 dark:text-cyan-300 hover:border-cyan-500'
+                        }`}
                       >
                         <Terminal className="w-3.5 h-3.5" />
-                        <span>Inspect Wire</span>
+                        <span>Inspect Wire{isWireActive ? ' ●' : ''}</span>
                       </button>
                     )}
                   </div>

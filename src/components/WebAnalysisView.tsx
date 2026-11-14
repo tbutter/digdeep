@@ -251,15 +251,25 @@ function SvcbRecordCard({
   onInspectWireQuery,
   rrsetId,
   wireQueryId,
+  activeWireQueryId = null,
 }: {
   rec: WebSvcbRecordDetail;
   onJumpToGraphTarget: (targetId: string) => void;
   onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
   rrsetId?: string;
   wireQueryId?: string;
+  activeWireQueryId?: string | null;
 }) {
+  const isWireActive = Boolean(activeWireQueryId && wireQueryId === activeWireQueryId);
   return (
-    <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-3 space-y-2.5">
+    <div
+      data-wire-active={isWireActive ? 'true' : undefined}
+      className={`rounded-lg border p-3 space-y-2.5 transition-all ${
+        isWireActive
+          ? 'border-cyan-500 bg-cyan-500/5 ring-1 ring-cyan-500/40'
+          : 'border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60'
+      }`}
+    >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <span className="rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30 px-2 py-0.5 font-mono text-[11px] font-bold">
@@ -301,10 +311,15 @@ function SvcbRecordCard({
           {wireQueryId && onInspectWireQuery && (
             <button
               type="button"
+              data-wire-active={isWireActive ? 'true' : undefined}
               onClick={() => onInspectWireQuery(wireQueryId, 'dig')}
-              className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-2 py-0.5 text-[11px] font-medium text-slate-700 dark:text-slate-200 cursor-pointer"
+              className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] cursor-pointer ${
+                isWireActive
+                  ? 'border-cyan-500 bg-cyan-500 text-slate-950 font-semibold'
+                  : 'border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 font-medium text-slate-700 dark:text-slate-200'
+              }`}
             >
-              <Terminal className="w-3 h-3 text-cyan-500" />
+              <Terminal className={`w-3 h-3 ${isWireActive ? '' : 'text-cyan-500'}`} />
               <span>Wire</span>
             </button>
           )}
@@ -482,6 +497,7 @@ export function WebAnalysisView({
   onJumpToGraphTarget,
   onOpenChainGraph,
   onInspectWireQuery,
+  activeWireQueryId = null,
   onTraceDomain,
   onBatchAuditDomains,
 }: {
@@ -489,6 +505,7 @@ export function WebAnalysisView({
   onJumpToGraphTarget: (targetId: string) => void;
   onOpenChainGraph: () => void;
   onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
+  activeWireQueryId?: string | null;
   onTraceDomain?: (domain: string) => void;
   onBatchAuditDomains?: (domains: string[], sourceLabel?: string) => void;
 }) {
@@ -877,6 +894,7 @@ export function WebAnalysisView({
                         )?.id
                       : undefined
                   }
+                  activeWireQueryId={activeWireQueryId}
                 />
               ))}
             </div>
@@ -971,22 +989,30 @@ export function WebAnalysisView({
                         </button>
                       )}
                       {onInspectWireQuery &&
-                        (findWireQueryByGraphTargetId(hop.rrsetId, snapshot) ??
-                          findWireQueryByOwnerAndType(snapshot.queries, hop.name, 'CAA')) && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const q =
-                                findWireQueryByGraphTargetId(hop.rrsetId, snapshot) ??
-                                findWireQueryByOwnerAndType(snapshot.queries, hop.name, 'CAA');
-                              if (q) onInspectWireQuery(q.id, 'dig');
-                            }}
-                            className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-2 py-0.5 text-[11px] font-medium text-slate-700 dark:text-slate-200 cursor-pointer"
-                          >
-                            <Terminal className="w-3 h-3 text-cyan-500" />
-                            <span>Wire</span>
-                          </button>
-                        )}
+                        (() => {
+                          const caaWire =
+                            findWireQueryByGraphTargetId(hop.rrsetId, snapshot) ??
+                            findWireQueryByOwnerAndType(snapshot.queries, hop.name, 'CAA');
+                          if (!caaWire) return null;
+                          const isCaaWireActive = Boolean(
+                            activeWireQueryId && caaWire.id === activeWireQueryId
+                          );
+                          return (
+                            <button
+                              type="button"
+                              data-wire-active={isCaaWireActive ? 'true' : undefined}
+                              onClick={() => onInspectWireQuery(caaWire.id, 'dig')}
+                              className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] cursor-pointer ${
+                                isCaaWireActive
+                                  ? 'border-cyan-500 bg-cyan-500 text-slate-950 font-semibold'
+                                  : 'border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 font-medium text-slate-700 dark:text-slate-200'
+                              }`}
+                            >
+                              <Terminal className={`w-3 h-3 ${isCaaWireActive ? '' : 'text-cyan-500'}`} />
+                              <span>Wire</span>
+                            </button>
+                          );
+                        })()}
                     </div>
                   </div>
 

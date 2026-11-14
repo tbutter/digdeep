@@ -4,6 +4,7 @@ import {
   ArrowUp,
   Check,
   Clock,
+  Columns2,
   Command,
   Download,
   FileCode2,
@@ -69,6 +70,11 @@ import { ReverseDnsCard } from './components/ReverseDnsCard';
 import { SettingsModal } from './components/SettingsModal';
 import { StatusBadge, STATUS_META } from './components/StatusBadge';
 import { WebAnalysisView } from './components/WebAnalysisView';
+import {
+  isWideWireDrawerViewport,
+  NARROW_WIRE_DRAWER_MEDIA_QUERY,
+  WireSideDrawer,
+} from './components/WireSideDrawer';
 import { ZonesPanel } from './components/ZonesPanel';
 import { reverifySnapshot, runDnsvizAnalysis, SNAPSHOT_ENGINE_VERSION } from './dns/analyzer';
 import type { CommandPaletteAction } from './dns/commandPalette';
@@ -218,6 +224,17 @@ const EXAMPLE_TRACES: ReadonlyArray<{
   },
 ];
 
+function isDockableWireTab(tab: ActiveTab): boolean {
+  return (
+    tab === 'graph' ||
+    tab === 'audit' ||
+    tab === 'consensus' ||
+    tab === 'mail' ||
+    tab === 'web' ||
+    tab === 'watch'
+  );
+}
+
 export function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => loadTheme());
 
@@ -328,7 +345,59 @@ export function App() {
     initialBootState.focusedTarget
   );
   const [focusedWireQuery, setFocusedWireQuery] = useState<FocusedWireQueryRequest | null>(null);
+  const [wireDrawerOpen, setWireDrawerOpen] = useState(false);
+  const [isDesktopWireViewport, setIsDesktopWireViewport] = useState<boolean>(() =>
+    isWideWireDrawerViewport()
+  );
   const [wireListResetSeq, setWireListResetSeq] = useState(0);
+
+  const dockWireEnabled = settings.dockWireDrawerDesktop ?? true;
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
+  const dockWireEnabledRef = useRef(dockWireEnabled);
+  dockWireEnabledRef.current = dockWireEnabled;
+  const wireDrawerOpenRef = useRef(wireDrawerOpen);
+  wireDrawerOpenRef.current = wireDrawerOpen;
+  const focusedWireQueryRef = useRef(focusedWireQuery);
+  focusedWireQueryRef.current = focusedWireQuery;
+  const activeSnapshotRef = useRef(activeSnapshot);
+  activeSnapshotRef.current = activeSnapshot;
+  const examplesOpenRef = useRef(examplesOpen);
+  examplesOpenRef.current = examplesOpen;
+  const autocompleteOpenRef = useRef(autocompleteOpen);
+  autocompleteOpenRef.current = autocompleteOpen;
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const syncViewport = () => {
+      const wide = isWideWireDrawerViewport();
+      setIsDesktopWireViewport(wide);
+      if (!wide && wireDrawerOpenRef.current && focusedWireQueryRef.current) {
+        setWireDrawerOpen(false);
+        setActiveTab('responses');
+      }
+    };
+    syncViewport();
+    const mql =
+      typeof window.matchMedia === 'function'
+        ? window.matchMedia(NARROW_WIRE_DRAWER_MEDIA_QUERY)
+        : null;
+    if (mql && typeof mql.addEventListener === 'function') {
+      mql.addEventListener('change', syncViewport);
+    } else if (mql && typeof mql.addListener === 'function') {
+      mql.addListener(syncViewport);
+    }
+    window.addEventListener('resize', syncViewport);
+    return () => {
+      if (mql && typeof mql.removeEventListener === 'function') {
+        mql.removeEventListener('change', syncViewport);
+      } else if (mql && typeof mql.removeListener === 'function') {
+        mql.removeListener(syncViewport);
+      }
+      window.removeEventListener('resize', syncViewport);
+    };
+  }, []);
+
   const handleInspectWireQuery = useCallback(
     (queryId: string, mode: FocusedWireSubMode = 'dig') => {
       setFocusedWireQuery((prev) => ({
@@ -336,6 +405,37 @@ export function App() {
         mode,
         seq: (prev?.seq ?? 0) + 1,
       }));
+      const wideNow = isWideWireDrawerViewport();
+      setIsDesktopWireViewport(wideNow);
+      if (dockWireEnabledRef.current && wideNow && isDockableWireTab(activeTabRef.current)) {
+        setWireDrawerOpen(true);
+      } else {
+        setWireDrawerOpen(false);
+        setActiveTab('responses');
+      }
+    },
+    []
+  );
+
+  const handleSelectDockedWireQuery = useCallback(
+    (queryId: string, mode?: FocusedWireSubMode) => {
+      setFocusedWireQuery((prev) => ({
+        queryId,
+        mode: mode ?? prev?.mode ?? 'dig',
+        seq: (prev?.seq ?? 0) + 1,
+      }));
+    },
+    []
+  );
+
+  const handlePromoteWireDrawerToTab = useCallback(
+    (queryId: string, mode: FocusedWireSubMode) => {
+      setFocusedWireQuery((prev) => ({
+        queryId,
+        mode,
+        seq: (prev?.seq ?? 0) + 1,
+      }));
+      setWireDrawerOpen(false);
       setActiveTab('responses');
     },
     []
@@ -463,7 +563,22 @@ export function App() {
         mode,
         seq: (prev?.seq ?? 0) + 1,
       }));
-      setActiveTab('responses');
+      const wideNow = isWideWireDrawerViewport();
+      setIsDesktopWireViewport(wideNow);
+      const hasSnapshotForDrawer = Boolean(
+        activeSnapshotRef.current ?? watchControllerRef.current?.getState().latestSnapshot
+      );
+      if (
+        dockWireEnabledRef.current &&
+        wideNow &&
+        hasSnapshotForDrawer &&
+        isDockableWireTab(activeTabRef.current)
+      ) {
+        setWireDrawerOpen(true);
+      } else {
+        setWireDrawerOpen(false);
+        setActiveTab('responses');
+      }
     },
     []
   );
@@ -473,6 +588,7 @@ export function App() {
     setSnapshots(updated);
     setFocusedGraphTarget(null);
     setFocusedWireQuery(null);
+    setWireDrawerOpen(false);
     setFrozenIncidentMeta(null);
     setActiveSnapshot(snap);
     setAnalysisMode(snap.mode ?? 'consensus');
@@ -485,6 +601,7 @@ export function App() {
       saveSnapshot(older);
       const updated = saveSnapshot(newer);
       setSnapshots(updated);
+      setWireDrawerOpen(false);
       setHistoryDiffRequest((prev) => ({
         aId: older.id,
         bId: newer.id,
@@ -528,6 +645,7 @@ export function App() {
         },
       });
       portfolioRunnerRef.current = runner;
+      setWireDrawerOpen(false);
       setActiveTab('portfolio');
       void runner.start();
     },
@@ -539,6 +657,7 @@ export function App() {
       const snapMode: AnalysisMode = snap.mode ?? 'dnssec';
       setFocusedGraphTarget(null);
       setFocusedWireQuery(null);
+      setWireDrawerOpen(false);
       setFrozenIncidentMeta((cur) => (cur?.snapshotId === snap.id ? cur : null));
       setActiveSnapshot(snap);
       setAnalysisMode(snapMode);
@@ -667,9 +786,15 @@ export function App() {
         return;
       }
       if (e.key === 'Escape') {
+        const hadDropdown = examplesOpenRef.current || autocompleteOpenRef.current;
         setExamplesOpen(false);
         setAutocompleteOpen(false);
         setActiveSuggestionIdx(-1);
+        if (!hadDropdown && !modalOverlayOpenRef.current && wireDrawerOpenRef.current) {
+          e.preventDefault();
+          setWireDrawerOpen(false);
+          return;
+        }
       }
       if (
         e.key === '/' &&
@@ -820,6 +945,7 @@ export function App() {
         lastHydratedFrozenHashRef.current = null;
         setActiveSnapshot(snap);
         setFocusedWireQuery(null);
+        setWireDrawerOpen(false);
         setExternalCustomWire(null);
 
         let nextTab: ActiveTab = activeTab;
@@ -973,6 +1099,7 @@ export function App() {
       setAutocompleteOpen(false);
       setFocusedGraphTarget(null);
       setFocusedWireQuery(null);
+      setWireDrawerOpen(false);
       setAnalysisMode(modeToRun);
       setDomainInput(cleanHost);
       if (modeToRun === 'dnssec') {
@@ -1115,6 +1242,7 @@ export function App() {
         const updatedList = saveSnapshot(decoded);
         setSnapshots(updatedList);
         setFocusedWireQuery(null);
+        setWireDrawerOpen(false);
         setExternalCustomWire(null);
         setFrozenIncidentMeta({
           snapshotId: decoded.id,
@@ -1415,6 +1543,7 @@ export function App() {
     setOmniboxNotice(null);
     setFocusedGraphTarget(null);
     setFocusedWireQuery(null);
+    setWireDrawerOpen(false);
     setExternalCustomWire(null);
     setFrozenIncidentMeta((cur) => (cur?.snapshotId === snap.id ? cur : null));
     setActiveSnapshot(snap);
@@ -1444,6 +1573,7 @@ export function App() {
       setAutocompleteOpen(false);
       setActiveSuggestionIdx(-1);
       setError(null);
+      setWireDrawerOpen(false);
       setOmniboxNotice(wireParsed.summaryLabel);
       setExternalCustomWire((prev) => ({
         payload: wireParsed.wireInput,
@@ -1958,6 +2088,7 @@ export function App() {
         bId: liveSnap.id,
         seq: (prev?.seq ?? 0) + 1,
       }));
+      setWireDrawerOpen(false);
       setActiveTab('history');
 
       if (typeof window !== 'undefined' && window.history?.replaceState) {
@@ -2003,6 +2134,7 @@ export function App() {
       setSnapshots(updatedList);
       setFocusedGraphTarget(null);
       setFocusedWireQuery(null);
+      setWireDrawerOpen(false);
       setExternalCustomWire(null);
       setFrozenIncidentMeta({
         snapshotId: decoded.id,
@@ -2050,6 +2182,9 @@ export function App() {
   };
 
   const handleUpdateSettings = async (next: UserSettings) => {
+    if (next.dockWireDrawerDesktop === false) {
+      setWireDrawerOpen(false);
+    }
     setSettings(next);
     saveUserSettings(next);
     if (activeSnapshot && next.trustAnchors !== settings.trustAnchors) {
@@ -2161,11 +2296,14 @@ export function App() {
 
   const handleSelectNavTab = (tabId: ActiveTab) => {
     if (tabId === 'responses') {
+      setWireDrawerOpen(false);
       setFocusedWireQuery(null);
       if (activeSnapshot && activeSnapshot.queries.length > 0) {
         setExternalCustomWire(null);
       }
       setWireListResetSeq((s) => s + 1);
+    } else if (!isDockableWireTab(tabId)) {
+      setWireDrawerOpen(false);
     }
     setActiveTab(tabId);
   };
@@ -2191,6 +2329,7 @@ export function App() {
           setSettings(nextSettings);
           saveUserSettings(nextSettings);
         }
+        setWireDrawerOpen(false);
         setFocusedGraphTarget(action.targetId);
         setActiveTab('graph');
         return;
@@ -2292,6 +2431,17 @@ export function App() {
           showSoaAndNs: !settings.showSoaAndNs,
         });
         return;
+      case 'toggle-wire-drawer-desktop': {
+        const nextDock = !(settings.dockWireDrawerDesktop ?? true);
+        if (!nextDock) {
+          setWireDrawerOpen(false);
+        }
+        void handleUpdateSettings({
+          ...settings,
+          dockWireDrawerDesktop: nextDock,
+        });
+        return;
+      }
       case 'select-history': {
         const match = snapshots.find((s) => s.id === action.snapshotId);
         if (match) {
@@ -2301,6 +2451,46 @@ export function App() {
       }
     }
   };
+
+  const drawerSnapshot: AnalysisSnapshot | null = useMemo(() => {
+    const base = activeSnapshot ?? (activeTab === 'watch' ? watchState.latestSnapshot : null);
+    if (!base) return null;
+    if (
+      activeTab === 'watch' &&
+      watchState.currentSample &&
+      watchState.currentSample.queries.length > 0
+    ) {
+      const existingIds = new Set(base.queries.map((q) => q.id));
+      const extra = watchState.currentSample.queries.filter((q) => !existingIds.has(q.id));
+      if (extra.length > 0) {
+        return { ...base, queries: [...base.queries, ...extra] };
+      }
+    }
+    return base;
+  }, [activeSnapshot, activeTab, watchState.latestSnapshot, watchState.currentSample]);
+
+  const isGraphRendered =
+    Boolean(activeSnapshot) &&
+    (activeTab === 'graph' ||
+      (activeTab === 'mail' &&
+        activeSnapshot!.mode !== 'mail' &&
+        !activeSnapshot!.mailAnalysis) ||
+      (activeTab === 'web' &&
+        activeSnapshot!.mode !== 'web' &&
+        !activeSnapshot!.webAnalysis) ||
+      (activeTab === 'consensus' && activeSnapshot!.mode !== 'consensus'));
+
+  const isSplitDrawerVisible = Boolean(
+    wireDrawerOpen &&
+      dockWireEnabled &&
+      isDesktopWireViewport &&
+      focusedWireQuery &&
+      drawerSnapshot &&
+      isDockableWireTab(activeTab)
+  );
+  const showNonGraphSplitPane = Boolean(isSplitDrawerVisible && !isGraphRendered);
+  const activeWireQueryId = isSplitDrawerVisible ? (focusedWireQuery?.queryId ?? null) : null;
+  const activeWireMode = isSplitDrawerVisible ? (focusedWireQuery?.mode ?? 'dig') : null;
 
   if (activeSnapshot) {
     seedIpAsnCacheFromSnapshot(activeSnapshot);
@@ -2372,7 +2562,10 @@ export function App() {
             <button
               type="button"
               data-testid="open-portfolio-btn"
-              onClick={() => setActiveTab('portfolio')}
+              onClick={() => {
+                setWireDrawerOpen(false);
+                setActiveTab('portfolio');
+              }}
               className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
                 activeTab === 'portfolio'
                   ? 'border-cyan-500 bg-cyan-500/15 text-cyan-800 dark:text-cyan-200 font-semibold'
@@ -2397,7 +2590,10 @@ export function App() {
 
             <button
               type="button"
-              onClick={() => setActiveTab('history')}
+              onClick={() => {
+                setWireDrawerOpen(false);
+                setActiveTab('history');
+              }}
               className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:border-cyan-500 transition-colors cursor-pointer"
               title="Browse snapshots stored in browser localStorage"
             >
@@ -2406,6 +2602,33 @@ export function App() {
               <span className="rounded-full bg-slate-200 dark:bg-slate-800 px-1.5 py-0.2 font-mono text-[10px]">
                 {snapshots.length}
               </span>
+            </button>
+
+            <button
+              type="button"
+              data-testid="toggle-wire-split-btn"
+              aria-pressed={dockWireEnabled}
+              onClick={() => {
+                const nextDock = !dockWireEnabled;
+                if (!nextDock) {
+                  setWireDrawerOpen(false);
+                }
+                void handleUpdateSettings({
+                  ...settings,
+                  dockWireDrawerDesktop: nextDock,
+                });
+              }}
+              className={`hidden xl:inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
+                dockWireEnabled
+                  ? 'border-cyan-500/45 bg-cyan-500/10 text-cyan-800 dark:text-cyan-200 hover:bg-cyan-500/20'
+                  : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:border-cyan-500'
+              }`}
+              title="Toggle Side-by-Side Desktop DoH Wire & Hex Split Drawer (xl+ screens)"
+            >
+              <Columns2
+                className={`w-3.5 h-3.5 ${dockWireEnabled ? 'text-cyan-500' : 'text-slate-400'}`}
+              />
+              <span>Wire Split: {dockWireEnabled ? 'ON' : 'OFF'}</span>
             </button>
 
             <button
@@ -3309,18 +3532,27 @@ export function App() {
                 {snapshotNavTabs.map((tab) => {
                   const Icon = tab.icon;
                   const active = activeTab === tab.id;
+                  const isDockedWireTab =
+                    tab.id === 'responses' && isSplitDrawerVisible && !active;
                   return (
                     <button
                       key={tab.id}
                       type="button"
                       data-testid={`nav-tab-${tab.id}`}
                       data-active-tab={active ? 'true' : undefined}
-                      title={tab.label}
+                      data-wire-docked={isDockedWireTab ? 'true' : undefined}
+                      title={
+                        isDockedWireTab
+                          ? `${tab.label} (Docked on right — click to open full Wire tab)`
+                          : tab.label
+                      }
                       onClick={() => handleSelectNavTab(tab.id)}
                       className={`inline-flex items-center gap-1.5 sm:gap-2 shrink-0 whitespace-nowrap px-2.5 sm:px-3.5 py-2 rounded-xl text-xs font-medium transition-colors cursor-pointer ${
                         active
                           ? 'bg-cyan-500 text-slate-950 font-semibold shadow-sm'
-                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-900'
+                          : isDockedWireTab
+                            ? 'border border-dashed border-cyan-500/50 bg-cyan-500/5 text-cyan-700 dark:text-cyan-300 hover:bg-cyan-500/15'
+                            : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-900'
                       }`}
                     >
                       <Icon className="w-3.5 h-3.5 shrink-0" />
@@ -3335,10 +3567,17 @@ export function App() {
                           className={`rounded-full px-1.5 py-0.2 font-mono text-[10px] ${
                             active
                               ? 'bg-slate-950/20 text-slate-950'
-                              : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
+                              : isDockedWireTab
+                                ? 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300'
+                                : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
                           }`}
                         >
                           {tab.badge}
+                        </span>
+                      )}
+                      {isDockedWireTab && (
+                        <span className="rounded-full bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 px-1.5 py-0.2 font-mono text-[10px] font-semibold">
+                          • Docked
                         </span>
                       )}
                     </button>
@@ -3348,96 +3587,7 @@ export function App() {
             </div>
 
             {/* Active View Content */}
-            {activeTab === 'mail' &&
-              (activeSnapshot.mode === 'mail' || Boolean(activeSnapshot.mailAnalysis)) && (
-              <MailAnalysisView
-                key={activeSnapshot.id}
-                snapshot={activeSnapshot}
-                loading={loading}
-                externalRawEmail={externalRawEmail}
-                onJumpToGraphTarget={(targetId) => {
-                  setFocusedGraphTarget(targetId);
-                  setActiveTab('graph');
-                }}
-                onOpenChainGraph={() => setActiveTab('graph')}
-                onInspectWireQuery={handleInspectWireQuery}
-                onProbeDkimSelectors={(rawSelectors) => {
-                  const parsedSels = parseDkimSelectorInput(
-                    rawSelectors,
-                    activeSnapshot.displayDomain
-                  );
-                  setCustomDkimSelectors(parsedSels);
-                  void executeAnalysis(activeSnapshot.displayDomain, activeSnapshot.queryTypes, {
-                    modeOverride: 'mail',
-                    dkimSelectorsOverride: parsedSels,
-                    pushHistory: true,
-                  });
-                }}
-                onSwitchMailDomain={(nextDomain, nextSelectors) => {
-                  setDomainInput(nextDomain);
-                  setAnalysisMode('mail');
-                  setCustomDkimSelectors(nextSelectors);
-                  void executeAnalysis(nextDomain, activeSnapshot.queryTypes, {
-                    modeOverride: 'mail',
-                    dkimSelectorsOverride: nextSelectors,
-                    pushHistory: true,
-                  });
-                }}
-              />
-            )}
-
-            {activeTab === 'web' &&
-              (activeSnapshot.mode === 'web' || Boolean(activeSnapshot.webAnalysis)) && (
-              <WebAnalysisView
-                key={activeSnapshot.id}
-                snapshot={activeSnapshot}
-                onJumpToGraphTarget={(targetId) => {
-                  setFocusedGraphTarget(targetId);
-                  setActiveTab('graph');
-                }}
-                onOpenChainGraph={() => setActiveTab('graph')}
-                onInspectWireQuery={handleInspectWireQuery}
-                onTraceDomain={(domain) => {
-                  setAnalysisMode('web');
-                  setDomainInput(domain);
-                  void executeAnalysis(domain, activeSnapshot.queryTypes, {
-                    modeOverride: 'web',
-                    pushHistory: true,
-                  });
-                }}
-                onBatchAuditDomains={(domains, label) => {
-                  setPortfolioDomainsText(domains.join('\n'));
-                  handleStartPortfolioBatch(domains, label);
-                }}
-              />
-            )}
-
-            {activeTab === 'consensus' && activeSnapshot.mode === 'consensus' && (
-              <ConsensusView
-                key={activeSnapshot.id}
-                snapshot={activeSnapshot}
-                onOpenChainGraph={() => setActiveTab('graph')}
-                onOpenWireResponses={() => {
-                  setFocusedWireQuery(null);
-                  if (activeSnapshot.queries.length > 0) {
-                    setExternalCustomWire(null);
-                  }
-                  setWireListResetSeq((s) => s + 1);
-                  setActiveTab('responses');
-                }}
-                onInspectWireQuery={handleInspectWireQuery}
-                onOpenLiveWatch={() => setActiveTab('watch')}
-              />
-            )}
-
-            {(activeTab === 'graph' ||
-              (activeTab === 'mail' &&
-                activeSnapshot.mode !== 'mail' &&
-                !activeSnapshot.mailAnalysis) ||
-              (activeTab === 'web' &&
-                activeSnapshot.mode !== 'web' &&
-                !activeSnapshot.webAnalysis) ||
-              (activeTab === 'consensus' && activeSnapshot.mode !== 'consensus')) && (
+            {isGraphRendered && (
               <ChainGraphView
                 snapshot={activeSnapshot}
                 theme={theme}
@@ -3455,20 +3605,173 @@ export function App() {
                 focusedTargetId={focusedGraphTarget}
                 onSelectTargetId={setFocusedGraphTarget}
                 onInspectWireQuery={handleInspectWireQuery}
+                dockedWireQuery={isSplitDrawerVisible ? focusedWireQuery : null}
+                onSelectDockedWireQuery={handleSelectDockedWireQuery}
+                onOpenFullWireTab={handlePromoteWireDrawerToTab}
+                onCloseDockedWireDrawer={() => setWireDrawerOpen(false)}
               />
             )}
 
-            {activeTab === 'audit' && (
-              <AuditPanel
-                snapshot={activeSnapshot}
-                onJumpToGraphTarget={(targetId) => {
-                  setFocusedGraphTarget(targetId);
-                  setActiveTab('graph');
-                }}
-                onInspectWireQuery={handleInspectWireQuery}
-                onOpenReportModal={openReportModal}
-              />
-            )}
+            {!isGraphRendered &&
+              (activeTab === 'mail' ||
+                activeTab === 'web' ||
+                activeTab === 'consensus' ||
+                activeTab === 'audit' ||
+                activeTab === 'watch') && (
+                <div
+                  data-testid={showNonGraphSplitPane ? 'desktop-wire-split-layout' : undefined}
+                  className={
+                    showNonGraphSplitPane
+                      ? 'flex flex-col xl:flex-row xl:items-start gap-4 relative'
+                      : undefined
+                  }
+                >
+                  <div
+                    className={
+                      showNonGraphSplitPane ? 'w-full xl:flex-1 xl:min-w-0' : undefined
+                    }
+                  >
+                    {activeTab === 'mail' &&
+                      (activeSnapshot.mode === 'mail' ||
+                        Boolean(activeSnapshot.mailAnalysis)) && (
+                        <MailAnalysisView
+                          key={activeSnapshot.id}
+                          snapshot={activeSnapshot}
+                          loading={loading}
+                          externalRawEmail={externalRawEmail}
+                          onJumpToGraphTarget={(targetId) => {
+                            setWireDrawerOpen(false);
+                            setFocusedGraphTarget(targetId);
+                            setActiveTab('graph');
+                          }}
+                          onOpenChainGraph={() => setActiveTab('graph')}
+                          onInspectWireQuery={handleInspectWireQuery}
+                          activeWireQueryId={activeWireQueryId}
+                          onProbeDkimSelectors={(rawSelectors) => {
+                            const parsedSels = parseDkimSelectorInput(
+                              rawSelectors,
+                              activeSnapshot.displayDomain
+                            );
+                            setCustomDkimSelectors(parsedSels);
+                            void executeAnalysis(
+                              activeSnapshot.displayDomain,
+                              activeSnapshot.queryTypes,
+                              {
+                                modeOverride: 'mail',
+                                dkimSelectorsOverride: parsedSels,
+                                pushHistory: true,
+                              }
+                            );
+                          }}
+                          onSwitchMailDomain={(nextDomain, nextSelectors) => {
+                            setDomainInput(nextDomain);
+                            setAnalysisMode('mail');
+                            setCustomDkimSelectors(nextSelectors);
+                            void executeAnalysis(nextDomain, activeSnapshot.queryTypes, {
+                              modeOverride: 'mail',
+                              dkimSelectorsOverride: nextSelectors,
+                              pushHistory: true,
+                            });
+                          }}
+                        />
+                      )}
+
+                    {activeTab === 'web' &&
+                      (activeSnapshot.mode === 'web' || Boolean(activeSnapshot.webAnalysis)) && (
+                        <WebAnalysisView
+                          key={activeSnapshot.id}
+                          snapshot={activeSnapshot}
+                          onJumpToGraphTarget={(targetId) => {
+                            setWireDrawerOpen(false);
+                            setFocusedGraphTarget(targetId);
+                            setActiveTab('graph');
+                          }}
+                          onOpenChainGraph={() => setActiveTab('graph')}
+                          onInspectWireQuery={handleInspectWireQuery}
+                          activeWireQueryId={activeWireQueryId}
+                          onTraceDomain={(domain) => {
+                            setAnalysisMode('web');
+                            setDomainInput(domain);
+                            void executeAnalysis(domain, activeSnapshot.queryTypes, {
+                              modeOverride: 'web',
+                              pushHistory: true,
+                            });
+                          }}
+                          onBatchAuditDomains={(domains, label) => {
+                            setPortfolioDomainsText(domains.join('\n'));
+                            handleStartPortfolioBatch(domains, label);
+                          }}
+                        />
+                      )}
+
+                    {activeTab === 'consensus' && activeSnapshot.mode === 'consensus' && (
+                      <ConsensusView
+                        key={activeSnapshot.id}
+                        snapshot={activeSnapshot}
+                        onOpenChainGraph={() => setActiveTab('graph')}
+                        onOpenWireResponses={() => {
+                          setWireDrawerOpen(false);
+                          setFocusedWireQuery(null);
+                          if (activeSnapshot.queries.length > 0) {
+                            setExternalCustomWire(null);
+                          }
+                          setWireListResetSeq((s) => s + 1);
+                          setActiveTab('responses');
+                        }}
+                        onInspectWireQuery={handleInspectWireQuery}
+                        activeWireQueryId={activeWireQueryId}
+                        activeWireMode={activeWireMode}
+                        onOpenLiveWatch={() => setActiveTab('watch')}
+                      />
+                    )}
+
+                    {activeTab === 'audit' && (
+                      <AuditPanel
+                        snapshot={activeSnapshot}
+                        onJumpToGraphTarget={(targetId) => {
+                          setWireDrawerOpen(false);
+                          setFocusedGraphTarget(targetId);
+                          setActiveTab('graph');
+                        }}
+                        onInspectWireQuery={handleInspectWireQuery}
+                        activeWireQueryId={activeWireQueryId}
+                        onOpenReportModal={openReportModal}
+                      />
+                    )}
+
+                    {activeTab === 'watch' && (
+                      <LiveWatchView
+                        watchState={watchState}
+                        primaryEndpoint={settings.dohEndpoint}
+                        activeSnapshot={activeSnapshot}
+                        isOffline={isOffline}
+                        onPulseOnce={() => void watchControllerRef.current?.pulseOnce()}
+                        onStartWatch={(mode) => void watchControllerRef.current?.start(mode)}
+                        onPauseWatch={() => watchControllerRef.current?.pause()}
+                        onResumeWatch={() => watchControllerRef.current?.resume()}
+                        onStopWatch={() => watchControllerRef.current?.stop()}
+                        onContinueBeyondCap={() => watchControllerRef.current?.continueBeyondCap()}
+                        onUpdateConfig={(patch) => watchControllerRef.current?.updateConfig(patch)}
+                        onInspectWatchWireQuery={handleInspectWatchWireQuery}
+                        activeWireQueryId={activeWireQueryId}
+                        activeWireMode={activeWireMode}
+                        onLoadSnapshot={handleLoadWatchSnapshot}
+                        onOpenInHistoryDiff={handleOpenWatchInHistoryDiff}
+                      />
+                    )}
+                  </div>
+
+                  {showNonGraphSplitPane && drawerSnapshot && focusedWireQuery && (
+                    <WireSideDrawer
+                      snapshot={drawerSnapshot}
+                      focusedQuery={focusedWireQuery}
+                      onSelectQuery={handleSelectDockedWireQuery}
+                      onOpenFullWireTab={handlePromoteWireDrawerToTab}
+                      onClose={() => setWireDrawerOpen(false)}
+                    />
+                  )}
+                </div>
+              )}
 
             {activeTab === 'responses' && (
               <ResponsesPanel
@@ -3480,25 +3783,6 @@ export function App() {
             )}
 
             {activeTab === 'zones' && <ZonesPanel snapshot={activeSnapshot} />}
-
-            {activeTab === 'watch' && (
-              <LiveWatchView
-                watchState={watchState}
-                primaryEndpoint={settings.dohEndpoint}
-                activeSnapshot={activeSnapshot}
-                isOffline={isOffline}
-                onPulseOnce={() => void watchControllerRef.current?.pulseOnce()}
-                onStartWatch={(mode) => void watchControllerRef.current?.start(mode)}
-                onPauseWatch={() => watchControllerRef.current?.pause()}
-                onResumeWatch={() => watchControllerRef.current?.resume()}
-                onStopWatch={() => watchControllerRef.current?.stop()}
-                onContinueBeyondCap={() => watchControllerRef.current?.continueBeyondCap()}
-                onUpdateConfig={(patch) => watchControllerRef.current?.updateConfig(patch)}
-                onInspectWatchWireQuery={handleInspectWatchWireQuery}
-                onLoadSnapshot={handleLoadWatchSnapshot}
-                onOpenInHistoryDiff={handleOpenWatchInHistoryDiff}
-              />
-            )}
 
             {activeTab === 'portfolio' && (
               <PortfolioView
@@ -3527,6 +3811,7 @@ export function App() {
                   const snapMode: AnalysisMode = snap.mode ?? 'dnssec';
                   setFocusedGraphTarget(null);
                   setFocusedWireQuery(null);
+                  setWireDrawerOpen(false);
                   setFrozenIncidentMeta((cur) => (cur?.snapshotId === snap.id ? cur : null));
                   setActiveSnapshot(snap);
                   setAnalysisMode(snapMode);
@@ -3587,22 +3872,47 @@ export function App() {
         )}
 
         {!activeSnapshot && !loading && activeTab === 'watch' && (
-          <LiveWatchView
-            watchState={watchState}
-            primaryEndpoint={settings.dohEndpoint}
-            activeSnapshot={null}
-            isOffline={isOffline}
-            onPulseOnce={() => void watchControllerRef.current?.pulseOnce()}
-            onStartWatch={(mode) => void watchControllerRef.current?.start(mode)}
-            onPauseWatch={() => watchControllerRef.current?.pause()}
-            onResumeWatch={() => watchControllerRef.current?.resume()}
-            onStopWatch={() => watchControllerRef.current?.stop()}
-            onContinueBeyondCap={() => watchControllerRef.current?.continueBeyondCap()}
-            onUpdateConfig={(patch) => watchControllerRef.current?.updateConfig(patch)}
-            onInspectWatchWireQuery={handleInspectWatchWireQuery}
-            onLoadSnapshot={handleLoadWatchSnapshot}
-            onOpenInHistoryDiff={handleOpenWatchInHistoryDiff}
-          />
+          <div
+            data-testid={showNonGraphSplitPane ? 'desktop-wire-split-layout' : undefined}
+            className={
+              showNonGraphSplitPane
+                ? 'flex flex-col xl:flex-row xl:items-start gap-4 relative'
+                : undefined
+            }
+          >
+            <div
+              className={showNonGraphSplitPane ? 'w-full xl:flex-1 xl:min-w-0' : undefined}
+            >
+              <LiveWatchView
+                watchState={watchState}
+                primaryEndpoint={settings.dohEndpoint}
+                activeSnapshot={null}
+                isOffline={isOffline}
+                onPulseOnce={() => void watchControllerRef.current?.pulseOnce()}
+                onStartWatch={(mode) => void watchControllerRef.current?.start(mode)}
+                onPauseWatch={() => watchControllerRef.current?.pause()}
+                onResumeWatch={() => watchControllerRef.current?.resume()}
+                onStopWatch={() => watchControllerRef.current?.stop()}
+                onContinueBeyondCap={() => watchControllerRef.current?.continueBeyondCap()}
+                onUpdateConfig={(patch) => watchControllerRef.current?.updateConfig(patch)}
+                onInspectWatchWireQuery={handleInspectWatchWireQuery}
+                activeWireQueryId={activeWireQueryId}
+                activeWireMode={activeWireMode}
+                onLoadSnapshot={handleLoadWatchSnapshot}
+                onOpenInHistoryDiff={handleOpenWatchInHistoryDiff}
+              />
+            </div>
+
+            {showNonGraphSplitPane && drawerSnapshot && focusedWireQuery && (
+              <WireSideDrawer
+                snapshot={drawerSnapshot}
+                focusedQuery={focusedWireQuery}
+                onSelectQuery={handleSelectDockedWireQuery}
+                onOpenFullWireTab={handlePromoteWireDrawerToTab}
+                onClose={() => setWireDrawerOpen(false)}
+              />
+            )}
+          </div>
         )}
 
         {!activeSnapshot && !loading && activeTab === 'portfolio' && (

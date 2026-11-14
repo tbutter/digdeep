@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   Clock,
+  Columns2,
   Command,
   CornerDownLeft,
   Globe,
@@ -98,6 +99,9 @@ function renderItemIcon(item: CommandPaletteItem) {
   }
   if (item.id === 'action-open-settings') {
     return <Settings className="w-4 h-4 text-slate-400 shrink-0" />;
+  }
+  if (item.id === 'action-toggle-wire-drawer') {
+    return <Columns2 className="w-4 h-4 text-cyan-500 shrink-0" />;
   }
   return <Sparkles className="w-4 h-4 text-cyan-500 shrink-0" />;
 }

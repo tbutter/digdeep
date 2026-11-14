@@ -18,6 +18,8 @@ export interface UserSettings {
   showSoaAndNs: boolean;
   showStandbyKeys: boolean;
   layoutDirection: 'TB' | 'LR';
+  /** Dock Inspect Wire / Dissect Hex in a right-hand split drawer on xl+ (>= 1280px) viewports */
+  dockWireDrawerDesktop?: boolean;
 }
 
 export const DEFAULT_USER_SETTINGS: UserSettings = {
@@ -27,6 +29,7 @@ export const DEFAULT_USER_SETTINGS: UserSettings = {
   showSoaAndNs: false,
   showStandbyKeys: true,
   layoutDirection: 'TB',
+  dockWireDrawerDesktop: true,
 };
 
 export function loadTheme(): 'dark' | 'light' {
@@ -72,6 +75,7 @@ export function loadUserSettings(): UserSettings {
       showSoaAndNs: Boolean(parsed.showSoaAndNs),
       showStandbyKeys: parsed.showStandbyKeys ?? true,
       layoutDirection: parsed.layoutDirection === 'LR' ? 'LR' : 'TB',
+      dockWireDrawerDesktop: parsed.dockWireDrawerDesktop ?? true,
     };
   } catch {
     return DEFAULT_USER_SETTINGS;

@@ -50,6 +50,7 @@ export interface EmailHeaderVerifierCardProps {
   onSwitchMailDomain?: (domain: string, dkimSelectors: string[]) => void;
   onJumpToGraphTarget?: (targetId: string) => void;
   onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
+  activeWireQueryId?: string | null;
 }
 
 function getOverallBannerMeta(verdict: EmailMessageVerificationReport['overallVerdict']): {
@@ -139,12 +140,14 @@ function SignatureVerificationDetailCard({
   snapshot,
   onJumpToGraphTarget,
   onInspectWireQuery,
+  activeWireQueryId = null,
   compactTitle,
 }: {
   res: VerifiedDkimSignatureResult;
   snapshot: AnalysisSnapshot;
   onJumpToGraphTarget?: (targetId: string) => void;
   onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
+  activeWireQueryId?: string | null;
   compactTitle?: string;
 }) {
   const [showSignedHeaders, setShowSignedHeaders] = useState(false);
@@ -155,6 +158,9 @@ function SignatureVerificationDetailCard({
     sel && onInspectWireQuery
       ? findWireQueryByOwnerAndType(snapshot.queries, sel.qname, 'TXT')
       : undefined;
+  const isWireActive = Boolean(
+    activeWireQueryId && inSnapshotWire?.id === activeWireQueryId
+  );
   const inSnapshotGraphTarget =
     sel && snapshot.zones.some((z) => sel.qname.endsWith(z.zoneName))
       ? (sel.txtRrsetId ?? sel.negativeNodeId)
@@ -215,8 +221,13 @@ function SignatureVerificationDetailCard({
           {inSnapshotWire && onInspectWireQuery && (
             <button
               type="button"
+              data-wire-active={isWireActive ? 'true' : undefined}
               onClick={() => onInspectWireQuery(inSnapshotWire.id, 'dig')}
-              className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2 py-0.5 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:border-cyan-500 cursor-pointer"
+              className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] cursor-pointer ${
+                isWireActive
+                  ? 'border-cyan-500 bg-cyan-500 text-slate-950 font-semibold'
+                  : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-medium text-slate-700 dark:text-slate-200 hover:border-cyan-500'
+              }`}
             >
               <span>Wire</span>
               <ArrowUpRight className="w-3 h-3" />
@@ -439,6 +450,7 @@ export function EmailHeaderVerifierCard({
   onSwitchMailDomain,
   onJumpToGraphTarget,
   onInspectWireQuery,
+  activeWireQueryId = null,
 }: EmailHeaderVerifierCardProps) {
   const [expanded, setExpanded] = useState(() => Boolean(externalRawEmail?.payload));
   const [rawInput, setRawInput] = useState(() => externalRawEmail?.payload ?? '');
@@ -1059,6 +1071,7 @@ export function EmailHeaderVerifierCard({
                       snapshot={snapshot}
                       onJumpToGraphTarget={onJumpToGraphTarget}
                       onInspectWireQuery={onInspectWireQuery}
+                      activeWireQueryId={activeWireQueryId}
                       compactTitle={`DKIM #${idx + 1}`}
                     />
                   ))}
@@ -1154,6 +1167,7 @@ export function EmailHeaderVerifierCard({
                             snapshot={snapshot}
                             onJumpToGraphTarget={onJumpToGraphTarget}
                             onInspectWireQuery={onInspectWireQuery}
+                            activeWireQueryId={activeWireQueryId}
                             compactTitle={`ARC-Seal (i=${arcSet.instance})`}
                           />
                         )}
@@ -1164,6 +1178,7 @@ export function EmailHeaderVerifierCard({
                             snapshot={snapshot}
                             onJumpToGraphTarget={onJumpToGraphTarget}
                             onInspectWireQuery={onInspectWireQuery}
+                            activeWireQueryId={activeWireQueryId}
                             compactTitle={`ARC-Message-Signature (i=${arcSet.instance})`}
                           />
                         )}

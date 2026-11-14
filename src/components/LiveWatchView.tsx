@@ -383,6 +383,8 @@ export interface LiveWatchViewProps {
     enabledResolverUrls?: string[];
   }) => void;
   onInspectWatchWireQuery?: (queryLog: DohQueryLog, mode?: FocusedWireSubMode) => void;
+  activeWireQueryId?: string | null;
+  activeWireMode?: FocusedWireSubMode | null;
   onLoadSnapshot?: (snapshot: AnalysisSnapshot) => void;
   onOpenInHistoryDiff?: (older: AnalysisSnapshot, newer: AnalysisSnapshot) => void;
 }
@@ -401,6 +403,8 @@ export function LiveWatchView({
   onContinueBeyondCap,
   onUpdateConfig,
   onInspectWatchWireQuery,
+  activeWireQueryId = null,
+  activeWireMode = null,
   onLoadSnapshot,
   onOpenInHistoryDiff,
 }: LiveWatchViewProps) {
@@ -944,6 +948,16 @@ export function LiveWatchView({
                   const wireLog = r.wireQueryId
                     ? sample.queries.find((q) => q.id === r.wireQueryId)
                     : undefined;
+                  const isWatchWireActive = Boolean(
+                    activeWireQueryId && wireLog?.id === activeWireQueryId
+                  );
+                  const isWatchDigActive = Boolean(
+                    isWatchWireActive && (!activeWireMode || activeWireMode === 'dig')
+                  );
+                  const isWatchHexActive = Boolean(
+                    isWatchWireActive &&
+                      (activeWireMode === 'hex-resp' || activeWireMode === 'hex-req')
+                  );
 
                   const barColorCls =
                     r.ttlBehavior === 'serve-stale-ede' || r.ttlBehavior === 'serve-stale-zero-ttl'
@@ -960,7 +974,12 @@ export function LiveWatchView({
                     <tr
                       key={r.endpoint}
                       data-testid="watch-resolver-row"
-                      className="hover:bg-slate-50/80 dark:hover:bg-slate-950/40 transition-colors"
+                      data-wire-active={isWatchWireActive ? 'true' : undefined}
+                      className={`transition-colors ${
+                        isWatchWireActive
+                          ? 'bg-cyan-500/10 ring-1 ring-inset ring-cyan-500/40'
+                          : 'hover:bg-slate-50/80 dark:hover:bg-slate-950/40'
+                      }`}
                     >
                       <td className="py-3 px-3.5">
                         <div className="flex items-center gap-1.5">
@@ -1155,18 +1174,28 @@ export function LiveWatchView({
                             <div className="inline-flex items-center gap-1 font-sans">
                               <button
                                 type="button"
+                                data-wire-active={isWatchDigActive ? 'true' : undefined}
                                 onClick={() => onInspectWatchWireQuery(wireLog, 'dig')}
                                 title={`Inspect ${r.shortLabel} packet in dig format`}
-                                className="inline-flex items-center gap-0.5 rounded border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-1.5 py-0.5 text-[10px] font-medium text-cyan-700 dark:text-cyan-300 cursor-pointer"
+                                className={`inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 text-[10px] cursor-pointer ${
+                                  isWatchDigActive
+                                    ? 'border-cyan-500 bg-cyan-500 text-slate-950 font-semibold'
+                                    : 'border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 font-medium text-cyan-700 dark:text-cyan-300'
+                                }`}
                               >
                                 <Terminal className="w-2.5 h-2.5" />
                                 <span>Wire</span>
                               </button>
                               <button
                                 type="button"
+                                data-wire-active={isWatchHexActive ? 'true' : undefined}
                                 onClick={() => onInspectWatchWireQuery(wireLog, 'hex-resp')}
                                 title={`Dissect ${r.shortLabel} wire bytes`}
-                                className="inline-flex items-center gap-0.5 rounded border border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:text-slate-300 cursor-pointer"
+                                className={`inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 text-[10px] cursor-pointer ${
+                                  isWatchHexActive
+                                    ? 'border-cyan-500 bg-cyan-500 text-slate-950 font-semibold'
+                                    : 'border-slate-200 dark:border-slate-700 hover:border-cyan-500 bg-white dark:bg-slate-900 font-medium text-slate-600 dark:text-slate-300'
+                                }`}
                               >
                                 <Binary className="w-2.5 h-2.5" />
                                 <span>Hex</span>

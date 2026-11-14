@@ -201,6 +201,7 @@ export function GraphInspector({
   queries,
   onInspectWireQuery,
   onClose,
+  dockedWireRail = null,
 }: {
   selection: GraphSelection | null;
   dohEndpoint?: string;
@@ -209,6 +210,10 @@ export function GraphInspector({
   queries?: DohQueryLog[];
   onInspectWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
   onClose: () => void;
+  dockedWireRail?: {
+    wireSize?: number;
+    onSwitchToWire: () => void;
+  } | null;
 }) {
   const [cliTool, setCliTool] = useState<'dig' | 'delv' | 'kdig'>('dig');
   if (!selection) return null;
@@ -226,8 +231,42 @@ export function GraphInspector({
       })
     : null;
 
+  const widthCls = dockedWireRail
+    ? 'w-full lg:w-[390px] xl:w-[500px] 2xl:w-[556px]'
+    : 'w-full lg:w-[390px]';
+
   return (
-    <aside className="safe-area-bottom w-full lg:w-[390px] shrink-0 rounded-xl border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md shadow-lg flex flex-col sticky bottom-[max(0.75rem,env(safe-area-inset-bottom,0px))] lg:top-44 lg:bottom-auto z-20 max-h-[46dvh] lg:max-h-[calc(100dvh-12rem)] overflow-hidden">
+    <aside
+      className={`safe-area-bottom ${widthCls} shrink-0 rounded-xl border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md shadow-lg flex flex-col sticky bottom-[max(0.75rem,env(safe-area-inset-bottom,0px))] lg:top-44 lg:bottom-auto z-20 max-h-[46dvh] lg:max-h-[calc(100dvh-12rem)] overflow-hidden`}
+    >
+      {dockedWireRail && (
+        <div
+          data-testid="graph-inspector-rail-switcher"
+          className="grid grid-cols-2 gap-1.5 px-2.5 py-1.5 border-b border-slate-200 dark:border-slate-800 bg-slate-100/90 dark:bg-slate-900/95 shrink-0"
+        >
+          <button
+            type="button"
+            data-testid="rail-switch-node-crypto"
+            aria-pressed="true"
+            className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-cyan-500 px-2.5 py-1.5 text-xs font-semibold text-slate-950 shadow-sm min-w-0 cursor-pointer"
+          >
+            <Shield className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Node Crypto ●</span>
+          </button>
+          <button
+            type="button"
+            data-testid="rail-switch-wire-hex"
+            onClick={dockedWireRail.onSwitchToWire}
+            className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 hover:border-cyan-500 px-2.5 py-1.5 text-xs font-medium text-slate-600 dark:text-slate-300 transition-colors min-w-0 cursor-pointer"
+            title="Switch right rail to Docked DoH Wire & Hex Inspector"
+          >
+            <Terminal className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
+            <span className="truncate">
+              Wire &amp; Hex{dockedWireRail.wireSize ? ` (${dockedWireRail.wireSize}B)` : ''}
+            </span>
+          </button>
+        </div>
+      )}
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-800">
         <div className="flex items-center gap-2 min-w-0">
           {selection.kind === 'zone' && <Layers className="w-4 h-4 text-cyan-500 shrink-0" />}

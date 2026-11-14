@@ -64,6 +64,66 @@ export interface ExternalCustomWireRequest {
   seq: number;
 }
 
+export function RichDnsTextPre({ text }: { text: string }) {
+  return (
+    <pre className="whitespace-pre overflow-x-auto">
+      {text.split('\n').map((line, idx, lines) => {
+        const nl = idx < lines.length - 1 ? '\n' : '';
+        if (!line.startsWith(';') && !line.startsWith('$') && line.trim().length > 0) {
+          const ipMatch = /^(\S+\s+\d+\s+\S+\s+(?:A|AAAA)\s+)(\S+)$/.exec(line);
+          if (ipMatch && parseIpToken(ipMatch[2]!)) {
+            return (
+              <span key={idx}>
+                {ipMatch[1]}
+                <IpHoverBadge ip={ipMatch[2]!} className="text-cyan-300" />
+                {nl}
+              </span>
+            );
+          }
+
+          const singleTargetMatch =
+            /^(\S+\s+\d+\s+\S+\s+(?:NS|CNAME|DNAME|PTR)\s+)(\S+)$/.exec(line) ??
+            /^(\S+\s+\d+\s+\S+\s+MX\s+\d+\s+)(\S+)$/.exec(line) ??
+            /^(\S+\s+\d+\s+\S+\s+SRV\s+\d+\s+\d+\s+\d+\s+)(\S+)$/.exec(line);
+          if (singleTargetMatch && parseHostnameToken(singleTargetMatch[2]!)) {
+            return (
+              <span key={idx}>
+                {singleTargetMatch[1]}
+                <HostnameBadge hostname={singleTargetMatch[2]!} className="text-cyan-300">
+                  {singleTargetMatch[2]}
+                </HostnameBadge>
+                {nl}
+              </span>
+            );
+          }
+
+          const prefixTargetMatch =
+            /^(\S+\s+\d+\s+\S+\s+SOA\s+)(\S+)(\s+.+)$/.exec(line) ??
+            /^(\S+\s+\d+\s+\S+\s+(?:HTTPS|SVCB)\s+\d+\s+)(\S+)(.*)$/.exec(line);
+          if (prefixTargetMatch && parseHostnameToken(prefixTargetMatch[2]!)) {
+            return (
+              <span key={idx}>
+                {prefixTargetMatch[1]}
+                <HostnameBadge hostname={prefixTargetMatch[2]!} className="text-cyan-300">
+                  {prefixTargetMatch[2]}
+                </HostnameBadge>
+                {prefixTargetMatch[3]}
+                {nl}
+              </span>
+            );
+          }
+        }
+        return (
+          <span key={idx}>
+            {line}
+            {nl}
+          </span>
+        );
+      })}
+    </pre>
+  );
+}
+
 export function ResponsesPanel({
   snapshot,
   focusedQuery = null,
@@ -885,67 +945,7 @@ export function ResponsesPanel({
               className="p-2.5 sm:p-4 overflow-auto flex-1 bg-slate-950 text-slate-200 font-mono text-xs leading-relaxed"
             >
               {mode === 'dig' || mode === 'zonefile' ? (
-                <pre className="whitespace-pre overflow-x-auto">
-                  {(mode === 'dig' ? digText : zonefileText).split('\n').map((line, idx, lines) => {
-                    const nl = idx < lines.length - 1 ? '\n' : '';
-                    if (!line.startsWith(';') && !line.startsWith('$') && line.trim().length > 0) {
-                      const ipMatch = /^(\S+\s+\d+\s+\S+\s+(?:A|AAAA)\s+)(\S+)$/.exec(line);
-                      if (ipMatch && parseIpToken(ipMatch[2]!)) {
-                        return (
-                          <span key={idx}>
-                            {ipMatch[1]}
-                            <IpHoverBadge ip={ipMatch[2]!} className="text-cyan-300" />
-                            {nl}
-                          </span>
-                        );
-                      }
-
-                      const singleTargetMatch =
-                        /^(\S+\s+\d+\s+\S+\s+(?:NS|CNAME|DNAME|PTR)\s+)(\S+)$/.exec(line) ??
-                        /^(\S+\s+\d+\s+\S+\s+MX\s+\d+\s+)(\S+)$/.exec(line) ??
-                        /^(\S+\s+\d+\s+\S+\s+SRV\s+\d+\s+\d+\s+\d+\s+)(\S+)$/.exec(line);
-                      if (singleTargetMatch && parseHostnameToken(singleTargetMatch[2]!)) {
-                        return (
-                          <span key={idx}>
-                            {singleTargetMatch[1]}
-                            <HostnameBadge
-                              hostname={singleTargetMatch[2]!}
-                              className="text-cyan-300"
-                            >
-                              {singleTargetMatch[2]}
-                            </HostnameBadge>
-                            {nl}
-                          </span>
-                        );
-                      }
-
-                      const prefixTargetMatch =
-                        /^(\S+\s+\d+\s+\S+\s+SOA\s+)(\S+)(\s+.+)$/.exec(line) ??
-                        /^(\S+\s+\d+\s+\S+\s+(?:HTTPS|SVCB)\s+\d+\s+)(\S+)(.*)$/.exec(line);
-                      if (prefixTargetMatch && parseHostnameToken(prefixTargetMatch[2]!)) {
-                        return (
-                          <span key={idx}>
-                            {prefixTargetMatch[1]}
-                            <HostnameBadge
-                              hostname={prefixTargetMatch[2]!}
-                              className="text-cyan-300"
-                            >
-                              {prefixTargetMatch[2]}
-                            </HostnameBadge>
-                            {prefixTargetMatch[3]}
-                            {nl}
-                          </span>
-                        );
-                      }
-                    }
-                    return (
-                      <span key={idx}>
-                        {line}
-                        {nl}
-                      </span>
-                    );
-                  })}
-                </pre>
+                <RichDnsTextPre text={mode === 'dig' ? digText : zonefileText} />
               ) : mode === 'hex-resp' || mode === 'hex-req' ? (
                 selectedLog && activeWireDissection?.dissected ? (
                   <WirePacketDissectorView

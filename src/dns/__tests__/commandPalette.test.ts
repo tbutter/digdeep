@@ -39,8 +39,34 @@ describe('Global Command Palette Indexing & Fuzzy Ranking (#64)', () => {
       expect(initialList.length).toBeGreaterThan(15);
       expect(initialList.some((i) => i.id === 'snap-zone-cloudflare.com.')).toBe(true);
       expect(initialList.some((i) => i.id === 'action-compare-frozen-live')).toBe(true);
+      expect(
+        initialList.some((i) => i.id === 'action-toggle-wire-drawer' && i.badge === 'SPLIT: ON')
+      ).toBe(true);
       // Raw wire logs stay hidden when query is empty to avoid cluttering initial list
       expect(initialList.some((i) => i.id.startsWith('snap-wire-'))).toBe(false);
+
+      // 1b. Desktop Wire & Hex Split Drawer toggle action (#63)
+      const splitMatches = filterCommandPaletteItems(items, 'split drawer');
+      expect(splitMatches.length).toBeGreaterThan(0);
+      expect(splitMatches[0]!.id).toBe('action-toggle-wire-drawer');
+      expect(splitMatches[0]!.action).toEqual({ type: 'toggle-wire-drawer-desktop' });
+
+      const splitOffItems = buildCommandPaletteItems({
+        activeSnapshot: secureSnap,
+        snapshots: [secureSnap],
+        activeTab: 'graph',
+        analysisMode: 'dnssec',
+        domainInput: 'cloudflare.com',
+        settings: { ...settings, dockWireDrawerDesktop: false },
+        theme: 'dark',
+        isOffline: false,
+        isViewingFrozenSnapshot: false,
+      });
+      const splitOffAction = splitOffItems.find((i) => i.id === 'action-toggle-wire-drawer');
+      expect(splitOffAction?.badge).toBe('SPLIT: OFF');
+      expect(splitOffAction?.title).toContain(
+        'Enable Side-by-Side Desktop Wire & Hex Split Drawer'
+      );
 
       // 2. Searching by #keyTag (#2371 for Cloudflare KSK) ranks that DNSKEY #1
       const keyMatches = filterCommandPaletteItems(items, '#2371');

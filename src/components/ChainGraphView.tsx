@@ -31,6 +31,11 @@ import {
   type GraphFilterOptions,
   type GraphNode,
 } from '../graph/layout';
+import {
+  type FocusedWireQueryRequest,
+  type FocusedWireSubMode,
+  findGraphSelectionWireQuery,
+} from '../dns/wireQueryFilter';
 import { GraphInspector, type GraphSelection } from './GraphInspector';
 import {
   IpAsnHoverCardContent,
@@ -38,6 +43,7 @@ import {
   useIpAsnInfos,
 } from './IpHoverBadge';
 import { STATUS_META } from './StatusBadge';
+import { WireSideDrawer } from './WireSideDrawer';
 
 function getEdgeColor(edge: GraphEdge): string {
   if (edge.kind === 'cname') return edge.status === 'bogus' ? '#f43f5e' : '#8b5cf6';
@@ -247,6 +253,10 @@ export function ChainGraphView({
   focusedTargetId,
   onSelectTargetId,
   onInspectWireQuery,
+  dockedWireQuery = null,
+  onSelectDockedWireQuery,
+  onOpenFullWireTab,
+  onCloseDockedWireDrawer,
 }: {
   snapshot: AnalysisSnapshot;
   theme: 'dark' | 'light';
@@ -255,6 +265,10 @@ export function ChainGraphView({
   focusedTargetId?: string | null;
   onSelectTargetId?: (targetId: string | null) => void;
   onInspectWireQuery?: (queryId: string, mode?: 'dig' | 'hex-resp' | 'hex-req') => void;
+  dockedWireQuery?: FocusedWireQueryRequest | null;
+  onSelectDockedWireQuery?: (queryId: string, mode?: FocusedWireSubMode) => void;
+  onOpenFullWireTab?: (queryId: string, mode: FocusedWireSubMode) => void;
+  onCloseDockedWireDrawer?: () => void;
 }) {
   seedIpAsnCacheFromSnapshot(snapshot);
   const graph = useMemo(() => buildChainGraph(snapshot, filters), [snapshot, filters]);
@@ -284,24 +298,43 @@ export function ChainGraphView({
   const pinchStateRef = useRef<{ dist: number; midX: number; midY: number } | null>(null);
 
   const [selection, setSelection] = useState<GraphSelection | null>(null);
+  const [rightRailTab, setRightRailTab] = useState<'crypto' | 'wire'>(() =>
+    dockedWireQuery ? 'wire' : 'crypto'
+  );
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [showLegend, setShowLegend] = useState(false);
   const hasUserZoomedRef = useRef(false);
+
+  useEffect(() => {
+    if (dockedWireQuery) {
+      setRightRailTab('wire');
+    } else {
+      setRightRailTab('crypto');
+    }
+  }, [dockedWireQuery?.seq, dockedWireQuery?.queryId, dockedWireQuery?.mode, Boolean(dockedWireQuery)]);
 
   const selectAndNotify = useCallback(
     (next: GraphSelection | null) => {
       setSelection(next);
       if (!next) {
         onSelectTargetId?.(null);
-      } else if (next.kind === 'node') {
+        return;
+      }
+      if (next.kind === 'node') {
         onSelectTargetId?.(next.node.id);
       } else if (next.kind === 'edge') {
         onSelectTargetId?.(next.edge.id);
       } else if (next.kind === 'zone') {
         onSelectTargetId?.(next.zone.zoneName);
       }
+      if (dockedWireQuery && onSelectDockedWireQuery) {
+        const matchedWire = findGraphSelectionWireQuery(next, snapshot.queries);
+        if (matchedWire) {
+          onSelectDockedWireQuery(matchedWire.id, dockedWireQuery.mode);
+        }
+      }
     },
-    [onSelectTargetId]
+    [onSelectTargetId, dockedWireQuery, onSelectDockedWireQuery, snapshot.queries]
   );
 
   const resetToDefaultZoom = useCallback(() => {
@@ -1306,16 +1339,55 @@ export function ChainGraphView({
         </div>
       </div>
 
-      {/* Right-Hand Cryptographic & Wire Inspector Drawer */}
-      <GraphInspector
-        selection={selection}
-        dohEndpoint={snapshot.dohEndpoint}
-        capturedAt={snapshot.capturedAt}
-        validatedAt={snapshot.validatedAt}
-        queries={snapshot.queries}
-        onInspectWireQuery={onInspectWireQuery}
-        onClose={() => selectAndNotify(null)}
-      />
+      {/* Right-Hand Cryptographic & Wire Inspector Unified Rail */}
+      {dockedWireQuery && (rightRailTab === 'wire' || !selection) ? (
+        <WireSideDrawer
+          snapshot={snapshot}
+          focusedQuery={dockedWireQuery}
+          onSelectQuery={(qid, mode) => onSelectDockedWireQuery?.(qid, mode)}
+          onOpenFullWireTab={(qid, mode) => onOpenFullWireTab?.(qid, mode)}
+          onClose={() => onCloseDockedWireDrawer?.()}
+          graphRailContext={
+            selection
+              ? {
+                  selectionLabel:
+                    selection.kind === 'zone'
+                      ? selection.zone.zoneName === '.'
+                        ? '. (root)'
+                        : selection.zone.zoneName
+                      : selection.kind === 'node'
+                        ? selection.node.title
+                        : selection.edge.label,
+                  onSwitchToGraphCrypto: () => setRightRailTab('crypto'),
+                }
+              : null
+          }
+        />
+      ) : (
+        <GraphInspector
+          selection={selection}
+          dohEndpoint={snapshot.dohEndpoint}
+          capturedAt={snapshot.capturedAt}
+          validatedAt={snapshot.validatedAt}
+          queries={snapshot.queries}
+          onInspectWireQuery={onInspectWireQuery}
+          dockedWireRail={
+            dockedWireQuery
+              ? {
+                  wireSize: snapshot.queries.find((q) => q.id === dockedWireQuery.queryId)?.packet
+                    .wireSize,
+                  onSwitchToWire: () => setRightRailTab('wire'),
+                }
+              : null
+          }
+          onClose={() => {
+            selectAndNotify(null);
+            if (dockedWireQuery) {
+              onCloseDockedWireDrawer?.();
+            }
+          }}
+        />
+      )}
 
       {/* Floating BGP ASN & Network Hover Card for SVG A / AAAA Nodes */}
       {hoveredIpNode &&

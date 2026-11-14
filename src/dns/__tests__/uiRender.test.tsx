@@ -35,6 +35,10 @@ import {
   resetWireGridWidthPreference,
   WirePacketDissectorView,
 } from '../../components/WireDissectorView';
+import {
+  isWideWireDrawerViewport,
+  WireSideDrawer,
+} from '../../components/WireSideDrawer';
 import { isHealthyIntermediateParentZone, ZonesPanel } from '../../components/ZonesPanel';
 import { buildChainGraph } from '../../graph/layout';
 import { DEFAULT_USER_SETTINGS, loadSnapshots, saveSnapshot } from '../../storage/historyStore';
@@ -295,7 +299,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexCss).toContain('env(safe-area-inset-bottom');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v44');
+    expect(swCode).toContain('digdeep-shell-v45');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -4681,6 +4685,376 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
       if (prevDocument) Object.defineProperty(globalThis, 'document', prevDocument);
     }
   });
+
+  it(
+    'renders side-by-side desktop WireSideDrawer split-pane, ChainGraphView unified right-rail switcher, active source highlights, and responsive/opt-out fallbacks (#63)',
+    async () => {
+      expect(DEFAULT_USER_SETTINGS.dockWireDrawerDesktop).toBe(true);
+
+      const bogusSnap = await runDnsvizAnalysis('dnssec-failed.org', { queryTypes: ['A'] });
+      expect(bogusSnap.queries.length).toBeGreaterThan(1);
+
+      const firstQuery = bogusSnap.queries[0]!;
+      const findingWithWire = bogusSnap.findings.find((f) =>
+        Boolean(findAuditFindingWireQuery(f, bogusSnap))
+      )!;
+      expect(findingWithWire).toBeTruthy();
+      const findingWireQuery = findAuditFindingWireQuery(findingWithWire, bogusSnap)!;
+
+      // 1. SSR checks: WireSideDrawer (dig + hex-resp + graphRailContext), GraphInspector dockedWireRail, ChainGraphView, AuditPanel, SettingsModal
+      const drawerDigHtml = renderToStaticMarkup(
+        <WireSideDrawer
+          snapshot={bogusSnap}
+          focusedQuery={{ queryId: firstQuery.id, mode: 'dig', seq: 1 }}
+          onSelectQuery={() => {}}
+          onOpenFullWireTab={() => {}}
+          onClose={() => {}}
+          graphRailContext={{
+            selectionLabel: 'dnssec-failed.org.',
+            onSwitchToGraphCrypto: () => {},
+          }}
+        />
+      );
+      expect(drawerDigHtml).toContain('data-testid="wire-side-drawer"');
+      expect(drawerDigHtml).toContain(`data-query-id="${firstQuery.id}"`);
+      expect(drawerDigHtml).toContain('data-wire-mode="dig"');
+      expect(drawerDigHtml).toContain('data-testid="wire-drawer-graph-rail-switcher"');
+      expect(drawerDigHtml).toContain('data-testid="rail-switch-node-crypto"');
+      expect(drawerDigHtml).toContain('data-testid="rail-switch-wire-hex"');
+      expect(drawerDigHtml).toContain('Node Crypto (dnssec-failed.org.)');
+      expect(drawerDigHtml).toContain(`1 / ${bogusSnap.queries.length}`);
+      expect(drawerDigHtml).toContain('data-testid="wire-drawer-open-full-tab"');
+      expect(drawerDigHtml).toContain('data-testid="wire-drawer-close"');
+      expect(drawerDigHtml).toContain('dig +dnssec +multi');
+      expect(drawerDigHtml).toContain('HEADER');
+
+      const drawerHexHtml = renderToStaticMarkup(
+        <WireSideDrawer
+          snapshot={bogusSnap}
+          focusedQuery={{ queryId: firstQuery.id, mode: 'hex-resp', seq: 2 }}
+          onSelectQuery={() => {}}
+          onOpenFullWireTab={() => {}}
+          onClose={() => {}}
+        />
+      );
+      expect(drawerHexHtml).toContain('data-wire-mode="hex-resp"');
+      expect(drawerHexHtml).toContain('16-Bit Header Flags Register');
+      expect(drawerHexHtml).toContain('data-testid="wire-hex-grid"');
+
+      const graphInspectorRailHtml = renderToStaticMarkup(
+        <GraphInspector
+          selection={{ kind: 'zone', zone: bogusSnap.zones[0]! }}
+          dohEndpoint={bogusSnap.dohEndpoint}
+          capturedAt={bogusSnap.capturedAt}
+          validatedAt={bogusSnap.validatedAt}
+          queries={bogusSnap.queries}
+          onInspectWireQuery={() => {}}
+          onClose={() => {}}
+          dockedWireRail={{
+            wireSize: firstQuery.packet.wireSize,
+            onSwitchToWire: () => {},
+          }}
+        />
+      );
+      expect(graphInspectorRailHtml).toContain('data-testid="graph-inspector-rail-switcher"');
+      expect(graphInspectorRailHtml).toContain('Node Crypto ●');
+      expect(graphInspectorRailHtml).toContain(`Wire &amp; Hex (${firstQuery.packet.wireSize}B)`);
+
+      const graphDockedHtml = renderToStaticMarkup(
+        <ChainGraphView
+          snapshot={bogusSnap}
+          theme="dark"
+          filters={{ showSoaAndNs: true, showStandbyKeys: true }}
+          onChangeFilters={() => {}}
+          dockedWireQuery={{ queryId: firstQuery.id, mode: 'dig', seq: 1 }}
+        />
+      );
+      expect(graphDockedHtml).toContain('data-testid="wire-side-drawer"');
+
+      const auditActiveHtml = renderToStaticMarkup(
+        <AuditPanel
+          snapshot={bogusSnap}
+          onJumpToGraphTarget={() => {}}
+          onInspectWireQuery={() => {}}
+          activeWireQueryId={findingWireQuery.id}
+        />
+      );
+      expect(auditActiveHtml).toContain('data-wire-active="true"');
+      expect(auditActiveHtml).toContain('Inspect Wire ●');
+
+      const settingsHtml = renderToStaticMarkup(
+        <SettingsModal
+          open={true}
+          settings={DEFAULT_USER_SETTINGS}
+          activeSnapshot={bogusSnap}
+          onClose={() => {}}
+          onSaveSettings={() => {}}
+          onReverifyAtTime={() => {}}
+        />
+      );
+      expect(settingsHtml).toContain('data-testid="settings-toggle-wire-drawer"');
+      expect(settingsHtml).toContain('Desktop Workspace Layout');
+
+      // 2. Interactive JSDOM <App /> verification: split-pane open/update/close, left-pane state preservation, Graph unified right rail, resize promotion & opt-out
+      const mem = new Map<string, string>();
+      Object.defineProperty(globalThis, 'localStorage', {
+        value: {
+          get length() {
+            return mem.size;
+          },
+          getItem: (k: string) => mem.get(k) ?? null,
+          key: (i: number) => Array.from(mem.keys())[i] ?? null,
+          setItem: (k: string, v: string) => void mem.set(k, v),
+          removeItem: (k: string) => void mem.delete(k),
+          clear: () => mem.clear(),
+        },
+        configurable: true,
+      });
+      saveSnapshot(bogusSnap);
+
+      const { JSDOM } = (await import('jsdom' as string)) as {
+        JSDOM: new (
+          markup?: string,
+          opts?: { url?: string }
+        ) => { window: Window & typeof globalThis };
+      };
+      const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
+        url: 'https://digdeep.example/?name=dnssec-failed.org&types=A&tab=audit',
+      });
+
+      const prevWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+      const prevDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+      const prevOnline = Object.getOwnPropertyDescriptor(globalThis.navigator, 'onLine');
+      const prevClipboard = Object.getOwnPropertyDescriptor(globalThis.navigator, 'clipboard');
+
+      let narrowViewport = false;
+      Object.defineProperty(globalThis, 'window', { value: dom.window, configurable: true });
+      Object.defineProperty(globalThis, 'document', {
+        value: dom.window.document,
+        configurable: true,
+      });
+      Object.defineProperty(globalThis.navigator, 'onLine', {
+        value: false,
+        configurable: true,
+      });
+      Object.defineProperty(globalThis.navigator, 'clipboard', {
+        value: {
+          writeText: vi.fn(async () => {}),
+        },
+        configurable: true,
+      });
+      dom.window.scrollTo = (() => {}) as typeof dom.window.scrollTo;
+      (
+        dom.window as unknown as {
+          matchMedia: (q: string) => {
+            matches: boolean;
+            addEventListener: () => void;
+            removeEventListener: () => void;
+          };
+        }
+      ).matchMedia = (q: string) => ({
+        matches: q.includes('1279px') ? narrowViewport : false,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      });
+      (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
+        true;
+
+      try {
+        const { act } = await import('react');
+        const { createRoot } = await import('react-dom/client');
+        const container = dom.window.document.getElementById('root')!;
+        const root = createRoot(container);
+
+        await act(async () => {
+          root.render(<App />);
+        });
+
+        expect(isWideWireDrawerViewport()).toBe(true);
+        const toggleSplitBtn = container.querySelector(
+          '[data-testid="toggle-wire-split-btn"]'
+        ) as HTMLButtonElement;
+        expect(toggleSplitBtn).toBeTruthy();
+        expect(toggleSplitBtn.textContent).toContain('Wire Split: ON');
+        expect(container.querySelector('[data-testid="wire-side-drawer"]')).toBeNull();
+
+        // Set a local filter in AuditPanel ("Errors (...)") BEFORE opening the drawer to verify left-pane state survives open & close
+        const errorsFilterBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+          b.textContent?.startsWith('Errors (')
+        ) as HTMLButtonElement;
+        expect(errorsFilterBtn).toBeTruthy();
+        await act(async () => {
+          errorsFilterBtn.click();
+        });
+        expect(errorsFilterBtn.className).toContain('bg-cyan-500');
+
+        // Click "Inspect Wire" inside AuditPanel -> opens docked WireSideDrawer WITHOUT leaving Audit tab or resetting filter
+        const inspectWireBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+          b.textContent?.includes('Inspect Wire')
+        ) as HTMLButtonElement;
+        expect(inspectWireBtn).toBeTruthy();
+        await act(async () => {
+          inspectWireBtn.click();
+        });
+
+        const navAudit = container.querySelector('[data-testid="nav-tab-audit"]')!;
+        const navWire = container.querySelector('[data-testid="nav-tab-responses"]')!;
+        expect(navAudit.getAttribute('data-active-tab')).toBe('true');
+        expect(navWire.getAttribute('data-wire-docked')).toBe('true');
+        expect(navWire.textContent).toContain('• Docked');
+        expect(container.querySelector('[data-testid="desktop-wire-split-layout"]')).toBeTruthy();
+        expect(errorsFilterBtn.className).toContain('bg-cyan-500');
+        expect(inspectWireBtn.getAttribute('data-wire-active')).toBe('true');
+
+        const drawer = container.querySelector('[data-testid="wire-side-drawer"]') as HTMLElement;
+        expect(drawer).toBeTruthy();
+        const initialQueryId = drawer.getAttribute('data-query-id');
+        expect(initialQueryId).toBeTruthy();
+
+        // Switch mode inside docked drawer to Response Wire Hex Dissector
+        const hexRespBtn = container.querySelector(
+          '[data-testid="wire-drawer-mode-hex-resp"]'
+        ) as HTMLButtonElement;
+        await act(async () => {
+          hexRespBtn.click();
+        });
+        expect(drawer.getAttribute('data-wire-mode')).toBe('hex-resp');
+        expect(drawer.querySelector('[data-testid="wire-hex-grid"]')).toBeTruthy();
+
+        // Step through packets in-place via Prev / Next stepper
+        const nextBtn = container.querySelector(
+          '[data-testid="wire-drawer-next"]'
+        ) as HTMLButtonElement;
+        const prevBtn = container.querySelector(
+          '[data-testid="wire-drawer-prev"]'
+        ) as HTMLButtonElement;
+        const stepBtn = !nextBtn.disabled ? nextBtn : prevBtn;
+        await act(async () => {
+          stepBtn.click();
+        });
+        expect(drawer.getAttribute('data-query-id')).not.toBe(initialQueryId);
+
+        // Press Escape -> dismisses WireSideDrawer while preserving Audit tab and local Errors filter
+        await act(async () => {
+          dom.window.dispatchEvent(
+            new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })
+          );
+        });
+        expect(container.querySelector('[data-testid="wire-side-drawer"]')).toBeNull();
+        expect(navAudit.getAttribute('data-active-tab')).toBe('true');
+        expect(errorsFilterBtn.className).toContain('bg-cyan-500');
+
+        // Re-open drawer, then promote via "Full Wire Tab ↗"
+        await act(async () => {
+          inspectWireBtn.click();
+        });
+        const openFullTabBtn = container.querySelector(
+          '[data-testid="wire-drawer-open-full-tab"]'
+        ) as HTMLButtonElement;
+        expect(openFullTabBtn).toBeTruthy();
+        await act(async () => {
+          openFullTabBtn.click();
+        });
+        expect(container.querySelector('[data-testid="wire-side-drawer"]')).toBeNull();
+        expect(navWire.getAttribute('data-active-tab')).toBe('true');
+        expect(container.querySelector('[data-testid="wire-query-search"]')).toBeTruthy();
+
+        // Return to Audit -> click "Locate in Graph" -> test ChainGraphView Unified Right Rail Switcher
+        await act(async () => {
+          (navAudit as HTMLButtonElement).click();
+        });
+        const locateInGraphBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+          b.textContent?.includes('Locate in Graph')
+        ) as HTMLButtonElement;
+        expect(locateInGraphBtn).toBeTruthy();
+        await act(async () => {
+          locateInGraphBtn.click();
+        });
+        const navGraph = container.querySelector('[data-testid="nav-tab-graph"]')!;
+        expect(navGraph.getAttribute('data-active-tab')).toBe('true');
+
+        // GraphInspector is open on the focused target; click "Dissect Hex" inside GraphInspector
+        const dissectHexInGraphBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+          b.textContent?.includes('Dissect Hex')
+        ) as HTMLButtonElement;
+        expect(dissectHexInGraphBtn).toBeTruthy();
+        await act(async () => {
+          dissectHexInGraphBtn.click();
+        });
+
+        // Graph stays active and right rail switches to WireSideDrawer with Unified Rail Switcher
+        expect(navGraph.getAttribute('data-active-tab')).toBe('true');
+        const graphDrawer = container.querySelector(
+          '[data-testid="wire-side-drawer"]'
+        ) as HTMLElement;
+        expect(graphDrawer).toBeTruthy();
+        expect(graphDrawer.getAttribute('data-wire-mode')).toBe('hex-resp');
+        const switchToCryptoBtn = container.querySelector(
+          '[data-testid="rail-switch-node-crypto"]'
+        ) as HTMLButtonElement;
+        expect(switchToCryptoBtn).toBeTruthy();
+
+        // Toggle Unified Right Rail to Node Crypto -> GraphInspector renders with rail switcher
+        await act(async () => {
+          switchToCryptoBtn.click();
+        });
+        expect(container.querySelector('[data-testid="wire-side-drawer"]')).toBeNull();
+        expect(
+          container.querySelector('[data-testid="graph-inspector-rail-switcher"]')
+        ).toBeTruthy();
+
+        // Toggle back to Wire & Hex rail
+        const switchToWireBtn = container.querySelector(
+          '[data-testid="rail-switch-wire-hex"]'
+        ) as HTMLButtonElement;
+        await act(async () => {
+          switchToWireBtn.click();
+        });
+        expect(container.querySelector('[data-testid="wire-side-drawer"]')).toBeTruthy();
+
+        // Viewport resize below 1280px while drawer is open -> auto-promotes to full Wire tab
+        narrowViewport = true;
+        expect(isWideWireDrawerViewport()).toBe(false);
+        await act(async () => {
+          dom.window.dispatchEvent(new dom.window.Event('resize'));
+        });
+        expect(container.querySelector('[data-testid="wire-side-drawer"]')).toBeNull();
+        expect(navWire.getAttribute('data-active-tab')).toBe('true');
+
+        // Restore wide desktop viewport, opt out via header "Wire Split: OFF", verify Inspect Wire goes straight to full Wire tab
+        narrowViewport = false;
+        await act(async () => {
+          dom.window.dispatchEvent(new dom.window.Event('resize'));
+          (navAudit as HTMLButtonElement).click();
+        });
+        await act(async () => {
+          toggleSplitBtn.click();
+        });
+        expect(toggleSplitBtn.textContent).toContain('Wire Split: OFF');
+
+        const inspectWireOptOutBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+          b.textContent?.includes('Inspect Wire')
+        ) as HTMLButtonElement;
+        await act(async () => {
+          inspectWireOptOutBtn.click();
+        });
+        expect(container.querySelector('[data-testid="wire-side-drawer"]')).toBeNull();
+        expect(navWire.getAttribute('data-active-tab')).toBe('true');
+
+        await act(async () => {
+          root.unmount();
+        });
+      } finally {
+        if (prevClipboard) {
+          Object.defineProperty(globalThis.navigator, 'clipboard', prevClipboard);
+        }
+        if (prevOnline) Object.defineProperty(globalThis.navigator, 'onLine', prevOnline);
+        if (prevWindow) Object.defineProperty(globalThis, 'window', prevWindow);
+        if (prevDocument) Object.defineProperty(globalThis, 'document', prevDocument);
+      }
+    },
+    30_000
+  );
 });
 
 function ipv6FixtureForMobileTest(): AnalysisSnapshot {
