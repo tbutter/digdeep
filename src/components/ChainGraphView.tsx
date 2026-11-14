@@ -2,10 +2,15 @@ import {
   Download,
   Eye,
   FileImage,
+  Hand,
   HelpCircle,
   Maximize2,
+  Minimize2,
   RotateCcw,
+  Scan,
   Share2,
+  Sparkles,
+  X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
@@ -22,14 +27,19 @@ import { formatDohShortLabel } from '../dns/constants';
 import type { AnalysisSnapshot, ValidationStatus } from '../dns/types';
 import {
   buildChainGraph,
+  buildZoneBreadcrumbs,
   computeDefaultCanvasHeight,
   computeDefaultGraphTransform,
   computeFitAllGraphTransform,
+  computeTrustLineage,
+  computeZoneFocusTransform,
+  findActiveViewportZoneName,
   MAX_GRAPH_ZOOM,
   MIN_GRAPH_ZOOM,
   type GraphEdge,
   type GraphFilterOptions,
   type GraphNode,
+  type GraphZoneBox,
 } from '../graph/layout';
 import {
   type FocusedWireQueryRequest,
@@ -42,7 +52,7 @@ import {
   seedIpAsnCacheFromSnapshot,
   useIpAsnInfos,
 } from './IpHoverBadge';
-import { STATUS_META } from './StatusBadge';
+import { STATUS_META, StatusBadge } from './StatusBadge';
 import { WireSideDrawer } from './WireSideDrawer';
 
 function getEdgeColor(edge: GraphEdge): string {
@@ -125,6 +135,7 @@ export function prepareExportSvgElement(
   const rootGroup = clone.querySelector('[data-pan-zoom-root="true"]');
   if (rootGroup) {
     rootGroup.setAttribute('transform', `translate(${offsetX}, 0) scale(1)`);
+    rootGroup.removeAttribute('style');
   }
 
   // Prepend solid background rect for standalone SVG/PNG export
@@ -293,8 +304,18 @@ export function ChainGraphView({
     const h = computeDefaultCanvasHeight(graph, w);
     return computeDefaultGraphTransform(graph, w, h);
   });
+  const transformRef = useRef(transform);
+  transformRef.current = transform;
+
   const [dragging, setDragging] = useState(false);
   const dragStartRef = useRef({ clientX: 0, clientY: 0, startX: 0, startY: 0, moved: false });
+  const touchPanRef = useRef<{
+    touchId: number;
+    startClientX: number;
+    startClientY: number;
+    startX: number;
+    startY: number;
+  } | null>(null);
   const pinchStateRef = useRef<{ dist: number; midX: number; midY: number } | null>(null);
 
   const [selection, setSelection] = useState<GraphSelection | null>(null);
@@ -303,7 +324,30 @@ export function ChainGraphView({
   );
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [showLegend, setShowLegend] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [touchPanEnabled, setTouchPanEnabled] = useState(true);
+  const [isCameraAnimating, setIsCameraAnimating] = useState(false);
+  const cameraAnimTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasUserZoomedRef = useRef(false);
+
+  const triggerCameraTransition = useCallback(() => {
+    if (cameraAnimTimerRef.current !== null) {
+      clearTimeout(cameraAnimTimerRef.current);
+    }
+    setIsCameraAnimating(true);
+    cameraAnimTimerRef.current = setTimeout(() => {
+      setIsCameraAnimating(false);
+      cameraAnimTimerRef.current = null;
+    }, 240);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (cameraAnimTimerRef.current !== null) {
+        clearTimeout(cameraAnimTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (dockedWireQuery) {
@@ -312,6 +356,63 @@ export function ChainGraphView({
       setRightRailTab('crypto');
     }
   }, [dockedWireQuery?.seq, dockedWireQuery?.queryId, dockedWireQuery?.mode, Boolean(dockedWireQuery)]);
+
+  // Lock background page scroll while Fullscreen / Theater mode is active
+  useEffect(() => {
+    if (!isFullscreen || typeof document === 'undefined' || !document.body) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [isFullscreen]);
+
+  // Keyboard shortcuts: 'f' toggles Fullscreen / Theater mode; 'Escape' exits Fullscreen
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      const hasModal =
+        typeof document !== 'undefined' &&
+        Boolean(document.querySelector('[role="dialog"][aria-modal="true"]'));
+      if (hasModal) return;
+
+      if (e.key === 'Escape' && isFullscreen) {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsFullscreen(false);
+        return;
+      }
+
+      if (
+        e.key.toLowerCase() === 'f' &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.defaultPrevented
+      ) {
+        const target = e.target as HTMLElement | null;
+        const active =
+          (typeof document !== 'undefined'
+            ? (document.activeElement as HTMLElement | null)
+            : null) ?? target;
+        const tagName = active?.tagName;
+        if (
+          tagName === 'INPUT' ||
+          tagName === 'TEXTAREA' ||
+          tagName === 'SELECT' ||
+          active?.isContentEditable ||
+          target?.isContentEditable
+        ) {
+          return;
+        }
+        e.preventDefault();
+        setIsFullscreen((prev) => !prev);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [isFullscreen]);
 
   const selectAndNotify = useCallback(
     (next: GraphSelection | null) => {
@@ -339,32 +440,77 @@ export function ChainGraphView({
 
   const resetToDefaultZoom = useCallback(() => {
     const paneEl = containerRef.current ?? rootWrapperRef.current;
-    const measuredW = paneEl ? paneEl.getBoundingClientRect().width : 0;
+    const rect = paneEl ? paneEl.getBoundingClientRect() : null;
+    const measuredW = rect ? rect.width : 0;
+    const measuredH = rect ? rect.height : 0;
     const w = measuredW > 0 ? measuredW : wrapperWidth;
-    const h = computeDefaultCanvasHeight(graph, w);
+    const h =
+      isFullscreen && measuredH > 0 ? measuredH : computeDefaultCanvasHeight(graph, w);
     hasUserZoomedRef.current = false;
     if (measuredW > 0 && !selection) {
       setWrapperWidth(measuredW);
     }
+    triggerCameraTransition();
     setTransform(computeDefaultGraphTransform(graph, w, h));
-  }, [graph, wrapperWidth, selection]);
+  }, [graph, wrapperWidth, selection, isFullscreen, triggerCameraTransition]);
 
   const fitEntireChain = useCallback(() => {
     const el = containerRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return;
-    const visibleViewportHeight =
-      typeof window !== 'undefined' &&
-      typeof window.innerHeight === 'number' &&
-      window.innerHeight > 0
-        ? Math.min(rect.height, Math.max(360, window.innerHeight - 190))
-        : rect.height;
+    const rect = el ? el.getBoundingClientRect() : null;
+    const w = rect && rect.width > 0 ? rect.width : wrapperWidth;
+    const rawH = rect && rect.height > 0 ? rect.height : canvasHeight;
+    const visibleViewportHeight = isFullscreen
+      ? rawH
+      : typeof window !== 'undefined' &&
+          typeof window.innerHeight === 'number' &&
+          window.innerHeight > 0
+        ? Math.min(rawH, Math.max(360, window.innerHeight - 190))
+        : rawH;
     hasUserZoomedRef.current = true;
-    setTransform(computeFitAllGraphTransform(graph, rect.width, visibleViewportHeight));
-  }, [graph]);
+    triggerCameraTransition();
+    setTransform(computeFitAllGraphTransform(graph, w, visibleViewportHeight));
+  }, [graph, wrapperWidth, canvasHeight, isFullscreen, triggerCameraTransition]);
+
+  const jumpToZone = useCallback(
+    (zoneBox: GraphZoneBox) => {
+      const el = containerRef.current;
+      const rect = el ? el.getBoundingClientRect() : null;
+      const w = rect && rect.width > 0 ? rect.width : wrapperWidth;
+      const rawH = rect && rect.height > 0 ? rect.height : canvasHeight;
+      const visibleViewportHeight = isFullscreen
+        ? rawH
+        : typeof window !== 'undefined' &&
+            typeof window.innerHeight === 'number' &&
+            window.innerHeight > 0 &&
+            rect &&
+            rect.height > 0
+          ? Math.min(rawH, Math.max(320, window.innerHeight - Math.max(0, rect.top) - 24))
+          : rawH;
+
+      hasUserZoomedRef.current = true;
+      triggerCameraTransition();
+      setTransform(computeZoneFocusTransform(zoneBox, w, visibleViewportHeight));
+      selectAndNotify({ kind: 'zone', zone: zoneBox.zone });
+
+      if (
+        !isFullscreen &&
+        rect &&
+        rect.height > 0 &&
+        rect.top < 56 &&
+        typeof window !== 'undefined' &&
+        typeof window.scrollTo === 'function' &&
+        typeof window.scrollY === 'number'
+      ) {
+        const rootRect = rootWrapperRef.current?.getBoundingClientRect();
+        const targetTop = Math.max(0, window.scrollY + (rootRect ? rootRect.top : rect.top) - 72);
+        window.scrollTo({ top: targetTop, behavior: 'smooth' });
+      }
+    },
+    [wrapperWidth, canvasHeight, isFullscreen, triggerCameraTransition, selectAndNotify]
+  );
 
   const zoomAroundPoint = useCallback((factor: number, focalX: number, focalY: number) => {
+    setIsCameraAnimating(false);
     setTransform((prev) => {
       const nextScale = Math.max(MIN_GRAPH_ZOOM, Math.min(MAX_GRAPH_ZOOM, prev.scale * factor));
       const ratio = nextScale / prev.scale;
@@ -379,36 +525,64 @@ export function ChainGraphView({
   const zoomAroundCenter = useCallback(
     (factor: number) => {
       const el = containerRef.current;
-      if (!el) return;
-      const rect = el.getBoundingClientRect();
+      const rect = el ? el.getBoundingClientRect() : null;
+      const w = rect && rect.width > 0 ? rect.width : wrapperWidth;
+      const h = rect && rect.height > 0 ? rect.height : canvasHeight;
       const hasWinHeight =
+        !isFullscreen &&
+        rect &&
+        rect.height > 0 &&
         typeof window !== 'undefined' &&
         typeof window.innerHeight === 'number' &&
         window.innerHeight > 0;
       const visibleTop = hasWinHeight ? Math.max(0, -rect.top) : 0;
       const visibleBottom = hasWinHeight
-        ? Math.min(rect.height, window.innerHeight - rect.top)
-        : rect.height;
-      const focalY =
-        visibleBottom > visibleTop ? (visibleTop + visibleBottom) / 2 : rect.height / 2;
+        ? Math.min(h, window.innerHeight - rect.top)
+        : h;
+      const focalY = visibleBottom > visibleTop ? (visibleTop + visibleBottom) / 2 : h / 2;
       hasUserZoomedRef.current = true;
-      zoomAroundPoint(factor, rect.width / 2, focalY);
+      zoomAroundPoint(factor, w / 2, focalY);
     },
-    [zoomAroundPoint]
+    [zoomAroundPoint, wrapperWidth, canvasHeight, isFullscreen]
   );
+
+  // Re-fit default unzoomed transform when toggling Fullscreen on/off
+  useEffect(() => {
+    if (hasUserZoomedRef.current) return;
+    const applyFullscreenFit = () => {
+      const el = containerRef.current ?? rootWrapperRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const w = rect.width > 0 ? rect.width : wrapperWidth;
+      const h =
+        isFullscreen && rect.height > 0 ? rect.height : computeDefaultCanvasHeight(graph, w);
+      setTransform(computeDefaultGraphTransform(graph, w, h));
+    };
+    if (typeof requestAnimationFrame !== 'function') {
+      applyFullscreenFit();
+      return;
+    }
+    const id = requestAnimationFrame(applyFullscreenFit);
+    return () => {
+      if (typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(id);
+      }
+    };
+  }, [isFullscreen, graph, wrapperWidth]);
 
   // Reset to default 90%-width zoom + full-graph canvas height whenever snapshot or filters change
   useEffect(() => {
     hasUserZoomedRef.current = false;
     setSelection(null);
     const applyFit = () => {
-      const rootEl = rootWrapperRef.current;
-      const w =
-        rootEl && rootEl.getBoundingClientRect().width > 0
-          ? rootEl.getBoundingClientRect().width
-          : getEstimatedWidth();
+      const rootEl = containerRef.current ?? rootWrapperRef.current;
+      const rect = rootEl ? rootEl.getBoundingClientRect() : null;
+      const w = rect && rect.width > 0 ? rect.width : getEstimatedWidth();
       setWrapperWidth(w);
-      const h = computeDefaultCanvasHeight(graph, w);
+      const h =
+        isFullscreen && rect && rect.height > 0
+          ? rect.height
+          : computeDefaultCanvasHeight(graph, w);
       setTransform(computeDefaultGraphTransform(graph, w, h));
     };
     if (typeof requestAnimationFrame !== 'function') {
@@ -433,13 +607,17 @@ export function ChainGraphView({
       if (nextW <= 0) return;
       setWrapperWidth((prev) => (Math.abs(prev - nextW) >= 1 ? nextW : prev));
       if (!hasUserZoomedRef.current) {
-        const nextH = computeDefaultCanvasHeight(graph, nextW);
+        const canvasRect = containerRef.current?.getBoundingClientRect();
+        const nextH =
+          isFullscreen && canvasRect && canvasRect.height > 0
+            ? canvasRect.height
+            : computeDefaultCanvasHeight(graph, nextW);
         setTransform(computeDefaultGraphTransform(graph, nextW, nextH));
       }
     });
     observer.observe(rootEl);
     return () => observer.disconnect();
-  }, [graph]);
+  }, [graph, isFullscreen]);
 
   // Focus node/edge/zone when user clicks a finding in Audit panel or opens a ?focus= deep link
   useEffect(() => {
@@ -448,7 +626,7 @@ export function ChainGraphView({
     if (matchedNode) {
       setSelection({ kind: 'node', node: matchedNode });
       const el = containerRef.current;
-      if (el) {
+      if (el && !isFullscreen) {
         const rect = el.getBoundingClientRect();
         const nodeCenterY = transform.y + (matchedNode.y + matchedNode.height / 2) * transform.scale;
         if (
@@ -477,9 +655,13 @@ export function ChainGraphView({
     if (matchedZone) {
       setSelection({ kind: 'zone', zone: matchedZone.zone });
     }
-  }, [focusedTargetId, graph.nodes, graph.edges, graph.zones]);
+  }, [focusedTargetId, graph.nodes, graph.edges, graph.zones, isFullscreen]);
 
-  // Plain scroll scrolls the full page; trackpad/touchscreen pinch or Shift+Scroll zooms the graph!
+  // Wheel / Trackpad pinch + Touchscreen 1-finger pan & 2-finger midpoint pinch-zoom
+  const allowTouchSingleFingerPan = touchPanEnabled || isFullscreen;
+  const allowTouchSingleFingerPanRef = useRef(allowTouchSingleFingerPan);
+  allowTouchSingleFingerPanRef.current = allowTouchSingleFingerPan;
+
   useEffect(() => {
     const paneEl = graphPaneRef.current;
     const rootEl = rootWrapperRef.current;
@@ -556,26 +738,44 @@ export function ChainGraphView({
       e.preventDefault();
     };
 
-    // Touchscreen: 1 finger scrolls the page natively (`touch-action: pan-y`), 2 fingers pinch-zoom + pan
+    // Touchscreen: 2-finger pinch-zoom centered on touch midpoint + 1-finger 2D pan (preserving <5px taps)
     const onTouchStart = (e: TouchEvent) => {
       if (e.touches.length >= 2) {
         e.preventDefault();
+        setIsCameraAnimating(false);
         dragStartRef.current.moved = true;
-        const t0 = e.touches[0];
-        const t1 = e.touches[1];
+        touchPanRef.current = null;
+        const t0 = e.touches[0]!;
+        const t1 = e.touches[1]!;
         const dist = Math.max(1, Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY));
         const midX = (t0.clientX + t1.clientX) / 2;
         const midY = (t0.clientY + t1.clientY) / 2;
         pinchStateRef.current = { dist, midX, midY };
+        return;
+      }
+
+      if (e.touches.length === 1 && allowTouchSingleFingerPanRef.current) {
+        const t0 = e.touches[0]!;
+        dragStartRef.current.moved = false;
+        touchPanRef.current = {
+          touchId: typeof t0.identifier === 'number' ? t0.identifier : 0,
+          startClientX: t0.clientX,
+          startClientY: t0.clientY,
+          startX: transformRef.current.x,
+          startY: transformRef.current.y,
+        };
       }
     };
 
     const onTouchMove = (e: TouchEvent) => {
       if (e.touches.length >= 2) {
         e.preventDefault();
+        setIsCameraAnimating(false);
+        dragStartRef.current.moved = true;
+        touchPanRef.current = null;
         const rect = canvasEl.getBoundingClientRect();
-        const t0 = e.touches[0];
-        const t1 = e.touches[1];
+        const t0 = e.touches[0]!;
+        const t1 = e.touches[1]!;
         const newDist = Math.max(1, Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY));
         const newMidX = (t0.clientX + t1.clientX) / 2;
         const newMidY = (t0.clientY + t1.clientY) / 2;
@@ -602,6 +802,32 @@ export function ChainGraphView({
             y: focalY - (focalY - pannedY) * ratio,
           };
         });
+        return;
+      }
+
+      if (
+        e.touches.length === 1 &&
+        allowTouchSingleFingerPanRef.current &&
+        touchPanRef.current
+      ) {
+        const pan = touchPanRef.current;
+        const t =
+          Array.from(e.touches).find(
+            (item) => (typeof item.identifier === 'number' ? item.identifier : 0) === pan.touchId
+          ) ?? e.touches[0]!;
+        const dx = t.clientX - pan.startClientX;
+        const dy = t.clientY - pan.startClientY;
+        if (dragStartRef.current.moved || Math.hypot(dx, dy) > 5) {
+          e.preventDefault();
+          setIsCameraAnimating(false);
+          dragStartRef.current.moved = true;
+          hasUserZoomedRef.current = true;
+          setTransform((cur) => ({
+            ...cur,
+            x: pan.startX + dx,
+            y: pan.startY + dy,
+          }));
+        }
       }
     };
 
@@ -609,10 +835,24 @@ export function ChainGraphView({
       if (e.touches.length < 2) {
         pinchStateRef.current = null;
       }
-      if (e.touches.length === 0 && dragStartRef.current.moved) {
-        setTimeout(() => {
-          dragStartRef.current.moved = false;
-        }, 50);
+      if (e.touches.length === 1 && allowTouchSingleFingerPanRef.current) {
+        // Seamless 2 -> 1 finger handoff without snapping
+        const rem = e.touches[0]!;
+        touchPanRef.current = {
+          touchId: typeof rem.identifier === 'number' ? rem.identifier : 0,
+          startClientX: rem.clientX,
+          startClientY: rem.clientY,
+          startX: transformRef.current.x,
+          startY: transformRef.current.y,
+        };
+      }
+      if (e.touches.length === 0) {
+        touchPanRef.current = null;
+        if (dragStartRef.current.moved) {
+          setTimeout(() => {
+            dragStartRef.current.moved = false;
+          }, 50);
+        }
       }
     };
 
@@ -640,10 +880,10 @@ export function ChainGraphView({
   }, [zoomAroundPoint]);
 
   const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-    // Touch scrolling (1 finger) & pinch-zoom (2 fingers) are handled via `touch-action: pan-y` + TouchEvents
     if (e.pointerType === 'touch') return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
 
+    setIsCameraAnimating(false);
     setDragging(true);
     dragStartRef.current = {
       clientX: e.clientX,
@@ -675,7 +915,7 @@ export function ChainGraphView({
     setDragging(false);
   };
 
-  // Connected lineage highlight set when hovering or selecting a node/edge
+  // Transitive upstream + downstream cryptographic & alias verification lineage
   const activeFocusId =
     hoveredId ??
     (selection?.kind === 'node'
@@ -684,18 +924,24 @@ export function ChainGraphView({
         ? selection.edge.id
         : null);
 
-  const highlightedIds = useMemo(() => {
-    if (!activeFocusId) return null;
-    const set = new Set<string>([activeFocusId]);
-    for (const e of graph.edges) {
-      if (e.id === activeFocusId || e.fromId === activeFocusId || e.toId === activeFocusId) {
-        set.add(e.id);
-        set.add(e.fromId);
-        set.add(e.toId);
-      }
-    }
-    return set;
-  }, [activeFocusId, graph.edges]);
+  const lineage = useMemo(
+    () => (activeFocusId ? computeTrustLineage(graph, activeFocusId) : null),
+    [activeFocusId, graph]
+  );
+
+  const breadcrumbs = useMemo(
+    () => buildZoneBreadcrumbs(graph, snapshot),
+    [graph, snapshot]
+  );
+
+  const activeBreadcrumbZoneName = useMemo(() => {
+    if (selection?.kind === 'zone') return selection.zone.zoneName;
+    if (selection?.kind === 'node') return selection.node.zone;
+    const rect = containerRef.current?.getBoundingClientRect();
+    const w = rect && rect.width > 0 ? rect.width : wrapperWidth;
+    const h = rect && rect.height > 0 ? rect.height : canvasHeight;
+    return findActiveViewportZoneName(graph.zones, transform, w, h);
+  }, [selection, graph.zones, transform, wrapperWidth, canvasHeight]);
 
   const canNativeShare =
     typeof navigator !== 'undefined' && typeof navigator.share === 'function';
@@ -848,16 +1094,40 @@ export function ChainGraphView({
   return (
     <div
       ref={rootWrapperRef}
-      className="flex flex-col lg:flex-row lg:items-start gap-3 relative"
+      data-testid="chain-graph-root"
+      data-fullscreen={isFullscreen ? 'true' : 'false'}
+      className={
+        isFullscreen
+          ? 'fixed inset-0 z-50 bg-slate-100/98 dark:bg-[#050811]/98 p-2 sm:p-3 flex flex-col lg:flex-row lg:items-stretch gap-2.5 overflow-hidden'
+          : 'flex flex-col lg:flex-row lg:items-start gap-3 relative'
+      }
     >
-      {/* Main Interactive Graph Card — note: use `lg:flex-1` (NOT `flex-1` in mobile `flex-col`, which sets `flex-basis: 0%` vertically and collapses height!) */}
+      {/* Main Interactive Graph Card — note: use `lg:flex-1` inline (NOT `flex-1` in non-fullscreen mobile `flex-col`, which sets `flex-basis: 0%` vertically and collapses height!) */}
       <div
         ref={graphPaneRef}
-        className="w-full lg:w-auto lg:flex-1 lg:min-w-0 flex flex-col rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#090d16] overflow-hidden"
+        className={
+          isFullscreen
+            ? 'w-full flex-1 min-h-0 min-w-0 flex flex-col rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#090d16] overflow-hidden shadow-2xl'
+            : 'w-full lg:w-auto lg:flex-1 lg:min-w-0 flex flex-col rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#090d16] overflow-hidden'
+        }
       >
         {/* Dedicated Non-Overlapping Graph Controls Header Bar */}
-        <div className="px-2.5 sm:px-3 py-2 border-b border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-900/95 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div className="px-2.5 sm:px-3 py-2 border-b border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-900/95 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0">
           <div className="flex flex-wrap items-center gap-2">
+            {isFullscreen && (
+              <div
+                data-testid="fullscreen-domain-header"
+                className="inline-flex items-center gap-2 pr-2.5 border-r border-slate-200 dark:border-slate-800"
+              >
+                <StatusBadge status={snapshot.overallStatus} size="xs" />
+                <span className="font-mono font-bold text-slate-900 dark:text-slate-100">
+                  {snapshot.displayDomain === '.' ? '. (root)' : snapshot.displayDomain}
+                </span>
+                <span className="font-mono text-[11px] text-slate-500 hidden sm:inline">
+                  [{snapshot.queryTypes.join(', ')}]
+                </span>
+              </div>
+            )}
             <label className="inline-flex items-center gap-1.5 cursor-pointer select-none text-slate-700 dark:text-slate-300 pr-2 border-r border-slate-200 dark:border-slate-800">
               <input
                 type="checkbox"
@@ -890,7 +1160,10 @@ export function ChainGraphView({
             >
               <ZoomIn className="w-3.5 h-3.5" />
             </button>
-            <span className="font-mono text-[11px] text-slate-500 w-11 text-center">
+            <span
+              data-testid="graph-zoom-percent"
+              className="font-mono text-[11px] text-slate-500 w-11 text-center"
+            >
               {Math.round(transform.scale * 100)}%
             </span>
             <button
@@ -911,11 +1184,40 @@ export function ChainGraphView({
             </button>
             <button
               type="button"
+              data-testid="graph-fit-all-btn"
               onClick={fitEntireChain}
               className="p-1.5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 cursor-pointer"
               title="Fit entire chain in viewport"
             >
-              <Maximize2 className="w-3.5 h-3.5" />
+              <Scan className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              data-testid="graph-fullscreen-btn"
+              aria-pressed={isFullscreen}
+              onClick={() => setIsFullscreen((v) => !v)}
+              className={`inline-flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded font-medium cursor-pointer transition-colors ${
+                isFullscreen
+                  ? 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/35'
+                  : 'hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300'
+              }`}
+              title={
+                isFullscreen
+                  ? 'Exit Fullscreen / Theater mode (Esc or f)'
+                  : 'Expand Fullscreen / Theater mode (f)'
+              }
+            >
+              {isFullscreen ? (
+                <>
+                  <Minimize2 className="w-3.5 h-3.5" />
+                  <span>Exit (Esc)</span>
+                </>
+              ) : (
+                <>
+                  <Maximize2 className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Fullscreen</span>
+                </>
+              )}
             </button>
             <div className="h-4 w-px bg-slate-200 dark:bg-slate-800 mx-0.5" />
             <button
@@ -964,9 +1266,106 @@ export function ChainGraphView({
           </div>
         </div>
 
-        {/* Pan/Zoom SVG Surface with explicit un-collapsible pixel height */}
+        {/* Zone Breadcrumb Jump Bar + Active Trust-Path Spotlight Summary */}
+        {breadcrumbs.length > 0 && (
+          <div
+            data-testid="zone-breadcrumb-bar"
+            className="px-2.5 sm:px-3 py-1.5 border-b border-slate-200/80 dark:border-slate-800/80 bg-slate-100/75 dark:bg-slate-950/75 flex flex-wrap items-center justify-between gap-2 text-[11px] shrink-0"
+          >
+            <div className="flex items-center gap-1 overflow-x-auto max-w-full py-0.5">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500 mr-1 shrink-0">
+                Zones
+              </span>
+              {breadcrumbs.map((item, idx) => {
+                const isActive = activeBreadcrumbZoneName === item.zoneName;
+                const inSpotlight =
+                  lineage !== null && lineage.zoneNames.has(item.zoneName);
+                return (
+                  <div key={item.id} className="inline-flex items-center gap-1 shrink-0">
+                    {idx > 0 && (
+                      <span
+                        className={`font-mono text-[10px] select-none ${
+                          item.isCnameBranch
+                            ? 'text-violet-500 dark:text-violet-400 font-bold'
+                            : 'text-slate-400 dark:text-slate-600'
+                        }`}
+                        aria-hidden="true"
+                      >
+                        {item.isCnameBranch ? '⇢' : '→'}
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      data-testid="zone-breadcrumb-pill"
+                      data-zone-name={item.zoneName}
+                      data-active={isActive ? 'true' : 'false'}
+                      onClick={() => jumpToZone(item.zoneBox)}
+                      className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 font-mono text-[11px] transition-all cursor-pointer border ${
+                        isActive
+                          ? 'bg-cyan-500/15 text-cyan-800 dark:text-cyan-200 border-cyan-500/50 font-semibold shadow-xs'
+                          : inSpotlight
+                            ? 'bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 border-slate-300 dark:border-slate-700'
+                            : lineage !== null
+                              ? 'bg-white/60 dark:bg-slate-900/40 text-slate-500 dark:text-slate-400 border-slate-200/70 dark:border-slate-800/70 opacity-65 hover:opacity-100'
+                              : 'bg-white dark:bg-slate-900/80 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:border-cyan-500/50'
+                      }`}
+                      title={`Pan & zoom to frame zone ${item.label} (${STATUS_META[item.status].label})`}
+                    >
+                      <span
+                        className="w-2 h-2 rounded-full shrink-0"
+                        style={{ backgroundColor: STATUS_META[item.status].svgStroke }}
+                      />
+                      <span>{item.label}</span>
+                      {item.isCnameBranch && (
+                        <span className="rounded bg-violet-500/15 text-violet-700 dark:text-violet-300 px-1 py-0 text-[9px] font-semibold">
+                          CNAME
+                        </span>
+                      )}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            {lineage && (
+              <div
+                data-testid="trust-spotlight-badge"
+                className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 font-mono text-[10px] border shrink-0 max-w-full ${
+                  lineage.hasBogusHop
+                    ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/30'
+                    : 'bg-cyan-500/10 text-cyan-800 dark:text-cyan-200 border-cyan-500/30'
+                }`}
+              >
+                <Sparkles className="w-3 h-3 shrink-0 text-cyan-500" />
+                <span className="truncate">
+                  Spotlight: <strong>{lineage.focusLabel}</strong> · {lineage.zoneNames.size}{' '}
+                  {lineage.zoneNames.size === 1 ? 'zone' : 'zones'} · {lineage.hopCount}{' '}
+                  {lineage.hopCount === 1 ? 'hop' : 'hops'}
+                  {lineage.trustAnchorLabels.length > 0
+                    ? ` → ${lineage.trustAnchorLabels[0]}`
+                    : ''}
+                </span>
+                {(selection?.kind === 'node' || selection?.kind === 'edge') && (
+                  <button
+                    type="button"
+                    data-testid="clear-spotlight-btn"
+                    onClick={() => selectAndNotify(null)}
+                    className="rounded-full p-0.5 hover:bg-slate-200/70 dark:hover:bg-slate-800 cursor-pointer"
+                    aria-label="Clear trust-path spotlight"
+                    title="Clear trust-path spotlight"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Pan/Zoom SVG Surface */}
         <div
           ref={containerRef}
+          data-testid="chain-graph-canvas"
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerEnd}
@@ -974,14 +1373,22 @@ export function ChainGraphView({
           onPointerLeave={(e) => {
             if (e.pointerType === 'mouse') handlePointerEnd(e);
           }}
-          style={{
-            height: `${canvasHeight}px`,
-            minHeight: `${canvasHeight}px`,
-            touchAction: 'pan-y',
-          }}
-          className={`w-full shrink-0 relative overflow-hidden graph-canvas-bg select-none touch-pan-y ${
-            dragging ? 'cursor-grabbing' : 'cursor-grab'
-          }`}
+          style={
+            isFullscreen
+              ? {
+                  touchAction: 'none',
+                }
+              : {
+                  height: `${canvasHeight}px`,
+                  minHeight: `${canvasHeight}px`,
+                  touchAction: allowTouchSingleFingerPan ? 'none' : 'pan-y',
+                }
+          }
+          className={`w-full ${
+            isFullscreen ? 'flex-1 min-h-[240px]' : 'shrink-0'
+          } relative overflow-hidden graph-canvas-bg select-none ${
+            allowTouchSingleFingerPan ? 'touch-none' : 'touch-pan-y'
+          } ${dragging ? 'cursor-grabbing' : 'cursor-grab'}`}
         >
           {/* Interactive Legend Overlay */}
           {showLegend && (
@@ -1021,8 +1428,8 @@ export function ChainGraphView({
                   </div>
                 </div>
                 <div className="text-[11px] text-slate-500 pt-1">
-                  Double-ring capsules denote SEP / KSK / Trust Anchor keys. Click any zone, node, or
-                  edge to inspect raw crypto &amp; records.
+                  Double-ring capsules denote SEP / KSK / Trust Anchor keys. Hover or click any
+                  node or edge to spotlight its full cryptographic lineage up to the Trust Anchor.
                 </div>
               </div>
             </div>
@@ -1031,8 +1438,13 @@ export function ChainGraphView({
           <svg
             ref={svgRef}
             width="100%"
-            height={canvasHeight}
+            height={isFullscreen ? '100%' : canvasHeight}
             xmlns="http://www.w3.org/2000/svg"
+            onClick={() => {
+              if (!dragStartRef.current.moved && selection !== null) {
+                selectAndNotify(null);
+              }
+            }}
             style={{ display: 'block', fontFamily: 'Inter, system-ui, sans-serif' }}
           >
             <defs>
@@ -1068,22 +1480,36 @@ export function ChainGraphView({
             <g
               data-pan-zoom-root="true"
               transform={`translate(${transform.x}, ${transform.y}) scale(${transform.scale})`}
+              style={
+                isCameraAnimating
+                  ? { transition: 'transform 220ms cubic-bezier(0.22, 1, 0.36, 1)' }
+                  : undefined
+              }
             >
               {/* LAYER 1: Zone Containers */}
               {graph.zones.map((zb) => {
                 const stMeta = STATUS_META[zb.zone.status];
                 const isSelectedZone =
                   selection?.kind === 'zone' && selection.zone.zoneName === zb.zone.zoneName;
+                const zoneInLineage =
+                  lineage === null || lineage.zoneNames.has(zb.zone.zoneName);
+                const zoneDimmed = lineage !== null && !zoneInLineage && !isSelectedZone;
                 return (
                   <g
                     key={zb.id}
+                    data-testid="graph-zone-box"
+                    data-zone-name={zb.zone.zoneName}
+                    data-in-lineage={
+                      lineage !== null ? (zoneInLineage ? 'true' : 'false') : undefined
+                    }
+                    opacity={zoneDimmed ? 0.38 : 1}
                     onClick={(e) => {
                       e.stopPropagation();
                       if (!dragStartRef.current.moved) {
                         selectAndNotify({ kind: 'zone', zone: zb.zone });
                       }
                     }}
-                    style={{ cursor: 'pointer' }}
+                    style={{ cursor: 'pointer', transition: 'opacity 140ms ease' }}
                   >
                     <rect
                       x={zb.x}
@@ -1093,8 +1519,8 @@ export function ChainGraphView({
                       rx={16}
                       fill={isDark ? 'rgba(15, 23, 42, 0.82)' : 'rgba(255, 255, 255, 0.92)'}
                       stroke={isSelectedZone ? '#06b6d4' : stMeta.svgStroke}
-                      strokeWidth={isSelectedZone ? 2.4 : 1.5}
-                      strokeOpacity={isSelectedZone ? 1 : 0.65}
+                      strokeWidth={isSelectedZone ? 2.4 : lineage && zoneInLineage ? 1.9 : 1.5}
+                      strokeOpacity={isSelectedZone ? 1 : lineage && zoneInLineage ? 0.85 : 0.65}
                     />
                     {/* Zone Header Bar */}
                     <path
@@ -1148,19 +1574,26 @@ export function ChainGraphView({
               {graph.edges.map((edge) => {
                 const { d, labelX, labelY } = buildEdgePath(edge);
                 const stroke = getEdgeColor(edge);
-                const dimmed = highlightedIds !== null && !highlightedIds.has(edge.id);
+                const inLineage = lineage !== null && lineage.edgeIds.has(edge.id);
+                const dimmed = lineage !== null && !inLineage;
                 const isSelected = selection?.kind === 'edge' && selection.edge.id === edge.id;
                 const showInlineTag =
                   edge.kind === 'ds' ||
                   edge.kind === 'cname' ||
                   edge.kind === 'insecure-delegation' ||
                   isSelected ||
-                  hoveredId === edge.id;
+                  hoveredId === edge.id ||
+                  inLineage;
 
                 return (
                   <g
                     key={edge.id}
-                    opacity={dimmed ? 0.2 : 1}
+                    data-testid="graph-edge"
+                    data-edge-id={edge.id}
+                    data-in-lineage={
+                      lineage !== null ? (inLineage ? 'true' : 'false') : undefined
+                    }
+                    opacity={dimmed ? 0.14 : 1}
                     onMouseEnter={() => setHoveredId(edge.id)}
                     onMouseLeave={() => setHoveredId(null)}
                     onClick={(e) => {
@@ -1173,6 +1606,16 @@ export function ChainGraphView({
                   >
                     {/* Wide invisible click target */}
                     <path d={d} fill="none" stroke="transparent" strokeWidth={14} />
+                    {/* Spotlight outer glow along active cryptographic lineage */}
+                    {inLineage && (
+                      <path
+                        d={d}
+                        fill="none"
+                        stroke={stroke}
+                        strokeWidth={6.5}
+                        strokeOpacity={0.18}
+                      />
+                    )}
                     <path
                       d={d}
                       fill="none"
@@ -1180,9 +1623,11 @@ export function ChainGraphView({
                       strokeWidth={
                         isSelected
                           ? 3.2
-                          : edge.kind === 'ds' || edge.kind === 'cname'
-                            ? 2.4
-                            : 1.75
+                          : inLineage
+                            ? 2.65
+                            : edge.kind === 'ds' || edge.kind === 'cname'
+                              ? 2.4
+                              : 1.75
                       }
                       strokeDasharray={edge.dashed ? '5 4' : undefined}
                       markerEnd={`url(#${getMarkerId(edge)})`}
@@ -1197,7 +1642,7 @@ export function ChainGraphView({
                           rx={9}
                           fill={isDark ? '#0f172a' : '#ffffff'}
                           stroke={stroke}
-                          strokeWidth={1.1}
+                          strokeWidth={inLineage ? 1.4 : 1.1}
                         />
                         <text
                           x={0}
@@ -1222,12 +1667,18 @@ export function ChainGraphView({
                 const isDnskey = node.kind === 'dnskey';
                 const rx = isDnskey ? node.height / 2 : 11;
                 const isSelected = selection?.kind === 'node' && selection.node.id === node.id;
-                const dimmed = highlightedIds !== null && !highlightedIds.has(node.id);
+                const inLineage = lineage !== null && lineage.nodeIds.has(node.id);
+                const dimmed = lineage !== null && !inLineage;
 
                 return (
                   <g
                     key={node.id}
-                    opacity={dimmed ? 0.3 : 1}
+                    data-testid="graph-node"
+                    data-node-id={node.id}
+                    data-in-lineage={
+                      lineage !== null ? (inLineage ? 'true' : 'false') : undefined
+                    }
+                    opacity={dimmed ? 0.22 : 1}
                     onMouseEnter={() => setHoveredId(node.id)}
                     onMouseLeave={() => setHoveredId(null)}
                     onClick={(e) => {
@@ -1238,6 +1689,20 @@ export function ChainGraphView({
                     }}
                     style={{ cursor: 'pointer', transition: 'opacity 140ms ease' }}
                   >
+                    {/* Spotlight halo around nodes in active verification lineage */}
+                    {inLineage && (
+                      <rect
+                        x={node.x - 2.5}
+                        y={node.y - 2.5}
+                        width={node.width + 5}
+                        height={node.height + 5}
+                        rx={rx + 2.5}
+                        fill="none"
+                        stroke={isSelected ? '#06b6d4' : stMeta.svgStroke}
+                        strokeOpacity={isSelected ? 0.45 : 0.28}
+                        strokeWidth={2.5}
+                      />
+                    )}
                     <rect
                       x={node.x}
                       y={node.y}
@@ -1246,7 +1711,7 @@ export function ChainGraphView({
                       rx={rx}
                       fill={isDark ? stMeta.svgFillDark : stMeta.svgFillLight}
                       stroke={isSelected ? '#06b6d4' : stMeta.svgStroke}
-                      strokeWidth={isSelected ? 2.6 : 1.75}
+                      strokeWidth={isSelected ? 2.6 : inLineage ? 2.15 : 1.75}
                       strokeDasharray={node.dashed ? '5 3' : undefined}
                     />
 
@@ -1334,8 +1799,27 @@ export function ChainGraphView({
         </div>
 
         {/* Dedicated Non-Overlapping Hint Footer */}
-        <div className="px-3 py-1.5 border-t border-slate-200/80 dark:border-slate-800/80 bg-white/85 dark:bg-slate-950/85 text-[11px] text-slate-500 dark:text-slate-400">
-          Pinch or Shift + Scroll to zoom · Drag to pan · Tap or click any zone, DNSKEY, RRset, or RRSIG edge to inspect
+        <div className="px-3 py-1.5 border-t border-slate-200/80 dark:border-slate-800/80 bg-white/85 dark:bg-slate-950/85 text-[11px] text-slate-500 dark:text-slate-400 flex flex-wrap items-center justify-between gap-2 shrink-0">
+          <span>
+            Pinch or Shift + Scroll to zoom · Drag to pan · Press{' '}
+            <kbd className="rounded border border-slate-300 dark:border-slate-700 bg-slate-100 dark:bg-slate-900 px-1 py-0 font-mono text-[10px]">
+              f
+            </kbd>{' '}
+            for Fullscreen · Click any node or edge to spotlight its trust chain
+          </span>
+          {!isFullscreen && (
+            <button
+              type="button"
+              data-testid="touch-pan-mode-btn"
+              aria-pressed={touchPanEnabled}
+              onClick={() => setTouchPanEnabled((v) => !v)}
+              className="sm:hidden inline-flex items-center gap-1 rounded border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-900 px-2 py-0.5 font-mono text-[10px] text-slate-600 dark:text-slate-300 cursor-pointer"
+              title="Toggle 1-finger touch drag between 2D Graph Pan and vertical Page Scroll"
+            >
+              <Hand className="w-3 h-3 text-cyan-500" />
+              <span>{touchPanEnabled ? 'Touch: Pan' : 'Touch: Scroll'}</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -1347,6 +1831,7 @@ export function ChainGraphView({
           onSelectQuery={(qid, mode) => onSelectDockedWireQuery?.(qid, mode)}
           onOpenFullWireTab={(qid, mode) => onOpenFullWireTab?.(qid, mode)}
           onClose={() => onCloseDockedWireDrawer?.()}
+          isFullscreen={isFullscreen}
           graphRailContext={
             selection
               ? {
@@ -1371,6 +1856,7 @@ export function ChainGraphView({
           validatedAt={snapshot.validatedAt}
           queries={snapshot.queries}
           onInspectWireQuery={onInspectWireQuery}
+          isFullscreen={isFullscreen}
           dockedWireRail={
             dockedWireQuery
               ? {

@@ -202,6 +202,7 @@ export function GraphInspector({
   onInspectWireQuery,
   onClose,
   dockedWireRail = null,
+  isFullscreen = false,
 }: {
   selection: GraphSelection | null;
   dohEndpoint?: string;
@@ -214,6 +215,7 @@ export function GraphInspector({
     wireSize?: number;
     onSwitchToWire: () => void;
   } | null;
+  isFullscreen?: boolean;
 }) {
   const [cliTool, setCliTool] = useState<'dig' | 'delv' | 'kdig'>('dig');
   if (!selection) return null;
@@ -234,10 +236,14 @@ export function GraphInspector({
   const widthCls = dockedWireRail
     ? 'w-full lg:w-[390px] xl:w-[500px] 2xl:w-[556px]'
     : 'w-full lg:w-[390px]';
+  const layoutCls = isFullscreen
+    ? 'z-20 max-h-[42dvh] lg:max-h-none lg:h-full'
+    : 'sticky bottom-[max(0.75rem,env(safe-area-inset-bottom,0px))] lg:top-44 lg:bottom-auto z-20 max-h-[46dvh] lg:max-h-[calc(100dvh-12rem)]';
 
   return (
     <aside
-      className={`safe-area-bottom ${widthCls} shrink-0 rounded-xl border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md shadow-lg flex flex-col sticky bottom-[max(0.75rem,env(safe-area-inset-bottom,0px))] lg:top-44 lg:bottom-auto z-20 max-h-[46dvh] lg:max-h-[calc(100dvh-12rem)] overflow-hidden`}
+      data-testid="graph-inspector-drawer"
+      className={`safe-area-bottom ${widthCls} shrink-0 rounded-xl border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md shadow-lg flex flex-col ${layoutCls} overflow-hidden`}
     >
       {dockedWireRail && (
         <div

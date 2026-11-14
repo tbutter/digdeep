@@ -40,7 +40,12 @@ import {
   WireSideDrawer,
 } from '../../components/WireSideDrawer';
 import { isHealthyIntermediateParentZone, ZonesPanel } from '../../components/ZonesPanel';
-import { buildChainGraph } from '../../graph/layout';
+import {
+  buildChainGraph,
+  buildZoneBreadcrumbs,
+  computeTrustLineage,
+  computeZoneFocusTransform,
+} from '../../graph/layout';
 import { DEFAULT_USER_SETTINGS, loadSnapshots, saveSnapshot } from '../../storage/historyStore';
 import {
   buildDeepLinkSearch,
@@ -299,7 +304,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexCss).toContain('env(safe-area-inset-bottom');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v45');
+    expect(swCode).toContain('digdeep-shell-v46');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -5055,7 +5060,662 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     },
     30_000
   );
+
+  it(
+    'spotlights transitive DNSSEC + cross-zone CNAME trust lineage, frames zones via breadcrumbs, toggles Fullscreen (f / Esc), and handles 1-finger pan + 2-finger midpoint pinch-zoom (#40)',
+    async () => {
+      const snap = chainGraphSpotlightFixture();
+      const filters = { showStandbyKeys: true, showSoaAndNs: true };
+      const graph = buildChainGraph(snap, filters);
+
+      // 1. Verify buildZoneBreadcrumbs marks primary delegation vs cross-zone CNAME branch
+      const crumbs = buildZoneBreadcrumbs(graph, snap);
+      expect(crumbs.map((c) => ({ zone: c.zoneName, cname: c.isCnameBranch }))).toEqual([
+        { zone: '.', cname: false },
+        { zone: 'org.', cname: false },
+        { zone: 'iana.org.', cname: false },
+        { zone: 'icann.org.', cname: true },
+      ]);
+
+      // 2. Verify computeTrustLineage on leaf cross-zone CNAME target (vip.icann.org A)
+      const leafLineage = computeTrustLineage(graph, 'rr-icann-a');
+      expect(leafLineage).not.toBeNull();
+      expect(leafLineage!.trustAnchorLabels).toEqual(['Root KSK #20326']);
+      expect(Array.from(leafLineage!.zoneNames).sort()).toEqual([
+        '.',
+        'iana.org.',
+        'icann.org.',
+        'org.',
+      ]);
+      // Active lineage includes both icann.org signing chain AND incoming www.iana.org CNAME chain up to Root KSK #20326
+      expect(leafLineage!.nodeIds.has('rr-icann-a')).toBe(true);
+      expect(leafLineage!.nodeIds.has('key-icann-40001')).toBe(true);
+      expect(leafLineage!.nodeIds.has('rr-ds-icann')).toBe(true);
+      expect(leafLineage!.nodeIds.has('rr-iana-cname')).toBe(true);
+      expect(leafLineage!.nodeIds.has('key-iana-30001')).toBe(true);
+      expect(leafLineage!.nodeIds.has('rr-ds-iana')).toBe(true);
+      expect(leafLineage!.nodeIds.has('key-org-11111')).toBe(true);
+      expect(leafLineage!.nodeIds.has('key-org-26974')).toBe(true);
+      expect(leafLineage!.nodeIds.has('rr-ds-org')).toBe(true);
+      expect(leafLineage!.nodeIds.has('key-root-61050')).toBe(true);
+      expect(leafLineage!.nodeIds.has('key-root-20326')).toBe(true);
+      // Standby keys and sibling SOA RRsets are excluded (no sibling leakage!)
+      expect(leafLineage!.nodeIds.has('key-root-38696')).toBe(false);
+      expect(leafLineage!.nodeIds.has('rr-org-soa')).toBe(false);
+      expect(leafLineage!.nodeIds.has('rr-icann-soa')).toBe(false);
+
+      // Focusing an intermediate key (iana.org CSK #30001) illuminates upstream to Root AND downstream through CNAME to vip.icann.org A
+      const midLineage = computeTrustLineage(graph, 'key-iana-30001');
+      expect(midLineage).not.toBeNull();
+      expect(midLineage!.nodeIds.has('key-root-20326')).toBe(true);
+      expect(midLineage!.nodeIds.has('rr-iana-cname')).toBe(true);
+      expect(midLineage!.nodeIds.has('rr-icann-a')).toBe(true);
+      expect(midLineage!.nodeIds.has('key-icann-40001')).toBe(false);
+
+      // 3. Interactive JSDOM tests on ChainGraphView
+      const { JSDOM } = (await import('jsdom' as string)) as {
+        JSDOM: new (
+          markup?: string,
+          opts?: { url?: string }
+        ) => { window: Window & typeof globalThis };
+      };
+      const dom = new JSDOM(
+        '<!doctype html><html><body><input id="outside-input" type="text" /><div id="root"></div></body></html>',
+        { url: 'https://digdeep.example/?name=www.iana.org&types=A' }
+      );
+
+      const prevWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+      const prevDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+      Object.defineProperty(globalThis, 'window', { value: dom.window, configurable: true });
+      Object.defineProperty(globalThis, 'document', {
+        value: dom.window.document,
+        configurable: true,
+      });
+      (dom.window as unknown as { matchMedia: () => { matches: boolean } }).matchMedia = () => ({
+        matches: false,
+      });
+      (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
+        true;
+
+      const parseTransformAttr = (attr: string | null) => {
+        const m = /translate\(([-\d.]+),\s*([-\d.]+)\)\s*scale\(([-\d.]+)\)/.exec(attr ?? '');
+        if (!m) throw new Error(`Unexpected transform attr: ${attr}`);
+        return { x: Number(m[1]), y: Number(m[2]), scale: Number(m[3]) };
+      };
+
+      try {
+        const { act } = await import('react');
+        const { createRoot } = await import('react-dom/client');
+        const container = dom.window.document.getElementById('root')!;
+        const root = createRoot(container);
+
+        await act(async () => {
+          root.render(
+            <ChainGraphView
+              snapshot={snap}
+              theme="dark"
+              filters={filters}
+              onChangeFilters={() => {}}
+            />
+          );
+        });
+
+        const canvasEl = container.querySelector(
+          '[data-testid="chain-graph-canvas"]'
+        ) as HTMLDivElement;
+        expect(canvasEl).toBeTruthy();
+        canvasEl.getBoundingClientRect = () =>
+          ({
+            left: 0,
+            top: 100,
+            right: 1200,
+            bottom: 740,
+            width: 1200,
+            height: 640,
+            x: 0,
+            y: 100,
+            toJSON: () => ({}),
+          }) as DOMRect;
+
+        // Click leaf node -> spotlights lineage & dims standby + SOA nodes
+        const leafNodeEl = container.querySelector(
+          '[data-testid="graph-node"][data-node-id="rr-icann-a"]'
+        ) as SVGGElement;
+        const standbyNodeEl = container.querySelector(
+          '[data-testid="graph-node"][data-node-id="key-root-38696"]'
+        ) as SVGGElement;
+        const rootAnchorEl = container.querySelector(
+          '[data-testid="graph-node"][data-node-id="key-root-20326"]'
+        ) as SVGGElement;
+        expect(leafNodeEl).toBeTruthy();
+        expect(standbyNodeEl).toBeTruthy();
+        expect(rootAnchorEl).toBeTruthy();
+
+        await act(async () => {
+          leafNodeEl.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+        });
+
+        const spotlightBadge = container.querySelector(
+          '[data-testid="trust-spotlight-badge"]'
+        ) as HTMLElement;
+        expect(spotlightBadge).toBeTruthy();
+        expect(spotlightBadge.textContent).toContain('4 zones');
+        expect(spotlightBadge.textContent).toContain('Root KSK #20326');
+        expect(rootAnchorEl.getAttribute('data-in-lineage')).toBe('true');
+        expect(rootAnchorEl.getAttribute('opacity')).toBe('1');
+        expect(standbyNodeEl.getAttribute('data-in-lineage')).toBe('false');
+        expect(standbyNodeEl.getAttribute('opacity')).toBe('0.22');
+
+        // Clear spotlight button restores full graph opacity
+        const clearSpotlightBtn = container.querySelector(
+          '[data-testid="clear-spotlight-btn"]'
+        ) as HTMLButtonElement;
+        expect(clearSpotlightBtn).toBeTruthy();
+        await act(async () => {
+          clearSpotlightBtn.click();
+        });
+        expect(container.querySelector('[data-testid="trust-spotlight-badge"]')).toBeNull();
+        expect(standbyNodeEl.getAttribute('opacity')).toBe('1');
+
+        // Click Zone Breadcrumb pill for icann.org. -> frames zoneBox & opens Zone Inspector
+        const icannCrumb = container.querySelector(
+          '[data-testid="zone-breadcrumb-pill"][data-zone-name="icann.org."]'
+        ) as HTMLButtonElement;
+        expect(icannCrumb).toBeTruthy();
+        expect(icannCrumb.textContent).toContain('CNAME');
+
+        await act(async () => {
+          icannCrumb.click();
+        });
+
+        const panZoomRoot = container.querySelector('[data-pan-zoom-root="true"]')!;
+        const icannBox = graph.zones.find((z) => z.zone.zoneName === 'icann.org.')!;
+        const expectedVisibleH = Math.min(
+          640,
+          Math.max(320, dom.window.innerHeight - 100 - 24)
+        );
+        const expectedZoneTransform = computeZoneFocusTransform(icannBox, 1200, expectedVisibleH);
+        const afterJump = parseTransformAttr(panZoomRoot.getAttribute('transform'));
+        expect(afterJump.x).toBe(expectedZoneTransform.x);
+        expect(afterJump.y).toBe(expectedZoneTransform.y);
+        expect(afterJump.scale).toBeCloseTo(expectedZoneTransform.scale, 4);
+        expect(container.textContent).toContain('Zone: icann.org.');
+
+        // Keyboard 'f' toggles Fullscreen / Theater mode; typing 'f' inside an input does NOT toggle; Escape exits while keeping selection
+        const graphRoot = container.querySelector(
+          '[data-testid="chain-graph-root"]'
+        ) as HTMLDivElement;
+        expect(graphRoot.getAttribute('data-fullscreen')).toBe('false');
+
+        await act(async () => {
+          dom.window.dispatchEvent(
+            new dom.window.KeyboardEvent('keydown', { key: 'f', bubbles: true, cancelable: true })
+          );
+        });
+        expect(graphRoot.getAttribute('data-fullscreen')).toBe('true');
+        expect(dom.window.document.body.style.overflow).toBe('hidden');
+        expect(container.querySelector('[data-testid="fullscreen-domain-header"]')).toBeTruthy();
+
+        const outsideInput = dom.window.document.getElementById(
+          'outside-input'
+        ) as HTMLInputElement;
+        outsideInput.focus();
+        await act(async () => {
+          outsideInput.dispatchEvent(
+            new dom.window.KeyboardEvent('keydown', { key: 'f', bubbles: true, cancelable: true })
+          );
+        });
+        expect(graphRoot.getAttribute('data-fullscreen')).toBe('true');
+        outsideInput.blur();
+
+        await act(async () => {
+          dom.window.dispatchEvent(
+            new dom.window.KeyboardEvent('keydown', {
+              key: 'Escape',
+              bubbles: true,
+              cancelable: true,
+            })
+          );
+        });
+        expect(graphRoot.getAttribute('data-fullscreen')).toBe('false');
+        expect(dom.window.document.body.style.overflow).toBe('');
+        expect(container.textContent).toContain('Zone: icann.org.');
+
+        // 1-Finger Touch Pan translates (x, y) smoothly
+        const beforePan = parseTransformAttr(panZoomRoot.getAttribute('transform'));
+        const makeTouchEvent = (
+          type: string,
+          touches: Array<{ identifier: number; clientX: number; clientY: number }>
+        ) => {
+          const ev = new dom.window.Event(type, { bubbles: true, cancelable: true });
+          Object.defineProperty(ev, 'touches', { value: touches });
+          return ev;
+        };
+
+        await act(async () => {
+          canvasEl.dispatchEvent(
+            makeTouchEvent('touchstart', [{ identifier: 1, clientX: 200, clientY: 300 }])
+          );
+          canvasEl.dispatchEvent(
+            makeTouchEvent('touchmove', [{ identifier: 1, clientX: 265, clientY: 260 }])
+          );
+          canvasEl.dispatchEvent(makeTouchEvent('touchend', []));
+        });
+
+        const afterPan = parseTransformAttr(panZoomRoot.getAttribute('transform'));
+        expect(afterPan.x).toBe(beforePan.x + 65);
+        expect(afterPan.y).toBe(beforePan.y - 40);
+        expect(afterPan.scale).toBeCloseTo(beforePan.scale, 5);
+
+        // 2-Finger Pinch-Zoom centered on touch midpoint (clientX=300, clientY=350 -> canvas focal=(300, 250))
+        const focalCanvasX = 300;
+        const focalCanvasY = 250; // clientY 350 - rect.top 100
+        const graphCoordAtMidBeforeX = (focalCanvasX - afterPan.x) / afterPan.scale;
+        const graphCoordAtMidBeforeY = (focalCanvasY - afterPan.y) / afterPan.scale;
+
+        await act(async () => {
+          canvasEl.dispatchEvent(
+            makeTouchEvent('touchstart', [
+              { identifier: 1, clientX: 200, clientY: 350 },
+              { identifier: 2, clientX: 400, clientY: 350 },
+            ])
+          );
+          canvasEl.dispatchEvent(
+            makeTouchEvent('touchmove', [
+              { identifier: 1, clientX: 150, clientY: 350 },
+              { identifier: 2, clientX: 450, clientY: 350 },
+            ])
+          );
+          canvasEl.dispatchEvent(makeTouchEvent('touchend', []));
+        });
+
+        const afterPinch = parseTransformAttr(panZoomRoot.getAttribute('transform'));
+        expect(afterPinch.scale).toBeCloseTo(afterPan.scale * 1.5, 4);
+        const graphCoordAtMidAfterX = (focalCanvasX - afterPinch.x) / afterPinch.scale;
+        const graphCoordAtMidAfterY = (focalCanvasY - afterPinch.y) / afterPinch.scale;
+        expect(graphCoordAtMidAfterX).toBeCloseTo(graphCoordAtMidBeforeX, 3);
+        expect(graphCoordAtMidAfterY).toBeCloseTo(graphCoordAtMidBeforeY, 3);
+
+        await act(async () => {
+          root.unmount();
+        });
+      } finally {
+        if (prevWindow) Object.defineProperty(globalThis, 'window', prevWindow);
+        if (prevDocument) Object.defineProperty(globalThis, 'document', prevDocument);
+      }
+    }
+  );
 });
+
+function chainGraphSpotlightFixture(): AnalysisSnapshot {
+  const makeRrsig = (
+    id: string,
+    signerName: string,
+    keyTag: number,
+    typeCovered: number,
+    typeCoveredName: string
+  ) => ({
+    id,
+    rrsig: {
+      kind: 'RRSIG' as const,
+      typeCovered,
+      typeCoveredName,
+      algorithm: 13,
+      labels: signerName === '.' ? 0 : signerName.split('.').filter(Boolean).length,
+      originalTtl: 3600,
+      expiration: 1893456000,
+      inception: 1700000000,
+      keyTag,
+      signerName,
+      signatureBase64: 'AA==',
+      signedHeaderBase64: 'AA==',
+    },
+    rrsigTtl: 3600,
+    signerKeyTag: keyTag,
+    signerFound: true,
+    cryptoValid: true,
+    timeValid: true,
+    notYetValid: false,
+    expired: false,
+    remainingSeconds: 864000,
+    wildcardSynthesized: false,
+    ttlMismatch: false,
+    status: 'secure' as const,
+    reason: 'Verified',
+  });
+
+  const makeKey = (
+    id: string,
+    zone: string,
+    keyTag: number,
+    role: 'trust-anchor' | 'ksk' | 'zsk' | 'csk' | 'standby',
+    isSep: boolean
+  ) => ({
+    id,
+    zone,
+    keyTag,
+    flags: isSep ? 257 : 256,
+    algorithm: 13,
+    protocol: 3,
+    keySizeInfo: 'ECDSA P-256',
+    publicKeyBase64: 'AA==',
+    isSep,
+    isZoneKey: true,
+    isRevoked: false,
+    role,
+    signsTypes: role === 'standby' ? [] : ['DNSKEY'],
+    matchedByParentDs: isSep && role !== 'standby',
+    status: 'secure' as const,
+    statusReason: 'Valid key',
+  });
+
+  const makeRecord = (name: string, type: number, typeName: string, rdataText: string) => ({
+    name,
+    type,
+    typeName,
+    rrclass: 1,
+    ttl: 300,
+    rdataBase64: '',
+    canonicalRdataBase64: '',
+    rdataText,
+    parsed: { kind: 'GENERIC' as const, target: rdataText },
+    section: 'answer' as const,
+  });
+
+  return {
+    id: 'snap-chain-spotlight-40',
+    version: 18,
+    targetName: 'www.iana.org.',
+    displayDomain: 'www.iana.org',
+    queryTypes: ['A'],
+    dohEndpoint: 'https://1.1.1.1/dns-query',
+    capturedAt: 1700000000000,
+    validatedAt: 1700000000000,
+    durationMs: 38,
+    overallStatus: 'secure',
+    overallSummary: 'Signed cross-zone CNAME chain verified.',
+    zones: [
+      {
+        zoneName: '.',
+        parentZone: null,
+        depth: 0,
+        status: 'secure',
+        statusReason: 'Anchored at IANA Root KSK',
+        nsecMode: 'NSEC',
+        dnskeys: [
+          makeKey('key-root-20326', '.', 20326, 'trust-anchor', true),
+          makeKey('key-root-38696', '.', 38696, 'standby', true),
+          makeKey('key-root-61050', '.', 61050, 'zsk', false),
+        ],
+        dsVerifications: [],
+        trustAnchorMatches: [
+          {
+            anchorId: 'root-20326',
+            label: 'IANA Root KSK-2017',
+            keyTag: 20326,
+            matched: true,
+            expectedDigestHex: 'E06D',
+          },
+        ],
+        rrsets: [
+          {
+            id: 'rr-root-dnskey',
+            zone: '.',
+            name: '.',
+            type: 48,
+            typeName: 'DNSKEY',
+            ttl: 86400,
+            section: 'answer',
+            records: [makeRecord('.', 48, 'DNSKEY', '257 3 8 ...')],
+            rrsigs: [makeRrsig('sig-root-dnskey', '.', 20326, 48, 'DNSKEY')],
+            isQueryTarget: false,
+            status: 'secure',
+            statusReason: 'Signed by #20326',
+          },
+          {
+            id: 'rr-ds-org',
+            zone: '.',
+            name: 'org.',
+            type: 43,
+            typeName: 'DS',
+            ttl: 86400,
+            section: 'authority',
+            records: [makeRecord('org.', 43, 'DS', '26974 8 2 ABCD')],
+            rrsigs: [makeRrsig('sig-ds-org', '.', 61050, 43, 'DS')],
+            isQueryTarget: false,
+            status: 'secure',
+            statusReason: 'Signed by #61050',
+          },
+        ],
+        negativeNodes: [],
+        nameservers: [],
+      },
+      {
+        zoneName: 'org.',
+        parentZone: '.',
+        depth: 1,
+        status: 'secure',
+        statusReason: 'Signed',
+        nsecMode: 'NSEC3',
+        parentDsRrsetId: 'rr-ds-org',
+        dnskeys: [
+          makeKey('key-org-26974', 'org.', 26974, 'ksk', true),
+          makeKey('key-org-11111', 'org.', 11111, 'zsk', false),
+        ],
+        dsVerifications: [
+          {
+            id: 'ds-org.-26974',
+            ds: { kind: 'DS', keyTag: 26974, algorithm: 13, digestType: 2, digestHex: 'ABCD' },
+            dsTtl: 86400,
+            matchedKeyTag: 26974,
+            targetKeyFound: true,
+            digestValid: true,
+            status: 'secure',
+            reason: 'Matches #26974',
+          },
+        ],
+        trustAnchorMatches: [],
+        rrsets: [
+          {
+            id: 'rr-org-dnskey',
+            zone: 'org.',
+            name: 'org.',
+            type: 48,
+            typeName: 'DNSKEY',
+            ttl: 3600,
+            section: 'answer',
+            records: [makeRecord('org.', 48, 'DNSKEY', '257 3 13 ...')],
+            rrsigs: [makeRrsig('sig-org-dnskey', 'org.', 26974, 48, 'DNSKEY')],
+            isQueryTarget: false,
+            status: 'secure',
+            statusReason: 'Signed',
+          },
+          {
+            id: 'rr-org-soa',
+            zone: 'org.',
+            name: 'org.',
+            type: 6,
+            typeName: 'SOA',
+            ttl: 900,
+            section: 'authority',
+            records: [makeRecord('org.', 6, 'SOA', 'a0.org.afilias-nst.info. ...')],
+            rrsigs: [makeRrsig('sig-org-soa', 'org.', 11111, 6, 'SOA')],
+            isQueryTarget: false,
+            status: 'secure',
+            statusReason: 'Signed',
+          },
+          {
+            id: 'rr-ds-iana',
+            zone: 'org.',
+            name: 'iana.org.',
+            type: 43,
+            typeName: 'DS',
+            ttl: 3600,
+            section: 'authority',
+            records: [makeRecord('iana.org.', 43, 'DS', '30001 13 2 1111')],
+            rrsigs: [makeRrsig('sig-ds-iana', 'org.', 11111, 43, 'DS')],
+            isQueryTarget: false,
+            status: 'secure',
+            statusReason: 'Signed',
+          },
+          {
+            id: 'rr-ds-icann',
+            zone: 'org.',
+            name: 'icann.org.',
+            type: 43,
+            typeName: 'DS',
+            ttl: 3600,
+            section: 'authority',
+            records: [makeRecord('icann.org.', 43, 'DS', '40001 13 2 2222')],
+            rrsigs: [makeRrsig('sig-ds-icann', 'org.', 11111, 43, 'DS')],
+            isQueryTarget: false,
+            status: 'secure',
+            statusReason: 'Signed',
+          },
+        ],
+        negativeNodes: [],
+        nameservers: [],
+      },
+      {
+        zoneName: 'iana.org.',
+        parentZone: 'org.',
+        depth: 2,
+        status: 'secure',
+        statusReason: 'Signed',
+        nsecMode: 'NSEC',
+        parentDsRrsetId: 'rr-ds-iana',
+        dnskeys: [makeKey('key-iana-30001', 'iana.org.', 30001, 'csk', true)],
+        dsVerifications: [
+          {
+            id: 'ds-iana.org.-30001',
+            ds: { kind: 'DS', keyTag: 30001, algorithm: 13, digestType: 2, digestHex: '1111' },
+            dsTtl: 3600,
+            matchedKeyTag: 30001,
+            targetKeyFound: true,
+            digestValid: true,
+            status: 'secure',
+            reason: 'Matches #30001',
+          },
+        ],
+        trustAnchorMatches: [],
+        rrsets: [
+          {
+            id: 'rr-iana-dnskey',
+            zone: 'iana.org.',
+            name: 'iana.org.',
+            type: 48,
+            typeName: 'DNSKEY',
+            ttl: 3600,
+            section: 'answer',
+            records: [makeRecord('iana.org.', 48, 'DNSKEY', '257 3 13 ...')],
+            rrsigs: [makeRrsig('sig-iana-dnskey', 'iana.org.', 30001, 48, 'DNSKEY')],
+            isQueryTarget: false,
+            status: 'secure',
+            statusReason: 'Signed',
+          },
+          {
+            id: 'rr-iana-cname',
+            zone: 'iana.org.',
+            name: 'www.iana.org.',
+            type: 5,
+            typeName: 'CNAME',
+            ttl: 300,
+            section: 'answer',
+            records: [makeRecord('www.iana.org.', 5, 'CNAME', 'vip.icann.org.')],
+            rrsigs: [makeRrsig('sig-iana-cname', 'iana.org.', 30001, 5, 'CNAME')],
+            isQueryTarget: true,
+            status: 'secure',
+            statusReason: 'Signed',
+          },
+        ],
+        negativeNodes: [],
+        nameservers: [],
+      },
+      {
+        zoneName: 'icann.org.',
+        parentZone: 'org.',
+        depth: 2,
+        status: 'secure',
+        statusReason: 'Signed',
+        nsecMode: 'NSEC',
+        parentDsRrsetId: 'rr-ds-icann',
+        dnskeys: [makeKey('key-icann-40001', 'icann.org.', 40001, 'csk', true)],
+        dsVerifications: [
+          {
+            id: 'ds-icann.org.-40001',
+            ds: { kind: 'DS', keyTag: 40001, algorithm: 13, digestType: 2, digestHex: '2222' },
+            dsTtl: 3600,
+            matchedKeyTag: 40001,
+            targetKeyFound: true,
+            digestValid: true,
+            status: 'secure',
+            reason: 'Matches #40001',
+          },
+        ],
+        trustAnchorMatches: [],
+        rrsets: [
+          {
+            id: 'rr-icann-dnskey',
+            zone: 'icann.org.',
+            name: 'icann.org.',
+            type: 48,
+            typeName: 'DNSKEY',
+            ttl: 3600,
+            section: 'answer',
+            records: [makeRecord('icann.org.', 48, 'DNSKEY', '257 3 13 ...')],
+            rrsigs: [makeRrsig('sig-icann-dnskey', 'icann.org.', 40001, 48, 'DNSKEY')],
+            isQueryTarget: false,
+            status: 'secure',
+            statusReason: 'Signed',
+          },
+          {
+            id: 'rr-icann-a',
+            zone: 'icann.org.',
+            name: 'vip.icann.org.',
+            type: 1,
+            typeName: 'A',
+            ttl: 300,
+            section: 'answer',
+            records: [makeRecord('vip.icann.org.', 1, 'A', '192.0.43.8')],
+            rrsigs: [makeRrsig('sig-icann-a', 'icann.org.', 40001, 1, 'A')],
+            isQueryTarget: true,
+            status: 'secure',
+            statusReason: 'Signed',
+          },
+          {
+            id: 'rr-icann-soa',
+            zone: 'icann.org.',
+            name: 'icann.org.',
+            type: 6,
+            typeName: 'SOA',
+            ttl: 3600,
+            section: 'authority',
+            records: [makeRecord('icann.org.', 6, 'SOA', 'sns.dns.icann.org. ...')],
+            rrsigs: [makeRrsig('sig-icann-soa', 'icann.org.', 40001, 6, 'SOA')],
+            isQueryTarget: false,
+            status: 'secure',
+            statusReason: 'Signed',
+          },
+        ],
+        negativeNodes: [],
+        nameservers: [],
+      },
+    ],
+    cnameEdges: [
+      {
+        id: 'cname-www-iana-to-vip-icann',
+        fromRrsetId: 'rr-iana-cname',
+        fromName: 'www.iana.org.',
+        toName: 'vip.icann.org.',
+        toRrsetId: 'rr-icann-a',
+        qtypeName: 'A',
+      },
+    ],
+    findings: [],
+    queries: [],
+    trustAnchorsUsed: [],
+  };
+}
 
 function ipv6FixtureForMobileTest(): AnalysisSnapshot {
   return {

@@ -55,6 +55,7 @@ export interface WireSideDrawerProps {
   onOpenFullWireTab: (queryId: string, mode: FocusedWireSubMode) => void;
   onClose: () => void;
   graphRailContext?: WireDrawerGraphRailContext | null;
+  isFullscreen?: boolean;
 }
 
 export function WireSideDrawer({
@@ -64,6 +65,7 @@ export function WireSideDrawer({
   onOpenFullWireTab,
   onClose,
   graphRailContext = null,
+  isFullscreen = false,
 }: WireSideDrawerProps) {
   seedIpAsnCacheFromSnapshot(snapshot);
 
@@ -160,13 +162,17 @@ export function WireSideDrawer({
     ? formatDohShortLabel(selectedLog.endpoint || snapshot.dohEndpoint)
     : formatDohShortLabel(snapshot.dohEndpoint);
 
+  const layoutCls = isFullscreen
+    ? 'z-20 max-h-[42dvh] lg:max-h-none lg:h-full'
+    : 'sticky top-44 z-20 max-h-[calc(100dvh-12rem)]';
+
   return (
     <aside
       data-testid="wire-side-drawer"
       data-query-id={selectedLog?.id ?? ''}
       data-wire-mode={mode}
       aria-label="Docked DoH Wire & Hex Inspector"
-      className="w-full xl:w-[500px] 2xl:w-[556px] shrink-0 rounded-xl border border-cyan-500/35 dark:border-cyan-500/40 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md shadow-xl flex flex-col sticky top-44 z-20 max-h-[calc(100dvh-12rem)] overflow-hidden"
+      className={`w-full xl:w-[500px] 2xl:w-[556px] shrink-0 rounded-xl border border-cyan-500/35 dark:border-cyan-500/40 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md shadow-xl flex flex-col ${layoutCls} overflow-hidden`}
     >
       {/* Optional Unified Right Rail Switcher (when paired with ChainGraphView selection) */}
       {graphRailContext && (

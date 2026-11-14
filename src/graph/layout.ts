@@ -837,3 +837,264 @@ export function computeFitAllGraphTransform(
   const y = Math.round(padY + (availH - graph.height * scale) / 2);
   return { x, y, scale };
 }
+
+export interface TrustLineageResult {
+  focusId: string;
+  focusLabel: string;
+  nodeIds: Set<string>;
+  edgeIds: Set<string>;
+  zoneNames: Set<string>;
+  hopCount: number;
+  trustAnchorLabels: string[];
+  hasBogusHop: boolean;
+}
+
+/**
+ * Computes the transitive cryptographic & alias trust lineage for a focused node or edge:
+ * - Upstream pass (`toId -> fromId`): walks reverse RRSIG, DS, insecure-delegation, NSEC proof,
+ *   and incoming CNAME edges up to every signing zone's Trust Anchor (without leaking into sibling RRsets).
+ * - Downstream pass (`fromId -> toId`): walks forward edges from the focused target down to
+ *   dependent child keys/RRsets/alias targets.
+ */
+export function computeTrustLineage(
+  graph: ComputedGraph,
+  focusId: string
+): TrustLineageResult | null {
+  if (!focusId) return null;
+
+  const nodeMap = new Map<string, GraphNode>();
+  for (const n of graph.nodes) {
+    nodeMap.set(n.id, n);
+  }
+  const edgeMap = new Map<string, GraphEdge>();
+  const incomingByNode = new Map<string, GraphEdge[]>();
+  const outgoingByNode = new Map<string, GraphEdge[]>();
+
+  for (const e of graph.edges) {
+    edgeMap.set(e.id, e);
+    const inc = incomingByNode.get(e.toId);
+    if (inc) inc.push(e);
+    else incomingByNode.set(e.toId, [e]);
+
+    const out = outgoingByNode.get(e.fromId);
+    if (out) out.push(e);
+    else outgoingByNode.set(e.fromId, [e]);
+  }
+
+  const focusedNode = nodeMap.get(focusId);
+  const focusedEdge = focusedNode ? undefined : edgeMap.get(focusId);
+  if (!focusedNode && !focusedEdge) {
+    return null;
+  }
+
+  const nodeIds = new Set<string>();
+  const edgeIds = new Set<string>();
+  const upstreamVisited = new Set<string>();
+  const downstreamVisited = new Set<string>();
+  const upstreamQueue: string[] = [];
+  const downstreamQueue: string[] = [];
+
+  if (focusedNode) {
+    nodeIds.add(focusedNode.id);
+    upstreamVisited.add(focusedNode.id);
+    downstreamVisited.add(focusedNode.id);
+    upstreamQueue.push(focusedNode.id);
+    downstreamQueue.push(focusedNode.id);
+  } else if (focusedEdge) {
+    edgeIds.add(focusedEdge.id);
+    nodeIds.add(focusedEdge.fromId);
+    nodeIds.add(focusedEdge.toId);
+    upstreamVisited.add(focusedEdge.fromId);
+    upstreamQueue.push(focusedEdge.fromId);
+    downstreamVisited.add(focusedEdge.toId);
+    downstreamQueue.push(focusedEdge.toId);
+  }
+
+  while (upstreamQueue.length > 0) {
+    const curr = upstreamQueue.shift()!;
+    const incoming = incomingByNode.get(curr);
+    if (!incoming) continue;
+    for (const e of incoming) {
+      edgeIds.add(e.id);
+      nodeIds.add(e.fromId);
+      if (!upstreamVisited.has(e.fromId)) {
+        upstreamVisited.add(e.fromId);
+        upstreamQueue.push(e.fromId);
+      }
+    }
+  }
+
+  while (downstreamQueue.length > 0) {
+    const curr = downstreamQueue.shift()!;
+    const outgoing = outgoingByNode.get(curr);
+    if (!outgoing) continue;
+    for (const e of outgoing) {
+      edgeIds.add(e.id);
+      nodeIds.add(e.toId);
+      if (!downstreamVisited.has(e.toId)) {
+        downstreamVisited.add(e.toId);
+        downstreamQueue.push(e.toId);
+      }
+    }
+  }
+
+  const zoneNames = new Set<string>();
+  const trustAnchorLabels: string[] = [];
+  let hasBogusHop = false;
+
+  for (const nid of nodeIds) {
+    const n = nodeMap.get(nid);
+    if (!n) continue;
+    zoneNames.add(n.zone);
+    if (n.status === 'bogus') {
+      hasBogusHop = true;
+    }
+    if (n.dnskey?.role === 'trust-anchor') {
+      const label =
+        n.zone === '.'
+          ? `Root KSK #${n.dnskey.keyTag}`
+          : `${displayFqdn(n.zone)} #${n.dnskey.keyTag}`;
+      if (!trustAnchorLabels.includes(label)) {
+        trustAnchorLabels.push(label);
+      }
+    }
+  }
+
+  for (const eid of edgeIds) {
+    const e = edgeMap.get(eid);
+    if (e?.status === 'bogus') {
+      hasBogusHop = true;
+    }
+  }
+
+  const focusLabel = focusedNode
+    ? focusedNode.kind === 'rrset'
+      ? `${focusedNode.title} ${focusedNode.badge}`
+      : focusedNode.title
+    : focusedEdge!.label;
+
+  return {
+    focusId,
+    focusLabel,
+    nodeIds,
+    edgeIds,
+    zoneNames,
+    hopCount: edgeIds.size,
+    trustAnchorLabels,
+    hasBogusHop,
+  };
+}
+
+export interface ZoneBreadcrumbItem {
+  id: string;
+  zoneName: string;
+  label: string;
+  status: ValidationStatus;
+  depth: number;
+  parentZone: string | null;
+  isCnameBranch: boolean;
+  zoneBox: GraphZoneBox;
+}
+
+function isZoneSuffixOfTarget(zoneName: string, targetName: string): boolean {
+  const z = zoneName.trim().toLowerCase();
+  const t = targetName.trim().toLowerCase();
+  if (!t) return true;
+  if (z === '.') return true;
+  const zWithDot = z.endsWith('.') ? z : `${z}.`;
+  const tWithDot = t.endsWith('.') ? t : `${t}.`;
+  return tWithDot === zWithDot || tWithDot.endsWith(`.${zWithDot}`);
+}
+
+/**
+ * Builds ordered clickable zone jump breadcrumbs from the computed graph, marking
+ * sibling cross-zone CNAME branches distinctly from primary query delegation hops.
+ */
+export function buildZoneBreadcrumbs(
+  graph: ComputedGraph,
+  snapshot?: Pick<AnalysisSnapshot, 'targetName' | 'cnameEdges'>
+): ZoneBreadcrumbItem[] {
+  const hasCnameEdges =
+    (snapshot?.cnameEdges?.length ?? 0) > 0 || graph.edges.some((e) => e.kind === 'cname');
+  const targetName = snapshot?.targetName ?? '';
+
+  return graph.zones.map((zb) => {
+    const zoneName = zb.zone.zoneName;
+    const isCnameBranch =
+      hasCnameEdges && Boolean(targetName) && !isZoneSuffixOfTarget(zoneName, targetName);
+    return {
+      id: zb.id,
+      zoneName,
+      label: zoneName === '.' ? '. (root)' : zoneName,
+      status: zb.zone.status,
+      depth: zb.zone.depth,
+      parentZone: zb.zone.parentZone,
+      isCnameBranch,
+      zoneBox: zb,
+    };
+  });
+}
+
+/**
+ * Computes a pan/zoom transform framing a specific `GraphZoneBox` centered inside
+ * `(viewportWidth, viewportHeight)` without excessive over-zoom on compact zones.
+ */
+export function computeZoneFocusTransform(
+  zoneBox: GraphZoneBox,
+  viewportWidth: number,
+  viewportHeight: number
+): { x: number; y: number; scale: number } {
+  if (viewportWidth <= 0 || viewportHeight <= 0) {
+    return { x: 40, y: 24, scale: 1 };
+  }
+  const scaleX = (viewportWidth * 0.86) / Math.max(1, zoneBox.width);
+  const scaleY = (viewportHeight * 0.84) / Math.max(1, zoneBox.height);
+  const idealScale = Math.min(scaleX, scaleY, 1.35);
+  const scale = Math.max(MIN_GRAPH_ZOOM, Math.min(MAX_GRAPH_ZOOM, idealScale));
+  const centerX = zoneBox.x + zoneBox.width / 2;
+  const centerY = zoneBox.y + zoneBox.height / 2;
+  const x = Math.round(viewportWidth / 2 - centerX * scale);
+  const y = Math.round(viewportHeight / 2 - centerY * scale);
+  return { x, y, scale };
+}
+
+/**
+ * Determines which `GraphZoneBox` currently contains (or is closest to) the viewport center.
+ */
+export function findActiveViewportZoneName(
+  zones: GraphZoneBox[],
+  transform: { x: number; y: number; scale: number },
+  viewportWidth: number,
+  viewportHeight: number
+): string | null {
+  if (zones.length === 0) return null;
+  const safeScale = transform.scale > 0 ? transform.scale : 1;
+  const graphCenterX = (viewportWidth / 2 - transform.x) / safeScale;
+  const graphCenterY = (viewportHeight / 2 - transform.y) / safeScale;
+
+  for (const zb of zones) {
+    if (
+      graphCenterX >= zb.x &&
+      graphCenterX <= zb.x + zb.width &&
+      graphCenterY >= zb.y &&
+      graphCenterY <= zb.y + zb.height
+    ) {
+      return zb.zone.zoneName;
+    }
+  }
+
+  let bestZone: string | null = null;
+  let bestDistSq = Number.POSITIVE_INFINITY;
+  for (const zb of zones) {
+    const cx = zb.x + zb.width / 2;
+    const cy = zb.y + zb.height / 2;
+    const dx = graphCenterX - cx;
+    const dy = graphCenterY - cy;
+    const distSq = dx * dx + dy * dy;
+    if (distSq < bestDistSq) {
+      bestDistSq = distSq;
+      bestZone = zb.zone.zoneName;
+    }
+  }
+  return bestZone;
+}
