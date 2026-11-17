@@ -47,12 +47,43 @@ export function formatPacketAsDig(log: DohQueryLog): string {
     lines.push(
       `; EDNS: version: ${p.edns.version}, flags:${p.edns.doBit ? ' do' : ''}; udp: ${p.edns.udpPayloadSize}`
     );
+    if (p.edns.nsid) {
+      const spacedHex = p.edns.nsid.rawHex.match(/.{1,2}/g)?.join(' ') ?? '';
+      lines.push(
+        p.edns.nsid.ascii
+          ? `; NSID: ${spacedHex} ("${p.edns.nsid.ascii}")`
+          : `; NSID: ${spacedHex || '(empty)'}`
+      );
+    }
+    if (p.edns.cookie) {
+      const c = p.edns.cookie;
+      const cookieHex = `${c.clientCookieHex}${c.serverCookieHex ?? ''}`;
+      const statusLabel =
+        c.status === 'valid-pair'
+          ? 'good'
+          : c.status === 'client-only'
+            ? 'client only'
+            : 'malformed length';
+      lines.push(`; COOKIE: ${cookieHex} (${statusLabel})`);
+    }
     if (p.edns.ecs) {
       lines.push(`; CLIENT-SUBNET: ${p.edns.ecs.presentation}`);
     }
     for (const ede of p.edns.ede) {
       lines.push(
         `; EDE: ${ede.infoCode} (${ede.name})${ede.extraText ? `: (${ede.extraText})` : ''}`
+      );
+    }
+    if (p.edns.padding) {
+      const pad = p.edns.padding;
+      const alignDesc = pad.alignedTo468
+        ? ', 468B-aligned (RFC 8467)'
+        : pad.alignedTo128
+          ? ', 128B-aligned (RFC 8467)'
+          : ', unaligned block';
+      const zeroWarn = pad.allZeroBytes ? '' : ', non-zero octets!';
+      lines.push(
+        `; PAD: ${pad.byteLength} bytes (msg ${pad.packetWireSize}B${alignDesc}${zeroWarn})`
       );
     }
   }

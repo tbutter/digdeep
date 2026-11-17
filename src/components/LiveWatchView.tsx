@@ -993,6 +993,30 @@ export function LiveWatchView({
                           </span>
                         </div>
                         <div className="font-sans text-[11px] text-slate-500">{r.provider}</div>
+                        {r.nsid && (
+                          <div className="flex flex-wrap items-center gap-1 mt-1">
+                            <span
+                              data-testid="watch-nsid-badge"
+                              title={
+                                r.observedNsidPops && r.observedNsidPops.length > 1
+                                  ? `Observed Anycast PoPs across pulses: ${r.observedNsidPops.join(', ')}`
+                                  : `RFC 5001 EDNS0 NSID Anycast PoP: ${r.nsid}`
+                              }
+                              className="rounded bg-cyan-500/10 text-cyan-800 dark:text-cyan-200 border border-cyan-500/25 px-1.5 py-0.2 text-[9.5px] font-semibold"
+                            >
+                              PoP: {r.nsid}
+                            </span>
+                            {r.previousNsid && (
+                              <span
+                                data-testid="watch-pop-switch-badge"
+                                title={`Anycast PoP switched from ${r.previousNsid} to ${r.nsid} on this pulse`}
+                                className="rounded bg-violet-500/15 text-violet-700 dark:text-violet-300 border border-violet-500/30 px-1.5 py-0.2 text-[9.5px] font-semibold"
+                              >
+                                ↻ from {r.previousNsid}
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </td>
 
                       {/* Live Ticking TTL Countdown Bar */}

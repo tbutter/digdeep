@@ -1239,6 +1239,58 @@ export function ConsensusView({
                         {r.shortLabel}
                       </div>
                       <div className="font-sans text-[11px] text-slate-500">{r.provider}</div>
+                      {r.reachable && (
+                        <div className="flex flex-wrap items-center gap-1 mt-1">
+                          {r.nsid && r.nsid.byteLength > 0 && (
+                            <span
+                              data-testid="consensus-nsid-badge"
+                              title={`RFC 5001 EDNS0 NSID Anycast PoP: ${r.nsid.display} (0x${r.nsid.rawHex})${
+                                r.distinctNsidPops && r.distinctNsidPops.length > 1
+                                  ? ` · Observed PoPs: ${r.distinctNsidPops.join(', ')}`
+                                  : ''
+                              }`}
+                              className="inline-flex items-center gap-1 rounded bg-cyan-500/10 text-cyan-800 dark:text-cyan-200 border border-cyan-500/25 px-1.5 py-0.2 text-[9.5px] font-semibold"
+                            >
+                              <span>PoP: {r.nsid.display}</span>
+                              {r.distinctNsidPops && r.distinctNsidPops.length > 1 && (
+                                <span className="text-violet-600 dark:text-violet-300">
+                                  (+{r.distinctNsidPops.length - 1})
+                                </span>
+                              )}
+                            </span>
+                          )}
+                          {r.dohPaddingStatus && (
+                            <span
+                              data-testid="consensus-padding-badge"
+                              title={
+                                r.dohPaddingStatus === 'padded-468'
+                                  ? `RFC 8467 §4.1 response block padding active (${r.padding?.packetWireSize}B total, ${r.padding?.byteLength}B Option 12 pad — multiple of 468B)`
+                                  : r.dohPaddingStatus === 'padded-128'
+                                    ? `RFC 8467 §4.1 128B block padding active (${r.padding?.packetWireSize}B total, ${r.padding?.byteLength}B Option 12 pad)`
+                                    : r.dohPaddingStatus === 'padded-unaligned'
+                                      ? `EDNS0 Option 12 present (${r.padding?.byteLength}B), but ${r.padding?.packetWireSize}B message is not aligned to 468B/128B`
+                                      : 'DoH response did not include EDNS0 Option 12 Padding despite padded client query (RFC 8467 §4.2)'
+                              }
+                              className={`rounded px-1.5 py-0.2 text-[9.5px] font-semibold ${
+                                r.dohPaddingStatus === 'padded-468' ||
+                                r.dohPaddingStatus === 'padded-128'
+                                  ? 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25'
+                                  : r.dohPaddingStatus === 'padded-unaligned'
+                                    ? 'bg-amber-500/15 text-amber-800 dark:text-amber-200 border border-amber-500/30'
+                                    : 'bg-slate-200/70 dark:bg-slate-800/80 text-slate-500 dark:text-slate-400'
+                              }`}
+                            >
+                              {r.dohPaddingStatus === 'padded-468'
+                                ? 'PAD 468B ✓'
+                                : r.dohPaddingStatus === 'padded-128'
+                                  ? 'PAD 128B ✓'
+                                  : r.dohPaddingStatus === 'padded-unaligned'
+                                    ? `PAD ${r.padding?.packetWireSize ?? '?'}B`
+                                    : 'UNPADDED'}
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </td>
 
                     <td className="py-2.5 px-3">
@@ -1401,6 +1453,131 @@ export function ConsensusView({
           </table>
         </div>
       </section>
+
+      {/* RFC 5001 Anycast PoP (NSID) & RFC 8467 DoH Privacy Padding Telemetry */}
+      {consensus.ednsTelemetry && (
+        <section
+          data-testid="consensus-edns-telemetry-card"
+          className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4 space-y-3"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Radio className="w-4 h-4 text-cyan-500 shrink-0" />
+              <h2 className="font-semibold text-sm">
+                RFC 5001 Anycast PoP (<code className="font-mono text-xs">NSID</code> · Option 3)
+                &amp; RFC 8467 DoH Privacy Padding (<code className="font-mono text-xs">Option 12</code>)
+              </h2>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 font-mono text-[10px]">
+              <span className="rounded-md px-2 py-0.5 bg-cyan-500/12 text-cyan-800 dark:text-cyan-200 border border-cyan-500/30 font-semibold">
+                NSID PoPs: {consensus.ednsTelemetry.nsidResolvers.length}/{consensus.reachableCount}
+              </span>
+              <span
+                className={`rounded-md px-2 py-0.5 font-semibold ${
+                  consensus.ednsTelemetry.padded468Resolvers.length +
+                    consensus.ednsTelemetry.padded128Resolvers.length >
+                  0
+                    ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30'
+                    : 'bg-slate-500/15 text-slate-600 dark:text-slate-400 border border-slate-500/25'
+                }`}
+              >
+                RFC 8467 Padded:{' '}
+                {consensus.ednsTelemetry.padded468Resolvers.length +
+                  consensus.ednsTelemetry.padded128Resolvers.length}
+                /{consensus.reachableCount}
+              </span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+            <div className="rounded-lg border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-3 space-y-2">
+              <div className="font-semibold text-slate-800 dark:text-slate-200">
+                Answering Anycast PoPs (RFC 5001 EDNS0 Option 3)
+              </div>
+              {consensus.ednsTelemetry.nsidResolvers.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5 font-mono text-[11px]">
+                  {consensus.ednsTelemetry.nsidResolvers.map((entry) => (
+                    <span
+                      key={entry.shortLabel}
+                      className="rounded-md border border-cyan-500/25 bg-white dark:bg-slate-900 px-2 py-0.5 text-slate-700 dark:text-slate-200"
+                    >
+                      <strong>{entry.shortLabel}</strong>:{' '}
+                      <span className="text-cyan-700 dark:text-cyan-300">
+                        {entry.distinctPops.join(', ')}
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-slate-500">
+                  No reachable resolvers returned an EDNS0 NSID identifier.
+                </p>
+              )}
+              {consensus.ednsTelemetry.nsidSuppressedResolvers.length > 0 && (
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  NSID omitted / privacy-suppressed:{' '}
+                  <span className="font-mono">
+                    {consensus.ednsTelemetry.nsidSuppressedResolvers.join(', ')}
+                  </span>
+                </p>
+              )}
+            </div>
+
+            <div className="rounded-lg border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-3 space-y-2">
+              <div className="font-semibold text-slate-800 dark:text-slate-200">
+                DoH Encrypted Traffic-Size Padding (RFC 7830 / RFC 8467)
+              </div>
+              <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
+                Queries sent with 128-octet block padding test whether each DoH responder pads
+                encrypted responses to 468-octet multiples to prevent HTTPS packet-length
+                fingerprinting:
+              </p>
+              <div className="space-y-1 text-[11px]">
+                {consensus.ednsTelemetry.padded468Resolvers.length > 0 && (
+                  <div>
+                    <span className="font-semibold text-emerald-700 dark:text-emerald-300">
+                      468B Block-Aligned ✓:
+                    </span>{' '}
+                    <span className="font-mono text-slate-700 dark:text-slate-200">
+                      {consensus.ednsTelemetry.padded468Resolvers.join(', ')}
+                    </span>
+                  </div>
+                )}
+                {consensus.ednsTelemetry.padded128Resolvers.length > 0 && (
+                  <div>
+                    <span className="font-semibold text-emerald-700 dark:text-emerald-300">
+                      128B Block-Aligned ✓:
+                    </span>{' '}
+                    <span className="font-mono text-slate-700 dark:text-slate-200">
+                      {consensus.ednsTelemetry.padded128Resolvers.join(', ')}
+                    </span>
+                  </div>
+                )}
+                {consensus.ednsTelemetry.paddedUnalignedResolvers.length > 0 && (
+                  <div>
+                    <span className="font-semibold text-amber-700 dark:text-amber-300">
+                      Padded (Unaligned):
+                    </span>{' '}
+                    <span className="font-mono text-slate-700 dark:text-slate-200">
+                      {consensus.ednsTelemetry.paddedUnalignedResolvers.join(', ')}
+                    </span>
+                  </div>
+                )}
+                {consensus.ednsTelemetry.unpaddedResolvers.length > 0 && (
+                  <div>
+                    <span className="font-semibold text-slate-500 dark:text-slate-400">
+                      Unpadded Response:
+                    </span>{' '}
+                    <span className="font-mono text-slate-600 dark:text-slate-400">
+                      {consensus.ednsTelemetry.unpaddedResolvers.join(', ')}
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* RFC 7871 EDNS Client Subnet (ECS) Geo-Steering & SCOPE Cache Matrix */}
       {consensus.ecsGeo && (

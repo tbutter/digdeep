@@ -312,6 +312,26 @@ export function WireSideDrawer({
               <span className="rounded bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border border-cyan-500/25 px-1.5 py-0.2 font-mono text-[10px] shrink-0">
                 {endpointLabel} ({selectedLog.cd ? 'CD=1' : 'CD=0'})
               </span>
+              {selectedLog.packet.edns?.nsid && selectedLog.packet.edns.nsid.byteLength > 0 && (
+                <span
+                  data-testid="wire-drawer-nsid-badge"
+                  className="rounded bg-slate-200/80 dark:bg-slate-800 px-1.5 py-0.2 font-mono text-[10px] text-slate-700 dark:text-slate-200 shrink-0"
+                >
+                  PoP {selectedLog.packet.edns.nsid.display}
+                </span>
+              )}
+              {selectedLog.packet.edns?.padding && (
+                <span
+                  data-testid="wire-drawer-padding-badge"
+                  className="rounded bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25 px-1.5 py-0.2 font-mono text-[10px] shrink-0"
+                >
+                  {selectedLog.packet.edns.padding.alignedTo468
+                    ? 'PAD 468B'
+                    : selectedLog.packet.edns.padding.alignedTo128
+                      ? 'PAD 128B'
+                      : `PAD ${selectedLog.packet.edns.padding.byteLength}B`}
+                </span>
+              )}
             </div>
 
             <div className="font-mono text-[10px] text-slate-500 dark:text-slate-400 shrink-0 flex items-center gap-1">

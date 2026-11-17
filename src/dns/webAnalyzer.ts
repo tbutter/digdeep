@@ -2299,6 +2299,7 @@ export async function runWebAnalysis(
     session.query(targetName, RR_TYPES.HTTPS, {
       cd: false,
       doBit: true,
+      padBlockSize: 128,
       purpose: 'Resolver validating check (CD=0)',
     }),
   ]);

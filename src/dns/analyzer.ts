@@ -6,6 +6,7 @@ import {
   WILDCARD_PROBE_LABEL,
   formatAlgorithm,
   formatDigestType,
+  formatDohShortLabel,
   rcodeToString,
   rrTypeToString,
   stringToRrType,
@@ -780,6 +781,7 @@ export async function runDnsvizAnalysis(
       session.query(pgpOwner, RR_TYPES.OPENPGPKEY, {
         cd: false,
         doBit: true,
+        padBlockSize: 128,
         purpose: `1.1.1.1 validating check (${pgpOwner} OPENPGPKEY, CD=0)`,
       }),
     ]);
@@ -834,10 +836,11 @@ export async function runDnsvizAnalysis(
           purpose: `Target RRset (${targetName} ${t})`,
         })
       ),
-      // Also perform one validating query (CD=0, DO=1) so we capture 1.1.1.1's own AD bit & RCODE
+      // Also perform one validating query (CD=0, DO=1, RFC 8467 128B-padded) so we capture the resolver's AD bit, RCODE, NSID & DoH response padding
       session.query(targetName, primaryTypeNum, {
         cd: false,
         doBit: true,
+        padBlockSize: 128,
         purpose: `1.1.1.1 validating check (${targetName} ${queryTypes[0]}, CD=0)`,
       }),
     ]);
@@ -3438,15 +3441,58 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     ) {
       continue;
     }
-    if (log.packet.wireSize > 1232) {
+    // Subtract RFC 7830 / RFC 8467 EDNS0 Option 12 DoH transport padding before evaluating UDP 1232B fragmentation threshold
+    const padOverheadBytes = log.packet.edns?.padding ? 4 + log.packet.edns.padding.byteLength : 0;
+    const unpaddedWireSize = log.packet.wireSize - padOverheadBytes;
+    if (unpaddedWireSize > 1232) {
       findings.push({
         id: `warn-size-${log.id}`,
         severity: 'warning',
         code: 'LARGE_DNS_RESPONSE',
-        title: `Large DNS response (${log.packet.wireSize} bytes) on ${log.qname} ${log.qtypeName}`,
+        title: `Large DNS response (${unpaddedWireSize} bytes) on ${log.qname} ${log.qtypeName}`,
         detail: `Wire response exceeds the 1232-byte DNS Flag Day 2020 threshold, which can cause IPv6/UDP fragmentation issues over legacy UDP transport.`,
         rfc: 'RFC 8900 / DNS Flag Day 2020',
       });
+    }
+    const pad = log.packet.edns?.padding;
+    if (pad && !pad.allZeroBytes) {
+      const padId = `warn-edns-pad-nonzero-${log.endpoint}`;
+      if (!findings.some((f) => f.id === padId)) {
+        findings.push({
+          id: padId,
+          severity: 'warning',
+          code: 'EDNS_PADDING_NON_ZERO',
+          title: `Non-zero EDNS0 Padding octets returned by ${formatDohShortLabel(log.endpoint)}`,
+          detail: `Response for ${log.qname} ${log.qtypeName} included an EDNS0 Option 12 (Padding) payload (${pad.byteLength} bytes) containing non-zero octets. RFC 7830 §3.1 requires responders to fill padding octets with 0x00.`,
+          rfc: 'RFC 7830 §3.1',
+        });
+      }
+    } else if (pad && !pad.alignedTo468 && !pad.alignedTo128) {
+      const unalignedId = `info-edns-pad-unaligned-${log.endpoint}`;
+      if (!findings.some((f) => f.id === unalignedId)) {
+        findings.push({
+          id: unalignedId,
+          severity: 'info',
+          code: 'EDNS_PADDING_UNALIGNED',
+          title: `Unaligned DoH EDNS0 Padding (${pad.packetWireSize} bytes) from ${formatDohShortLabel(log.endpoint)}`,
+          detail: `Response included ${pad.byteLength} bytes of EDNS0 Option 12 padding, yielding a ${pad.packetWireSize}-byte message that is neither a multiple of 468 bytes nor 128 bytes as recommended by RFC 8467 §4.1.`,
+          rfc: 'RFC 8467 §4.1',
+        });
+      }
+    }
+    const cookie = log.packet.edns?.cookie;
+    if (cookie && cookie.status === 'malformed-length') {
+      const cookieId = `warn-edns-cookie-len-${log.endpoint}`;
+      if (!findings.some((f) => f.id === cookieId)) {
+        findings.push({
+          id: cookieId,
+          severity: 'warning',
+          code: 'EDNS_COOKIE_MALFORMED',
+          title: `Malformed EDNS0 DNS Cookie length (${cookie.byteLength} bytes) from ${formatDohShortLabel(log.endpoint)}`,
+          detail: `EDNS0 Option 10 (COOKIE) payload must be 8 bytes (Client Cookie only) or 16..40 bytes (8-byte Client Cookie + 8..32-byte Server Cookie). Observed ${cookie.byteLength} bytes.`,
+          rfc: 'RFC 7873 §5.2.2',
+        });
+      }
     }
     for (const ede of log.packet.edns?.ede ?? []) {
       const sev: AuditFinding['severity'] =
@@ -3467,7 +3513,7 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
     }
   }
 
-  // 8. Extract 1.1.1.1 CD=0 Resolver Verdict
+  // 8. Extract Primary DoH CD=0 Resolver Verdict (+ RFC 5001 NSID & RFC 8467 Padding)
   const valQuery =
     queries.find((q) => !q.cd && q.purpose.includes('validating check')) ??
     queries.find(
@@ -3480,6 +3526,10 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
         !q.purpose.startsWith('DNSBL reputation lookup') &&
         !q.purpose.startsWith('PSL lookup')
     );
+  const primaryNsid =
+    valQuery?.packet.edns?.nsid ??
+    queries.find((q) => q.endpoint === dohEndpoint && q.packet.edns?.nsid)?.packet.edns?.nsid;
+  const primaryPadding = valQuery?.packet.edns?.padding;
   const resolverVerdict: ResolverVerdict | undefined = valQuery
     ? {
         qname: valQuery.qname,
@@ -3489,6 +3539,8 @@ export async function evaluateSnapshotFromLogs(input: EvaluateInput): Promise<An
         adBit: valQuery.packet.flags.ad,
         ede: valQuery.packet.edns?.ede ?? [],
         latencyMs: valQuery.latencyMs,
+        ...(primaryNsid ? { nsid: primaryNsid } : {}),
+        ...(primaryPadding ? { padding: primaryPadding } : {}),
       }
     : undefined;
 

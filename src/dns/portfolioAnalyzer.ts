@@ -678,6 +678,7 @@ export async function runPortfolioDomainProbe(
       .query(targetName, RR_TYPES.A, {
         cd: false,
         doBit: true,
+        padBlockSize: 128,
         purpose: `Resolver validating check (${targetName} A, CD=0)`,
       })
       .catch(() => undefined),

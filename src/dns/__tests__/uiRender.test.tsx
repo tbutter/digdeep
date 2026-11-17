@@ -52,8 +52,8 @@ import {
   buildShareUrl,
   parseDeepLinkParams,
 } from '../../urlState';
-import { runDnsvizAnalysis } from '../analyzer';
-import { runConsensusAnalysis } from '../consensusAnalyzer';
+import { evaluateSnapshotFromLogs, runDnsvizAnalysis } from '../analyzer';
+import { evaluateConsensusFromSnapshotData, runConsensusAnalysis } from '../consensusAnalyzer';
 import { CONSENSUS_DOH_RESOLVERS, RR_TYPES } from '../constants';
 import { base64ToBytes, bytesToBase64, hexToBytes } from '../encoding';
 import { buildFrozenPermalink } from '../frozenPermalink';
@@ -304,7 +304,7 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
     expect(indexCss).toContain('env(safe-area-inset-bottom');
 
     const swCode = fs.readFileSync(new URL('../../../public/sw.js', import.meta.url), 'utf8') as string;
-    expect(swCode).toContain('digdeep-shell-v46');
+    expect(swCode).toContain('digdeep-shell-v47');
     expect(swCode).toContain('application/dns-message');
 
     // Verify App renders offline badge, clear button, and synchronized PSL overlay when navigator.onLine is false
@@ -5343,6 +5343,324 @@ describe('UI Component Rendering on Real 1.1.1.1 Snapshots', () => {
         if (prevWindow) Object.defineProperty(globalThis, 'window', prevWindow);
         if (prevDocument) Object.defineProperty(globalThis, 'document', prevDocument);
       }
+    }
+  );
+
+  it(
+    'surfaces RFC 5001 EDNS0 NSID Anycast PoP badges, RFC 8467 DoH Privacy Padding telemetry, Live Watch PoP switches, and EDNS0 hygiene checks (#70)',
+    async () => {
+      const makeEdnsLog = (params: {
+        id: string;
+        endpoint: string;
+        purpose: string;
+        cd: boolean;
+        ttl: number;
+        nsidAscii?: string;
+        padLen?: number;
+        padNonZero?: boolean;
+        wireSize: number;
+        cookieStatus?: 'valid-pair' | 'malformed-length';
+      }): DohQueryLog => ({
+        id: params.id,
+        qname: 'example.org.',
+        qtype: 1,
+        qtypeName: 'A',
+        cd: params.cd,
+        doBit: true,
+        endpoint: params.endpoint,
+        startedAt: 1700000000000,
+        latencyMs: 14,
+        httpStatus: 200,
+        wireBase64: '',
+        requestWireBase64: '',
+        purpose: params.purpose,
+        packet: {
+          id: 0,
+          flags: {
+            qr: true,
+            opcode: 0,
+            aa: false,
+            tc: false,
+            rd: true,
+            ra: true,
+            z: 0,
+            ad: true,
+            cd: params.cd,
+            rcode: 0,
+          },
+          questions: [{ name: 'example.org.', type: 1, typeName: 'A', qclass: 1 }],
+          answers: [
+            {
+              name: 'example.org.',
+              type: 1,
+              typeName: 'A',
+              rrclass: 1,
+              ttl: params.ttl,
+              rdataBase64: '',
+              canonicalRdataBase64: '',
+              rdataText: '93.184.216.34',
+              parsed: { kind: 'GENERIC', target: '93.184.216.34' },
+              section: 'answer',
+            },
+          ],
+          authorities: [],
+          additionals: [],
+          edns: {
+            udpPayloadSize: 1232,
+            extendedRcode: 0,
+            version: 0,
+            doBit: true,
+            flags: 0x8000,
+            ede: [],
+            ...(params.nsidAscii
+              ? {
+                  nsid: {
+                    rawHex: Array.from(new TextEncoder().encode(params.nsidAscii))
+                      .map((b) => b.toString(16).padStart(2, '0'))
+                      .join(''),
+                    byteLength: params.nsidAscii.length,
+                    ascii: params.nsidAscii,
+                    display: params.nsidAscii,
+                  },
+                }
+              : {}),
+            ...(params.padLen !== undefined
+              ? {
+                  padding: {
+                    byteLength: params.padLen,
+                    allZeroBytes: !params.padNonZero,
+                    packetWireSize: params.wireSize,
+                    alignedTo468: params.wireSize % 468 === 0,
+                    alignedTo128: params.wireSize % 128 === 0,
+                  },
+                }
+              : {}),
+            ...(params.cookieStatus
+              ? {
+                  cookie: {
+                    clientCookieHex: '0102030405060708',
+                    serverCookieHex: 'aabbccdd',
+                    byteLength: params.cookieStatus === 'malformed-length' ? 12 : 16,
+                    status: params.cookieStatus,
+                  },
+                }
+              : {}),
+          },
+          wireSize: params.wireSize,
+        },
+      });
+
+      // 1. Multi-Resolver Consensus NSID PoP + RFC 8467 468B Padding vs Unpadded telemetry
+      const cfA = makeEdnsLog({
+        id: 'q-cf-a',
+        endpoint: 'https://1.1.1.1/dns-query',
+        purpose: 'Consensus probe (1.1.1.1 A)',
+        cd: false,
+        ttl: 300,
+        nsidAscii: 'hel02',
+        padLen: 274,
+        wireSize: 468,
+      });
+      const q9A = makeEdnsLog({
+        id: 'q-q9-a',
+        endpoint: 'https://9.9.9.9/dns-query',
+        purpose: 'Consensus probe (9.9.9.9 A)',
+        cd: false,
+        ttl: 290,
+        nsidAscii: 'res710.qhel1',
+        wireSize: 201,
+      });
+      const q9Aaaa = makeEdnsLog({
+        id: 'q-q9-aaaa',
+        endpoint: 'https://9.9.9.9/dns-query',
+        purpose: 'Consensus probe (9.9.9.9 AAAA)',
+        cd: false,
+        ttl: 288,
+        nsidAscii: 'res711.qhel1',
+        wireSize: 213,
+      });
+      const dnssbA = makeEdnsLog({
+        id: 'q-dnssb-a',
+        endpoint: 'https://doh.dns.sb/dns-query',
+        purpose: 'Consensus probe (doh.dns.sb A)',
+        cd: false,
+        ttl: 295,
+        padLen: 283,
+        wireSize: 468,
+      });
+
+      const baseSnap = ipv6FixtureForMobileTest();
+      const { consensusAnalysis } = evaluateConsensusFromSnapshotData({
+        targetName: 'example.org.',
+        primaryEndpoint: 'https://1.1.1.1/dns-query',
+        queries: [cfA, q9A, q9Aaaa, dnssbA],
+        zones: baseSnap.zones,
+        targetDomainStatus: 'secure',
+      });
+
+      expect(consensusAnalysis.ednsTelemetry?.padded468Resolvers).toContain('1.1.1.1');
+      expect(consensusAnalysis.ednsTelemetry?.padded468Resolvers).toContain('doh.dns.sb');
+      expect(consensusAnalysis.ednsTelemetry?.unpaddedResolvers).toContain('9.9.9.9');
+      expect(consensusAnalysis.ednsTelemetry?.nsidSuppressedResolvers).toContain('doh.dns.sb');
+      const q9Row = consensusAnalysis.resolvers.find((r) => r.shortLabel === '9.9.9.9')!;
+      expect(q9Row.distinctNsidPops).toEqual(['res710.qhel1', 'res711.qhel1']);
+
+      const consensusSnap: AnalysisSnapshot = {
+        ...baseSnap,
+        mode: 'consensus',
+        queries: [cfA, q9A, q9Aaaa, dnssbA],
+        consensusAnalysis,
+      };
+      const consensusMarkup = renderToStaticMarkup(
+        <ConsensusView
+          snapshot={consensusSnap}
+          onOpenChainGraph={() => {}}
+          onOpenWireResponses={() => {}}
+        />
+      );
+      expect(consensusMarkup).toContain('data-testid="consensus-edns-telemetry-card"');
+      expect(consensusMarkup).toContain('data-testid="consensus-nsid-badge"');
+      expect(consensusMarkup).toContain('PoP: hel02');
+      expect(consensusMarkup).toContain('PoP: res710.qhel1');
+      expect(consensusMarkup).toContain('(+1)');
+      expect(consensusMarkup).toContain('PAD 468B ✓');
+      expect(consensusMarkup).toContain('UNPADDED');
+
+      // 2. ResponsesPanel & wireQueryFilter NSID / Padding badges & search
+      expect(filterDohQueryLogs([cfA, q9A, dnssbA], 'all', 'hel02').map((q) => q.id)).toEqual([
+        'q-cf-a',
+      ]);
+      expect(filterDohQueryLogs([cfA, q9A, dnssbA], 'all', '468b').map((q) => q.id)).toEqual([
+        'q-cf-a',
+        'q-dnssb-a',
+      ]);
+      const responsesMarkup = renderToStaticMarkup(<ResponsesPanel snapshot={consensusSnap} />);
+      expect(responsesMarkup).toContain('data-testid="wire-row-nsid-badge"');
+      expect(responsesMarkup).toContain('data-testid="wire-row-padding-badge"');
+      expect(responsesMarkup).toContain('PoP hel02');
+
+      // 3. LiveWatchView Anycast PoP switch tracking (res710.qhel1 -> res711.qhel1 does NOT false-trigger max-ttl-clamped!)
+      const presets = CONSENSUS_DOH_RESOLVERS.filter((p) => p.shortLabel === '9.9.9.9');
+      const tick1Log = makeEdnsLog({
+        id: 'w-1',
+        endpoint: 'https://9.9.9.9/dns-query',
+        purpose: 'Watch probe (9.9.9.9 A)',
+        cd: false,
+        ttl: 40,
+        nsidAscii: 'res710.qhel1',
+        wireSize: 201,
+      });
+      const sample1 = buildWatchTickSample({
+        tickNumber: 1,
+        capturedAtMs: 1700000000000,
+        targetName: 'example.org.',
+        qtype: 1,
+        soaZone: 'example.org.',
+        presets,
+        queries: [tick1Log],
+      });
+      // Inject authoritative ceiling of 300s on sample1's previousObs so a jump from 40s -> 200s on the SAME PoP would look max-clamped,
+      // whereas switching PoP from res710.qhel1 -> res711.qhel1 is recognized as an Anycast PoP switch!
+      sample1.resolvers[0]!.authoritativeOriginalTtl = 300;
+      sample1.resolvers[0]!.ceilingTtl = 300;
+
+      const tick2Log = makeEdnsLog({
+        id: 'w-2',
+        endpoint: 'https://9.9.9.9/dns-query',
+        purpose: 'Watch probe (9.9.9.9 A)',
+        cd: false,
+        ttl: 200,
+        nsidAscii: 'res711.qhel1',
+        wireSize: 201,
+      });
+      const sample2 = buildWatchTickSample({
+        tickNumber: 2,
+        capturedAtMs: 1700000005000,
+        targetName: 'example.org.',
+        qtype: 1,
+        soaZone: 'example.org.',
+        presets,
+        queries: [tick2Log],
+        previousSample: sample1,
+      });
+      expect(sample2.resolvers[0]!.nsid).toBe('res711.qhel1');
+      expect(sample2.resolvers[0]!.previousNsid).toBe('res710.qhel1');
+      expect(sample2.resolvers[0]!.observedNsidPops).toEqual(['res710.qhel1', 'res711.qhel1']);
+      expect(sample2.resolvers[0]!.ttlBehavior).toBe('normal');
+
+      const watchState: TtlWatchState = {
+        targetName: 'example.org.',
+        displayDomain: 'example.org',
+        qtypeName: 'A',
+        pollMode: 'manual',
+        maxIterations: 20,
+        enabledResolverUrls: ['https://9.9.9.9/dns-query'],
+        status: 'paused',
+        completedTicks: 2,
+        nextPollAtMs: null,
+        currentSample: sample2,
+        latestSnapshot: null,
+        transitions: [],
+      };
+      const watchMarkup = renderToStaticMarkup(
+        <LiveWatchView
+          watchState={watchState}
+          primaryEndpoint="https://1.1.1.1/dns-query"
+          activeSnapshot={baseSnap}
+          isOffline={false}
+          onPulseOnce={() => {}}
+          onStartWatch={() => {}}
+          onPauseWatch={() => {}}
+          onResumeWatch={() => {}}
+          onStopWatch={() => {}}
+          onContinueBeyondCap={() => {}}
+          onUpdateConfig={() => {}}
+          onLoadSnapshot={() => {}}
+          onOpenInHistoryDiff={() => {}}
+        />
+      );
+      expect(watchMarkup).toContain('data-testid="watch-nsid-badge"');
+      expect(watchMarkup).toContain('data-testid="watch-pop-switch-badge"');
+      expect(watchMarkup).toContain('↻ from res710.qhel1');
+
+      // 4. Verify analyzer.ts subtracts DoH Option 12 padding before UDP 1232B check & flags non-zero padding / malformed cookies
+      const largePaddedValid = makeEdnsLog({
+        id: 'q-val-pad-1404',
+        endpoint: 'https://1.1.1.1/dns-query',
+        purpose: '1.1.1.1 validating check (example.org. A, CD=0)',
+        cd: false,
+        ttl: 300,
+        nsidAscii: 'hel02',
+        padLen: 500, // 1404 - (4 + 500) = 900B unpadded (< 1232B!)
+        wireSize: 1404,
+      });
+      const badHygieneLog = makeEdnsLog({
+        id: 'q-bad-edns',
+        endpoint: 'https://1.1.1.1/dns-query',
+        purpose: 'Target RRset (example.org. A)',
+        cd: true,
+        ttl: 300,
+        padLen: 16,
+        padNonZero: true,
+        wireSize: 220,
+        cookieStatus: 'malformed-length',
+      });
+      const evaluated = await evaluateSnapshotFromLogs({
+        id: 'snap-edns-hygiene-70',
+        targetName: 'example.org.',
+        queryTypes: ['A'],
+        dohEndpoint: 'https://1.1.1.1/dns-query',
+        capturedAt: 1700000000000,
+        validatedAt: 1700000000000,
+        durationMs: 20,
+        queries: [largePaddedValid, badHygieneLog],
+        trustAnchors: [],
+      });
+      expect(evaluated.resolverVerdict?.nsid?.display).toBe('hel02');
+      expect(evaluated.resolverVerdict?.padding?.alignedTo468).toBe(true);
+      expect(evaluated.findings.some((f) => f.code === 'LARGE_DNS_RESPONSE')).toBe(false);
+      expect(evaluated.findings.some((f) => f.code === 'EDNS_PADDING_NON_ZERO')).toBe(true);
+      expect(evaluated.findings.some((f) => f.code === 'EDNS_COOKIE_MALFORMED')).toBe(true);
     }
   );
 });

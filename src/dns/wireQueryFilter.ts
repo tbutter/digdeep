@@ -132,6 +132,15 @@ function buildQuerySearchHaystack(q: DohQueryLog): string {
       .map((e) => `ede ede${e.infoCode} ${e.infoCode} ${e.name} ${e.extraText ?? ''}`)
       .join(' ') ?? '';
   const ecsResp = q.packet.edns?.ecs?.presentation ?? '';
+  const nsidTokens = q.packet.edns?.nsid
+    ? `nsid pop ${q.packet.edns.nsid.display} ${q.packet.edns.nsid.rawHex} ${q.packet.edns.nsid.ascii ?? ''}`
+    : '';
+  const padTokens = q.packet.edns?.padding
+    ? `pad padding ${q.packet.edns.padding.alignedTo468 ? '468b' : q.packet.edns.padding.alignedTo128 ? '128b' : 'unaligned'}`
+    : '';
+  const cookieTokens = q.packet.edns?.cookie
+    ? `cookie ${q.packet.edns.cookie.clientCookieHex} ${q.packet.edns.cookie.serverCookieHex ?? ''}`
+    : '';
   const endpointShort = q.endpoint ? formatDohShortLabel(q.endpoint) : '';
   const presetMeta = q.endpoint
     ? DOH_SERVER_PRESETS.find((p) => p.url === q.endpoint)
@@ -147,6 +156,9 @@ function buildQuerySearchHaystack(q: DohQueryLog): string {
     presetMeta ? `${presetMeta.provider} ${presetMeta.role}` : '',
     q.ecsSubnet ? `ecs ${q.ecsSubnet}` : '',
     ecsResp,
+    nsidTokens,
+    padTokens,
+    cookieTokens,
     rcode,
     q.cd ? 'cd=1' : 'cd=0',
     q.packet.flags.ad ? 'ad=1' : 'ad=0',

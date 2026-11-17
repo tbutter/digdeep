@@ -10,7 +10,13 @@ import {
   normalizeFqdn,
 } from './encoding';
 import type { DnsPacket, DohQueryLog } from './types';
-import { decodeEdnsClientSubnetOption, parseDnsPacket } from './wire';
+import {
+  decodeEdnsClientSubnetOption,
+  decodeEdnsCookieOption,
+  decodeEdnsNsidOption,
+  decodeEdnsPaddingOption,
+  parseDnsPacket,
+} from './wire';
 
 export type WireSpanCategory =
   | 'header'
@@ -1087,6 +1093,35 @@ export function dissectDnsWirePacket(buf: Uint8Array): DissectedWirePacket {
             const optLen = view.getUint16(optOff + 2, false);
             const optDataEnd = Math.min(rdataEnd, optOff + 4 + optLen);
             let optSummary = `${optLen}B payload`;
+            if (optCode === 3) {
+              const nsid = decodeEdnsNsidOption(buf.subarray(optOff + 4, optDataEnd));
+              const optKey = optIdx++;
+              rFields.push({
+                id: `${category}-${rIdx}-opt-${optKey}-hdr`,
+                label: `EDNS Option 3 (${EDNS_OPTION_NAMES[3]})`,
+                startOffset: optOff,
+                endOffset: optOff + 4,
+                valueSummary:
+                  optLen === 0
+                    ? 'NSID Request (0B payload)'
+                    : nsid.ascii
+                      ? `"${nsid.ascii}" (${optLen}B payload)`
+                      : `0x${nsid.rawHex} (${optLen}B payload)`,
+              });
+              if (optDataEnd > optOff + 4) {
+                rFields.push({
+                  id: `${category}-${rIdx}-opt-${optKey}-nsid`,
+                  label: 'NSID Identifier',
+                  startOffset: optOff + 4,
+                  endOffset: optDataEnd,
+                  valueSummary: nsid.ascii
+                    ? `"${nsid.ascii}" (0x${nsid.rawHex})`
+                    : `0x${nsid.rawHex}`,
+                });
+              }
+              optOff = optDataEnd;
+              continue;
+            }
             if (optCode === 8 && optOff + 8 <= optDataEnd) {
               const ecs = decodeEdnsClientSubnetOption(buf.subarray(optOff + 4, optDataEnd));
               const optKey = optIdx++;
@@ -1125,6 +1160,38 @@ export function dissectDnsWirePacket(buf: Uint8Array): DissectedWirePacket {
               optOff = optDataEnd;
               continue;
             }
+            if (optCode === 10) {
+              const cookie = decodeEdnsCookieOption(buf.subarray(optOff + 4, optDataEnd));
+              const optKey = optIdx++;
+              rFields.push({
+                id: `${category}-${rIdx}-opt-${optKey}-hdr`,
+                label: `EDNS Option 10 (${EDNS_OPTION_NAMES[10] ?? 'COOKIE — RFC 7873'})`,
+                startOffset: optOff,
+                endOffset: optOff + 4,
+                valueSummary: `${cookie.byteLength}B (${cookie.status})`,
+              });
+              if (optDataEnd > optOff + 4) {
+                const clientEnd = Math.min(optDataEnd, optOff + 12);
+                rFields.push({
+                  id: `${category}-${rIdx}-opt-${optKey}-client`,
+                  label: 'Client Cookie',
+                  startOffset: optOff + 4,
+                  endOffset: clientEnd,
+                  valueSummary: `0x${cookie.clientCookieHex}`,
+                });
+                if (optDataEnd > clientEnd && cookie.serverCookieHex) {
+                  rFields.push({
+                    id: `${category}-${rIdx}-opt-${optKey}-server`,
+                    label: 'Server Cookie',
+                    startOffset: clientEnd,
+                    endOffset: optDataEnd,
+                    valueSummary: `0x${cookie.serverCookieHex} (${optDataEnd - clientEnd}B)`,
+                  });
+                }
+              }
+              optOff = optDataEnd;
+              continue;
+            }
             if (optCode === 15 && optOff + 6 <= optDataEnd) {
               const infoCode = view.getUint16(optOff + 4, false);
               const extra =
@@ -1134,7 +1201,13 @@ export function dissectDnsWirePacket(buf: Uint8Array): DissectedWirePacket {
               const meta = EDE_CODES[infoCode];
               optSummary = `EDE ${infoCode} (${meta?.name ?? 'Unknown'})${extra ? `: "${extra}"` : ''}`;
             } else if (optCode === 12) {
-              optSummary = `${optLen} padding bytes (RFC 7830)`;
+              const pad = decodeEdnsPaddingOption(buf.subarray(optOff + 4, optDataEnd), buf.length);
+              const alignLabel = pad.alignedTo468
+                ? '468B-aligned (RFC 8467)'
+                : pad.alignedTo128
+                  ? '128B-aligned (RFC 8467)'
+                  : 'unaligned block';
+              optSummary = `${pad.byteLength} padding bytes · msg ${pad.packetWireSize}B (${alignLabel}${pad.allZeroBytes ? '' : ', non-zero octets!'})`;
             }
             rFields.push({
               id: `${category}-${rIdx}-opt-${optIdx++}`,

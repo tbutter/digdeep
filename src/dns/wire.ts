@@ -20,6 +20,7 @@ import {
   concatBytes,
   formatDnsTimestamp,
   getKeySizeInfo,
+  hexToBytes,
   normalizeFqdn,
   splitPresentationLabels,
   unescapePresentationLabel,
@@ -34,7 +35,10 @@ import type {
   EchConfigEntry,
   EdeEntry,
   EdnsClientSubnet,
+  EdnsCookieInfo,
   EdnsInfo,
+  EdnsNsidInfo,
+  EdnsPaddingInfo,
   ParsedRdata,
   SvcParamEntry,
 } from './types';
@@ -396,6 +400,138 @@ export function decodeEdnsClientSubnetOption(optData: Uint8Array): EdnsClientSub
   };
 }
 
+/**
+ * Encodes an empty RFC 5001 §2.1 EDNS0 `NSID` (`OPTION-CODE = 3`, `OPTION-LENGTH = 0`) request TLV.
+ */
+export function encodeEdnsNsidOption(): Uint8Array {
+  return new Uint8Array([0x00, 0x03, 0x00, 0x00]);
+}
+
+/**
+ * Encodes an RFC 7873 EDNS0 `COOKIE` (`OPTION-CODE = 10`) TLV option from a hex string.
+ */
+export function encodeEdnsCookieOption(cookieHex: string): Uint8Array {
+  const payload = hexToBytes(cookieHex);
+  const tlv = new Uint8Array(4 + payload.length);
+  const view = new DataView(tlv.buffer);
+  view.setUint16(0, 10, false); // OPTION-CODE = 10 (COOKIE)
+  view.setUint16(2, payload.length, false);
+  tlv.set(payload, 4);
+  return tlv;
+}
+
+/**
+ * Encodes an RFC 7830 §3.1 EDNS0 `Padding` (`OPTION-CODE = 12`) TLV filled with `0x00` octets.
+ */
+export function encodeEdnsPaddingOption(padByteLength: number): Uint8Array {
+  const safeLen = Math.max(0, Math.min(65531, Math.floor(padByteLength)));
+  const tlv = new Uint8Array(4 + safeLen);
+  const view = new DataView(tlv.buffer);
+  view.setUint16(0, 12, false); // OPTION-CODE = 12 (PADDING)
+  view.setUint16(2, safeLen, false);
+  // Uint8Array is zero-initialized (`0x00` per RFC 7830 §3.1)
+  return tlv;
+}
+
+/**
+ * Decodes an RFC 5001 EDNS0 `NSID` (`OPTION-CODE = 3`) payload into raw hex and printable ASCII (if valid).
+ */
+export function decodeEdnsNsidOption(optData: Uint8Array): EdnsNsidInfo {
+  const rawHex = bytesToHex(optData).toLowerCase();
+  if (optData.length === 0) {
+    return {
+      rawHex: '',
+      byteLength: 0,
+      display: '(empty)',
+    };
+  }
+  // Allow optional single trailing NUL byte when all preceding octets are printable ASCII (0x20..0x7E)
+  const effectiveSlice =
+    optData.length > 1 && optData[optData.length - 1] === 0x00
+      ? optData.subarray(0, optData.length - 1)
+      : optData;
+  let allPrintable = effectiveSlice.length > 0;
+  let asciiCandidate = '';
+  for (let i = 0; i < effectiveSlice.length; i++) {
+    const b = effectiveSlice[i];
+    if (b >= 0x20 && b <= 0x7e) {
+      asciiCandidate += String.fromCharCode(b);
+    } else {
+      allPrintable = false;
+      break;
+    }
+  }
+  const trimmedAscii = allPrintable ? asciiCandidate.trim() : '';
+  if (allPrintable && trimmedAscii.length > 0) {
+    return {
+      rawHex,
+      byteLength: optData.length,
+      ascii: asciiCandidate,
+      display: asciiCandidate,
+    };
+  }
+  return {
+    rawHex,
+    byteLength: optData.length,
+    display: `0x${rawHex}`,
+  };
+}
+
+/**
+ * Decodes an RFC 7873 EDNS0 `COOKIE` (`OPTION-CODE = 10`) payload (8B Client Cookie + optional 8..32B Server Cookie).
+ */
+export function decodeEdnsCookieOption(optData: Uint8Array): EdnsCookieInfo {
+  const byteLength = optData.length;
+  if (byteLength === 8) {
+    return {
+      clientCookieHex: bytesToHex(optData).toLowerCase(),
+      byteLength,
+      status: 'client-only',
+    };
+  }
+  if (byteLength >= 16 && byteLength <= 40) {
+    return {
+      clientCookieHex: bytesToHex(optData.subarray(0, 8)).toLowerCase(),
+      serverCookieHex: bytesToHex(optData.subarray(8)).toLowerCase(),
+      byteLength,
+      status: 'valid-pair',
+    };
+  }
+  const clientSlice = optData.subarray(0, Math.min(8, byteLength));
+  const serverSlice = byteLength > 8 ? optData.subarray(8) : undefined;
+  return {
+    clientCookieHex: bytesToHex(clientSlice).toLowerCase(),
+    ...(serverSlice && serverSlice.length > 0
+      ? { serverCookieHex: bytesToHex(serverSlice).toLowerCase() }
+      : {}),
+    byteLength,
+    status: 'malformed-length',
+  };
+}
+
+/**
+ * Decodes an RFC 7830 / RFC 8467 EDNS0 `Padding` (`OPTION-CODE = 12`) payload and checks 128B / 468B block alignment.
+ */
+export function decodeEdnsPaddingOption(
+  optData: Uint8Array,
+  packetWireSize: number
+): EdnsPaddingInfo {
+  let allZeroBytes = true;
+  for (let i = 0; i < optData.length; i++) {
+    if (optData[i] !== 0) {
+      allZeroBytes = false;
+      break;
+    }
+  }
+  return {
+    byteLength: optData.length,
+    allZeroBytes,
+    packetWireSize,
+    alignedTo468: packetWireSize > 0 && packetWireSize % 468 === 0,
+    alignedTo128: packetWireSize > 0 && packetWireSize % 128 === 0,
+  };
+}
+
 export interface BuildQueryOptions {
   cd?: boolean;
   doBit?: boolean;
@@ -403,11 +539,18 @@ export interface BuildQueryOptions {
   udpPayloadSize?: number;
   id?: number;
   ecs?: ClientSubnetQueryOption;
+  /** RFC 5001: Include empty EDNS0 Option 3 (NSID) request */
+  requestNsid?: boolean;
+  /** RFC 7873: Optional hex Client (+ Server) Cookie to send in EDNS0 Option 10 */
+  cookieHex?: string;
+  /** RFC 7830 / RFC 8467: Pad total DNS wire packet to a multiple of `padBlockSize` octets (e.g. 128) via Option 12 */
+  padBlockSize?: number;
 }
 
 /**
  * Builds an RFC 1035 + RFC 6891 EDNS0 wire query suitable for RFC 8484 DoH (`application/dns-message`).
- * Supports optional RFC 7871 EDNS0 Option 8 (`CLIENT-SUBNET`).
+ * Supports optional RFC 5001 `NSID` (Option 3), RFC 7871 `CLIENT-SUBNET` (Option 8),
+ * RFC 7873 `COOKIE` (Option 10), and RFC 7830 / RFC 8467 `Padding` (Option 12).
  * Note: RFC 8484 §4.1 recommends ID = 0 for HTTP cache friendliness.
  */
 export function buildDnsQuery(
@@ -415,7 +558,17 @@ export function buildDnsQuery(
   qtype: number,
   options: BuildQueryOptions = {}
 ): Uint8Array {
-  const { cd = true, doBit = true, rd = true, udpPayloadSize = 4096, id = 0, ecs } = options;
+  const {
+    cd = true,
+    doBit = true,
+    rd = true,
+    udpPayloadSize = 4096,
+    id = 0,
+    ecs,
+    requestNsid = false,
+    cookieHex,
+    padBlockSize,
+  } = options;
   const header = new Uint8Array(12);
   const view = new DataView(header.buffer);
 
@@ -436,7 +589,26 @@ export function buildDnsQuery(
   qView.setUint16(0, qtype, false);
   qView.setUint16(2, 1, false); // IN class
 
-  const optRdata = ecs ? encodeEdnsClientSubnetOption(ecs) : new Uint8Array(0);
+  const optChunks: Uint8Array[] = [];
+  if (requestNsid) {
+    optChunks.push(encodeEdnsNsidOption());
+  }
+  if (cookieHex && cookieHex.trim().length > 0) {
+    optChunks.push(encodeEdnsCookieOption(cookieHex));
+  }
+  if (ecs) {
+    optChunks.push(encodeEdnsClientSubnetOption(ecs));
+  }
+
+  if (padBlockSize !== undefined && padBlockSize > 0) {
+    const existingOptLen = optChunks.reduce((acc, c) => acc + c.length, 0);
+    // Base wire size before Option 12 payload: 12 (header) + nameWire + 4 (qTail) + 11 (OPT header) + existingOptLen + 4 (Option 12 TLV header)
+    const minWithPadHeader = 12 + nameWire.length + 4 + 11 + existingOptLen + 4;
+    const padPayloadLen = (padBlockSize - (minWithPadHeader % padBlockSize)) % padBlockSize;
+    optChunks.push(encodeEdnsPaddingOption(padPayloadLen));
+  }
+
+  const optRdata = optChunks.length > 0 ? concatBytes(...optChunks) : new Uint8Array(0);
 
   // EDNS0 OPT pseudo-RR: root(0x00), type=41, class=udpPayloadSize, ttl=(extRcode<<24 | ver<<16 | flags), rdlen=optRdata.length
   const optHeader = new Uint8Array(11);
@@ -451,6 +623,8 @@ export function buildDnsQuery(
     ? concatBytes(header, nameWire, qTail, optHeader, optRdata)
     : concatBytes(header, nameWire, qTail, optHeader);
 }
+
+export const encodeDnsQuery = buildDnsQuery;
 
 function decodeTypeBitmaps(buf: Uint8Array): number[] {
   const types: number[] = [];
@@ -1155,13 +1329,21 @@ function parseRecordRdata(
   };
 }
 
-function parseEdnsOpt(rdataBuf: Uint8Array, rrclass: number, ttl: number): EdnsInfo {
+function parseEdnsOpt(
+  rdataBuf: Uint8Array,
+  rrclass: number,
+  ttl: number,
+  packetWireSize: number
+): EdnsInfo {
   const extendedRcode = (ttl >>> 24) & 0xff;
   const version = (ttl >>> 16) & 0xff;
   const flags = ttl & 0xffff;
   const doBit = (flags & 0x8000) !== 0;
   const ede: EdeEntry[] = [];
   let ecs: EdnsClientSubnet | undefined;
+  let nsid: EdnsNsidInfo | undefined;
+  let cookie: EdnsCookieInfo | undefined;
+  let padding: EdnsPaddingInfo | undefined;
 
   let pos = 0;
   while (pos + 4 <= rdataBuf.length) {
@@ -1171,14 +1353,24 @@ function parseEdnsOpt(rdataBuf: Uint8Array, rrclass: number, ttl: number): EdnsI
     pos += 4;
     if (pos + optLen > rdataBuf.length) break;
     const optData = rdataBuf.subarray(pos, pos + optLen);
-    // Option 8 = RFC 7871 EDNS Client Subnet (CLIENT-SUBNET)
-    if (optCode === 8) {
+    if (optCode === 3) {
+      // Option 3 = RFC 5001 DNS Name Server Identifier (NSID)
+      nsid = decodeEdnsNsidOption(optData);
+    } else if (optCode === 8) {
+      // Option 8 = RFC 7871 EDNS Client Subnet (CLIENT-SUBNET)
       ecs = decodeEdnsClientSubnetOption(optData);
+    } else if (optCode === 10) {
+      // Option 10 = RFC 7873 DNS Cookie
+      cookie = decodeEdnsCookieOption(optData);
+    } else if (optCode === 12) {
+      // Option 12 = RFC 7830 / RFC 8467 EDNS0 Padding
+      padding = decodeEdnsPaddingOption(optData, packetWireSize);
     } else if (optCode === 15 && optData.length >= 2) {
       // Option 15 = RFC 8914 Extended DNS Error
       const edeView = new DataView(optData.buffer, optData.byteOffset, optData.byteLength);
       const infoCode = edeView.getUint16(0, false);
-      const extraText = optData.length > 2 ? textDecoder.decode(optData.subarray(2)).replace(/\0+$/, '') : '';
+      const extraText =
+        optData.length > 2 ? textDecoder.decode(optData.subarray(2)).replace(/\0+$/, '') : '';
       const meta = EDE_CODES[infoCode];
       ede.push({
         infoCode,
@@ -1197,6 +1389,9 @@ function parseEdnsOpt(rdataBuf: Uint8Array, rrclass: number, ttl: number): EdnsI
     flags,
     ede,
     ...(ecs ? { ecs } : {}),
+    ...(nsid ? { nsid } : {}),
+    ...(cookie ? { cookie } : {}),
+    ...(padding ? { padding } : {}),
   };
 }
 
@@ -1265,7 +1460,7 @@ export function parseDnsPacket(buf: Uint8Array): DnsPacket {
       }
 
       if (rrtype === RR_TYPES.OPT) {
-        edns = parseEdnsOpt(buf.subarray(offset, offset + rdlength), rrclass, ttl);
+        edns = parseEdnsOpt(buf.subarray(offset, offset + rdlength), rrclass, ttl, buf.length);
         if (edns.extendedRcode > 0) {
           flags.rcode = (edns.extendedRcode << 4) | baseRcode;
         }

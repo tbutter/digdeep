@@ -69,6 +69,43 @@ export interface EdnsClientSubnet {
   invalidPrefixLength?: boolean;
 }
 
+export interface EdnsNsidInfo {
+  /** Lowercase hex string of raw NSID octets (e.g. "68656c3032") */
+  rawHex: string;
+  /** Number of octets in the NSID option payload */
+  byteLength: number;
+  /** Printable ASCII representation when NSID bytes are printable ASCII (0x20..0x7E) */
+  ascii?: string;
+  /** Human-readable presentation string (`ascii` when printable, else `0x${rawHex}` or `(empty)`) */
+  display: string;
+}
+
+export interface EdnsCookieInfo {
+  /** 8-byte Client Cookie hex (16 hex chars), or partial hex if malformed (< 8B) */
+  clientCookieHex: string;
+  /** 8..32-byte Server Cookie hex when present */
+  serverCookieHex?: string;
+  /** Total byte length of Option 10 payload */
+  byteLength: number;
+  /** RFC 7873 §5.2.2 length compliance */
+  status: 'client-only' | 'valid-pair' | 'malformed-length';
+}
+
+export interface EdnsPaddingInfo {
+  /** Number of padding payload octets inside EDNS0 Option 12 */
+  byteLength: number;
+  /** RFC 7830 §3.1: true when all padding octets are 0x00 */
+  allZeroBytes: boolean;
+  /** Total DNS wire message length in bytes */
+  packetWireSize: number;
+  /** RFC 8467 §4.1: true when total message length is a multiple of 468 octets (recommended response block) */
+  alignedTo468: boolean;
+  /** RFC 8467 §4.1: true when total message length is a multiple of 128 octets (recommended query / fallback block) */
+  alignedTo128: boolean;
+}
+
+export type DohPaddingStatus = 'padded-468' | 'padded-128' | 'padded-unaligned' | 'unpadded';
+
 export interface EdnsInfo {
   udpPayloadSize: number;
   extendedRcode: number;
@@ -77,6 +114,12 @@ export interface EdnsInfo {
   flags: number;
   ede: EdeEntry[];
   ecs?: EdnsClientSubnet;
+  /** RFC 5001 DNS Name Server Identifier (Option 3) */
+  nsid?: EdnsNsidInfo;
+  /** RFC 7873 DNS Cookie (Option 10) */
+  cookie?: EdnsCookieInfo;
+  /** RFC 7830 / RFC 8467 EDNS0 Padding (Option 12) */
+  padding?: EdnsPaddingInfo;
 }
 
 export interface DnskeyRdata {
@@ -764,6 +807,8 @@ export interface ResolverVerdict {
   adBit: boolean;
   ede: EdeEntry[];
   latencyMs: number;
+  nsid?: EdnsNsidInfo;
+  padding?: EdnsPaddingInfo;
 }
 
 export type DaneHostStatus =
@@ -1502,9 +1547,23 @@ export interface ConsensusResolverRow {
   dsKeyTags: number[];
   dnskeyKeyTags: number[];
   ede: EdeEntry[];
+  nsid?: EdnsNsidInfo;
+  distinctNsidPops?: string[];
+  padding?: EdnsPaddingInfo;
+  dohPaddingStatus?: DohPaddingStatus;
+  cookie?: EdnsCookieInfo;
   isSinkholed: boolean;
   classification: ConsensusResolverClassification;
   summary: string;
+}
+
+export interface ConsensusEdnsTelemetrySummary {
+  nsidResolvers: { shortLabel: string; provider: string; nsid: string; distinctPops: string[] }[];
+  nsidSuppressedResolvers: string[];
+  padded468Resolvers: string[];
+  padded128Resolvers: string[];
+  paddedUnalignedResolvers: string[];
+  unpaddedResolvers: string[];
 }
 
 export interface ConsensusAnalysisResult {
@@ -1530,6 +1589,7 @@ export interface ConsensusAnalysisResult {
     category: 'dnssec-bogus' | 'policy-blocked' | 'upstream-reachability' | 'other';
     extraText?: string;
   }[];
+  ednsTelemetry?: ConsensusEdnsTelemetrySummary;
   overallVerdict:
     | 'unanimous-secure'
     | 'unanimous-unsigned'

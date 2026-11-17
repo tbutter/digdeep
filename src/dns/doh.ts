@@ -53,13 +53,22 @@ export class DohSession {
   public async query(
     qname: string,
     qtype: number,
-    opts: { cd?: boolean; doBit?: boolean; ecs?: ClientSubnetQueryOption; purpose: string }
+    opts: {
+      cd?: boolean;
+      doBit?: boolean;
+      ecs?: ClientSubnetQueryOption;
+      requestNsid?: boolean;
+      padBlockSize?: number;
+      purpose: string;
+    }
   ): Promise<DohQueryLog> {
     const normName = normalizeFqdn(qname);
     const cd = opts.cd ?? true;
     const doBit = opts.doBit ?? true;
+    const requestNsid = opts.requestNsid ?? true;
+    const padBlockSize = opts.padBlockSize;
     const ecsSubnet = opts.ecs ? formatEcsQuerySubnet(opts.ecs) : undefined;
-    const key = `${normName}|${qtype}|cd=${cd ? 1 : 0}|do=${doBit ? 1 : 0}${ecsSubnet ? `|ecs=${ecsSubnet}` : ''}`;
+    const key = `${normName}|${qtype}|cd=${cd ? 1 : 0}|do=${doBit ? 1 : 0}${ecsSubnet ? `|ecs=${ecsSubnet}` : ''}${padBlockSize ? `|pad=${padBlockSize}` : ''}`;
 
     const existing = this.inflight.get(key);
     if (existing) {
@@ -84,7 +93,17 @@ export class DohSession {
       }
     }
 
-    const promise = this.executeQuery(normName, qtype, cd, doBit, opts.purpose, opts.ecs, ecsSubnet);
+    const promise = this.executeQuery(
+      normName,
+      qtype,
+      cd,
+      doBit,
+      opts.purpose,
+      opts.ecs,
+      ecsSubnet,
+      requestNsid,
+      padBlockSize
+    );
     this.inflight.set(key, promise);
     if (this.sharedQueryCache) {
       this.sharedQueryCache.set(
@@ -105,7 +124,9 @@ export class DohSession {
     doBit: boolean,
     purpose: string,
     ecs?: ClientSubnetQueryOption,
-    ecsSubnet?: string
+    ecsSubnet?: string,
+    requestNsid = true,
+    padBlockSize?: number
   ): Promise<DohQueryLog> {
     const reqWire = buildDnsQuery(normName, qtype, {
       cd,
@@ -113,6 +134,8 @@ export class DohSession {
       rd: true,
       udpPayloadSize: 4096,
       ecs,
+      requestNsid,
+      padBlockSize,
     });
     const dnsParam = bytesToBase64Url(reqWire);
     const sep = this.endpoint.includes('?') ? '&' : '?';

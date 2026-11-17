@@ -1,8 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { RR_TYPES } from '../constants';
 import { formatPacketAsDig, formatWireHexDump } from '../digFormat';
-import { bytesToBase64, bytesToBase64Url, hexToBytes } from '../encoding';
-import { buildDnsQuery } from '../wire';
+import { bytesToBase64, bytesToBase64Url, concatBytes, hexToBytes } from '../encoding';
+import {
+  decodeEdnsCookieOption,
+  decodeEdnsNsidOption,
+  decodeEdnsPaddingOption,
+  encodeDnsQuery,
+  encodeEdnsCookieOption,
+  encodeEdnsNsidOption,
+  encodeEdnsPaddingOption,
+  buildDnsQuery,
+  parseDnsPacket,
+} from '../wire';
 import {
   buildHeaderBitFields,
   buildSyntheticLogFromDissected,
@@ -179,5 +189,130 @@ describe('Byte-Level DNS Wire Dissector & Compression Pointer Tracer', () => {
     const oobHex = '123481800001000000000000c07f00010001';
     const dissectedOob = dissectDnsWirePacket(hexToBytes(oobHex));
     expect(dissectedOob.parseWarning).toMatch(/out-of-bounds/i);
+  });
+
+  it('encodes & decodes RFC 5001 NSID (Option 3), RFC 7873 DNS Cookies (Option 10), and RFC 8467 Padding (Option 12) (#70)', async () => {
+    // 1. Verify encodeDnsQuery padBlockSize: 128 across varying QNAME lengths (every packet multiple of 128B)
+    for (const qname of ['.', 'a.io.', 'cloudflare.com.', 'sub1.sub2.sub3.example-domain-test.org.']) {
+      const paddedQuery = encodeDnsQuery(qname, RR_TYPES.A, {
+        cd: false,
+        doBit: true,
+        requestNsid: true,
+        cookieHex: '0102030405060708',
+        padBlockSize: 128,
+      });
+      expect(paddedQuery.length % 128).toBe(0);
+      const parsedReq = parseDnsPacket(paddedQuery);
+      expect(parsedReq.edns?.nsid).toEqual({
+        rawHex: '',
+        byteLength: 0,
+        display: '(empty)',
+      });
+      expect(parsedReq.edns?.cookie).toEqual({
+        clientCookieHex: '0102030405060708',
+        byteLength: 8,
+        status: 'client-only',
+      });
+      expect(parsedReq.edns?.padding?.alignedTo128).toBe(true);
+      expect(parsedReq.edns?.padding?.allZeroBytes).toBe(true);
+    }
+
+    // 2. Verify NSID, Cookie, and Padding option decoders on printable, binary, trailing-NUL, valid-pair, and malformed inputs
+    expect(decodeEdnsNsidOption(new TextEncoder().encode('res710.qhel1'))).toEqual({
+      rawHex: '7265733731302e7168656c31',
+      byteLength: 12,
+      ascii: 'res710.qhel1',
+      display: 'res710.qhel1',
+    });
+    expect(decodeEdnsNsidOption(new Uint8Array([0x68, 0x65, 0x6c, 0x30, 0x32, 0x00]))).toEqual({
+      rawHex: '68656c303200',
+      byteLength: 6,
+      ascii: 'hel02',
+      display: 'hel02',
+    });
+    expect(decodeEdnsNsidOption(new Uint8Array([0xde, 0xad, 0xbe, 0xef]))).toEqual({
+      rawHex: 'deadbeef',
+      byteLength: 4,
+      display: '0xdeadbeef',
+    });
+
+    const validCookiePair = decodeEdnsCookieOption(
+      hexToBytes('0102030405060708aabbccddeeff00112233445566778899')
+    );
+    expect(validCookiePair).toEqual({
+      clientCookieHex: '0102030405060708',
+      serverCookieHex: 'aabbccddeeff00112233445566778899',
+      byteLength: 24,
+      status: 'valid-pair',
+    });
+    expect(decodeEdnsCookieOption(hexToBytes('010203040506070899aa')).status).toBe(
+      'malformed-length'
+    );
+    expect(decodeEdnsPaddingOption(new Uint8Array([0, 0, 1]), 468)).toEqual({
+      byteLength: 3,
+      allZeroBytes: false,
+      packetWireSize: 468,
+      alignedTo468: true,
+      alignedTo128: false,
+    });
+
+    // 3. Craft a 468B-aligned synthetic response carrying NSID ("hel02"), valid 16B COOKIE pair, and Option 12 Padding
+    const respHdrAndQAndAns = hexToBytes(
+      '000081a00001000100000001' + // QR=1, RD=1, RA=1, AD=1, QD=1, AN=1, AR=1
+        '076578616d706c65036f72670000010001' + // example.org. IN A
+        'c00c000100010000012c00045db8d822' // example.org. 300 IN A 93.184.216.34
+    );
+    const nsidRespOpt = concatBytes(
+      new Uint8Array([0x00, 0x03, 0x00, 0x05]),
+      new TextEncoder().encode('hel02')
+    );
+    const cookieRespOpt = encodeEdnsCookieOption('0102030405060708fedcba9876543210');
+    const prePadLen =
+      respHdrAndQAndAns.length + 11 + nsidRespOpt.length + cookieRespOpt.length + 4;
+    const padBytesNeeded = (468 - (prePadLen % 468)) % 468;
+    const padRespOpt = encodeEdnsPaddingOption(padBytesNeeded);
+    const optRdata = concatBytes(nsidRespOpt, cookieRespOpt, padRespOpt);
+    const optHdr = new Uint8Array(11);
+    const optView = new DataView(optHdr.buffer);
+    optHdr[0] = 0;
+    optView.setUint16(1, RR_TYPES.OPT, false);
+    optView.setUint16(3, 1232, false);
+    optView.setUint32(5, 0x00008000, false);
+    optView.setUint16(9, optRdata.length, false);
+    const full468Resp = concatBytes(respHdrAndQAndAns, optHdr, optRdata);
+    expect(full468Resp.length).toBe(468);
+    expect(encodeEdnsNsidOption()).toEqual(new Uint8Array([0, 3, 0, 0]));
+
+    const dissectedResp = dissectDnsWirePacket(full468Resp);
+    expect(dissectedResp.parseWarning).toBeUndefined();
+    const ednsSpan = dissectedResp.spans.find((s) => s.category === 'edns')!;
+    expect(ednsSpan.fields.some((f) => f.valueSummary.includes('"hel02"'))).toBe(true);
+    expect(ednsSpan.fields.some((f) => f.label === 'Server Cookie')).toBe(true);
+    expect(ednsSpan.fields.some((f) => f.valueSummary.includes('468B-aligned (RFC 8467)'))).toBe(
+      true
+    );
+
+    const synLog = buildSyntheticLogFromDissected(dissectedResp)!;
+    const digTranscript = formatPacketAsDig(synLog);
+    expect(digTranscript).toContain('; NSID: 68 65 6c 30 32 ("hel02")');
+    expect(digTranscript).toContain('; COOKIE: 0102030405060708fedcba9876543210 (good)');
+    expect(digTranscript).toContain('468B-aligned (RFC 8467)');
+
+    // 4. Live RFC 8484 wire probe against 1.1.1.1 with NSID + 128B Padding -> returns NSID PoP + 468B-aligned response
+    const liveReq = encodeDnsQuery('cloudflare.com.', RR_TYPES.A, {
+      cd: false,
+      doBit: true,
+      requestNsid: true,
+      padBlockSize: 128,
+    });
+    const resp = await fetch(
+      `https://1.1.1.1/dns-query?dns=${bytesToBase64Url(liveReq)}`,
+      { headers: { Accept: 'application/dns-message' } }
+    );
+    expect(resp.ok).toBe(true);
+    const liveBytes = new Uint8Array(await resp.arrayBuffer());
+    const livePkt = parseDnsPacket(liveBytes);
+    expect(livePkt.edns?.nsid?.byteLength).toBeGreaterThan(0);
+    expect(livePkt.edns?.padding?.alignedTo468).toBe(true);
   });
 });

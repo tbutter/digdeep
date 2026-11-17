@@ -6324,6 +6324,7 @@ export async function runMailAnalysis(
     session.query(targetName, RR_TYPES.MX, {
       cd: false,
       doBit: true,
+      padBlockSize: 128,
       purpose: `1.1.1.1 validating check (${targetName} MX, CD=0)`,
     }),
   ];

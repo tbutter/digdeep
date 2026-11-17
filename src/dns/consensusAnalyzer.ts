@@ -24,10 +24,15 @@ import type {
   AnalysisSnapshot,
   AuditFinding,
   ConsensusAnalysisResult,
+  ConsensusEdnsTelemetrySummary,
   ConsensusResolverClassification,
   ConsensusResolverRow,
+  DohPaddingStatus,
   DohQueryLog,
   EdeEntry,
+  EdnsCookieInfo,
+  EdnsNsidInfo,
+  EdnsPaddingInfo,
   ValidationStatus,
   ZoneAnalysis,
 } from './types';
@@ -235,15 +240,45 @@ export function evaluateConsensusFromSnapshotData(params: {
     }
     dsKeyTags.sort((a, b) => a - b);
 
-    // Collect deduplicated EDE entries across this resolver's logs
+    // Collect deduplicated EDE entries + RFC 5001 NSID Anycast PoPs + RFC 8467 Padding + RFC 7873 Cookie across this resolver's logs
     const ede: EdeEntry[] = [];
+    let primaryNsid: EdnsNsidInfo | undefined = primaryLog.packet.edns?.nsid;
+    const distinctNsidPops: string[] = [];
+    let paddingInfo: EdnsPaddingInfo | undefined =
+      aLog?.packet.edns?.padding ?? primaryLog.packet.edns?.padding;
+    let cookieInfo: EdnsCookieInfo | undefined =
+      aLog?.packet.edns?.cookie ?? primaryLog.packet.edns?.cookie;
+
     for (const l of epLogs) {
       for (const e of l.packet.edns?.ede ?? []) {
         if (!ede.some((x) => x.infoCode === e.infoCode && x.extraText === e.extraText)) {
           ede.push(e);
         }
       }
+      const lNsid = l.packet.edns?.nsid;
+      if (lNsid && lNsid.byteLength > 0) {
+        if (!primaryNsid) {
+          primaryNsid = lNsid;
+        }
+        if (!distinctNsidPops.includes(lNsid.display)) {
+          distinctNsidPops.push(lNsid.display);
+        }
+      }
+      if (!paddingInfo && l.packet.edns?.padding) {
+        paddingInfo = l.packet.edns.padding;
+      }
+      if (!cookieInfo && l.packet.edns?.cookie) {
+        cookieInfo = l.packet.edns.cookie;
+      }
     }
+
+    const dohPaddingStatus: DohPaddingStatus = paddingInfo
+      ? paddingInfo.alignedTo468
+        ? 'padded-468'
+        : paddingInfo.alignedTo128
+          ? 'padded-128'
+          : 'padded-unaligned'
+      : 'unpadded';
 
     const hasSinkholeIp = [...ipv4Answers, ...ipv6Answers].some(isSinkholeIpAddress);
     const hasValidNonSinkholeIp = [...ipv4Answers, ...ipv6Answers].some(
@@ -306,6 +341,11 @@ export function evaluateConsensusFromSnapshotData(params: {
       dsKeyTags,
       dnskeyKeyTags,
       ede,
+      ...(primaryNsid ? { nsid: primaryNsid } : {}),
+      ...(distinctNsidPops.length > 0 ? { distinctNsidPops } : {}),
+      ...(paddingInfo ? { padding: paddingInfo } : {}),
+      dohPaddingStatus,
+      ...(cookieInfo ? { cookie: cookieInfo } : {}),
       isSinkholed,
       classification,
       summary: '',
@@ -613,6 +653,32 @@ export function evaluateConsensusFromSnapshotData(params: {
     overallStatus = 'warning';
   }
 
+  const ednsTelemetry: ConsensusEdnsTelemetrySummary = {
+    nsidResolvers: reachableResolvers
+      .filter((r) => Boolean(r.nsid && r.nsid.byteLength > 0))
+      .map((r) => ({
+        shortLabel: r.shortLabel,
+        provider: r.provider,
+        nsid: r.nsid!.display,
+        distinctPops: r.distinctNsidPops ?? [r.nsid!.display],
+      })),
+    nsidSuppressedResolvers: reachableResolvers
+      .filter((r) => !r.nsid || r.nsid.byteLength === 0)
+      .map((r) => r.shortLabel),
+    padded468Resolvers: reachableResolvers
+      .filter((r) => r.dohPaddingStatus === 'padded-468')
+      .map((r) => r.shortLabel),
+    padded128Resolvers: reachableResolvers
+      .filter((r) => r.dohPaddingStatus === 'padded-128')
+      .map((r) => r.shortLabel),
+    paddedUnalignedResolvers: reachableResolvers
+      .filter((r) => r.dohPaddingStatus === 'padded-unaligned')
+      .map((r) => r.shortLabel),
+    unpaddedResolvers: reachableResolvers
+      .filter((r) => !r.dohPaddingStatus || r.dohPaddingStatus === 'unpadded')
+      .map((r) => r.shortLabel),
+  };
+
   return {
     consensusAnalysis: {
       targetDomain: targetName,
@@ -631,6 +697,7 @@ export function evaluateConsensusFromSnapshotData(params: {
       uniqueSoaSerials,
       keyTagConsensus,
       edeHighlights,
+      ednsTelemetry,
       ...(ecsGeo ? { ecsGeo } : {}),
       overallVerdict,
       summary,
@@ -698,6 +765,7 @@ export async function runConsensusAnalysis(
     primarySession.query(targetName, RR_TYPES.A, {
       cd: false,
       doBit: true,
+      padBlockSize: 128,
       purpose: 'Resolver validating check (CD=0)',
     }),
   ]);
@@ -785,6 +853,7 @@ export async function runConsensusAnalysis(
           .query(targetName, RR_TYPES.A, {
             cd: false,
             doBit: true,
+            padBlockSize: 128,
             purpose: `Consensus probe (${preset.shortLabel} A)`,
           })
           .catch(() => undefined),

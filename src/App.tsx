@@ -3238,10 +3238,21 @@ export function App() {
                       </span>
                     )}
                     {activeSnapshot.resolverVerdict && (
-                      <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5 font-mono text-[11px] text-slate-600 dark:text-slate-300">
+                      <span
+                        data-testid="resolver-verdict-chip"
+                        className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5 font-mono text-[11px] text-slate-600 dark:text-slate-300"
+                      >
                         {formatDohShortLabel(activeSnapshot.dohEndpoint)}:{' '}
                         {activeSnapshot.resolverVerdict.rcodeName} · AD=
                         {activeSnapshot.resolverVerdict.adBit ? '1' : '0'}
+                        {activeSnapshot.resolverVerdict.nsid
+                          ? ` · PoP: ${activeSnapshot.resolverVerdict.nsid.display}`
+                          : ''}
+                        {activeSnapshot.resolverVerdict.padding?.alignedTo468
+                          ? ' · PAD 468B ✓'
+                          : activeSnapshot.resolverVerdict.padding?.alignedTo128
+                            ? ' · PAD 128B ✓'
+                            : ''}
                       </span>
                     )}
                     {activeSnapshot.validatedAt !== activeSnapshot.capturedAt && (

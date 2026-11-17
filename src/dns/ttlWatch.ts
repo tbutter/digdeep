@@ -117,6 +117,13 @@ export interface WatchResolverObservation {
   dnskeyKeyTags: number[];
   rrsigMeta?: WatchRrsigMeta;
   ede: EdeEntry[];
+  /** RFC 5001 NSID Anycast PoP / resolver node identifier when returned */
+  nsid?: string;
+  nsidRawHex?: string;
+  /** Previous pulse's NSID when an Anycast PoP / cache-node switch occurred on this tick */
+  previousNsid?: string;
+  /** Distinct NSID Anycast PoP identifiers observed across pulses for this resolver */
+  observedNsidPops?: string[];
   ttlBehavior: TtlClampAndStaleStatus;
   ttlBehaviorDetail: string;
   didRefreshCache: boolean;
@@ -495,8 +502,10 @@ export function extractResolverWatchObservation(params: {
       ? authoritativeOriginalTtl - observedTtl
       : undefined;
 
-  // Deduplicate RFC 8914 EDE entries
+  // Deduplicate RFC 8914 EDE entries & extract RFC 5001 NSID Anycast PoP
   const ede: EdeEntry[] = [];
+  const nsidInfo =
+    targetLog.packet.edns?.nsid ?? epLogs.find((l) => l.packet.edns?.nsid)?.packet.edns?.nsid;
   for (const l of epLogs) {
     for (const e of l.packet.edns?.ede ?? []) {
       if (!ede.some((x) => x.infoCode === e.infoCode && x.extraText === e.extraText)) {
@@ -531,6 +540,9 @@ export function extractResolverWatchObservation(params: {
     dnskeyKeyTags,
     rrsigMeta,
     ede,
+    ...(nsidInfo && nsidInfo.byteLength > 0
+      ? { nsid: nsidInfo.display, nsidRawHex: nsidInfo.rawHex }
+      : {}),
     wireQueryId: targetLog.id,
   };
 }
@@ -688,10 +700,14 @@ export function classifyResolverTtlBehavior(params: {
     };
   }
 
-  // Max-TTL Ceiling Clamping (confirmed on fresh cache reload when fresh peak is strictly below authoritative/peer ceiling)
+  // Max-TTL Ceiling Clamping (confirmed on fresh cache reload on the same Anycast PoP when fresh peak is strictly below authoritative/peer ceiling)
+  const didSwitchAnycastPop = Boolean(
+    previousObs?.nsid && rawObs.nsid && previousObs.nsid !== rawObs.nsid
+  );
   let clampedMaxTtl = previousObs?.clampedMaxTtl;
   if (
     didRefreshCache &&
+    !didSwitchAnycastPop &&
     rawObs.observedTtl !== null &&
     previousObs?.observedTtl !== null &&
     previousObs?.observedTtl !== undefined &&
@@ -834,12 +850,27 @@ export function buildWatchTickSample(params: {
         ? Math.max(peerMaxFromOthers ?? 0, prevSessionMax)
         : null;
 
-    return classifyResolverTtlBehavior({
+    const classified = classifyResolverTtlBehavior({
       rawObs,
       previousObs: prevObs,
       peerAuthoritativeTtl,
       peerMaxObservedTtl,
     });
+    const prevPops = prevObs?.observedNsidPops ?? (prevObs?.nsid ? [prevObs.nsid] : []);
+    const observedNsidPops = classified.nsid
+      ? prevPops.includes(classified.nsid)
+        ? prevPops
+        : [...prevPops, classified.nsid]
+      : prevPops;
+    const previousNsid =
+      prevObs?.nsid && classified.nsid && prevObs.nsid !== classified.nsid
+        ? prevObs.nsid
+        : undefined;
+    return {
+      ...classified,
+      ...(observedNsidPops.length > 0 ? { observedNsidPops } : {}),
+      ...(previousNsid ? { previousNsid } : {}),
+    };
   });
 
   let shortestPositiveTtlSec: number | null = null;

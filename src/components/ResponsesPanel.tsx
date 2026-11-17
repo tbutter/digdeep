@@ -637,6 +637,28 @@ export function ResponsesPanel({
                           EDE {firstEde.infoCode}
                         </span>
                       )}
+                      {q.packet.edns?.nsid && q.packet.edns.nsid.byteLength > 0 && (
+                        <span
+                          data-testid="wire-row-nsid-badge"
+                          className="rounded bg-slate-200/80 dark:bg-slate-800/90 text-slate-700 dark:text-slate-300 border border-slate-300/60 dark:border-slate-700 px-1.5 py-0.2 font-mono text-[9.5px] shrink-0"
+                          title={`RFC 5001 EDNS0 NSID: ${q.packet.edns.nsid.display}`}
+                        >
+                          PoP {q.packet.edns.nsid.display}
+                        </span>
+                      )}
+                      {q.packet.edns?.padding && (
+                        <span
+                          data-testid="wire-row-padding-badge"
+                          className="rounded bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25 px-1.5 py-0.2 font-mono text-[9.5px] shrink-0"
+                          title={`RFC 7830 / RFC 8467 EDNS0 Option 12 Padding (${q.packet.edns.padding.byteLength}B)`}
+                        >
+                          {q.packet.edns.padding.alignedTo468
+                            ? 'PAD 468B'
+                            : q.packet.edns.padding.alignedTo128
+                              ? 'PAD 128B'
+                              : `PAD ${q.packet.edns.padding.byteLength}B`}
+                        </span>
+                      )}
                     </div>
                     <div className="inline-flex items-center gap-1 shrink-0">
                       <span className={`font-mono text-[11px] font-semibold ${rcodeColor}`}>
